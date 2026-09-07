@@ -20,5 +20,21 @@ services:
       retries: 10
     restart: unless-stopped
 
+  app:
+    build: .
+    container_name: memo-app
+    environment:
+      MEMO_ENVIRONMENT: production
+      # Inside the compose network the database host is the service name.
+      MEMO_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-memo}:${POSTGRES_PASSWORD:-memo}@postgres:5432/${POSTGRES_DB:-memo}
+      # Set this to enable admin auth; leave empty to run fail-open (dev only).
+      MEMO_ADMIN_PASSWORD: ${MEMO_ADMIN_PASSWORD:-}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:

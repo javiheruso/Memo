@@ -60,6 +60,7 @@ from app.security import (
     SESSION_COOKIE_NAME,
     SESSION_TTL_SECONDS,
     admin_auth_enabled,
+    cookie_secure,
     issue_session_cookie,
     require_admin_ui,
     verify_password,
@@ -293,6 +294,7 @@ async def login(request: Request) -> RedirectResponse:
         max_age=SESSION_TTL_SECONDS,
         httponly=True,
         samesite="lax",
+        secure=cookie_secure(),
         path="/",
     )
     return response

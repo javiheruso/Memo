@@ -9,7 +9,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.core.config import settings
-from app.security import SESSION_COOKIE_NAME
+from app.security import SESSION_COOKIE_NAME, cookie_secure
 
 API = "/api/v1/admin"
 UI = "/admin"
@@ -221,3 +221,29 @@ async def test_chat_stays_public_when_protected(
 ) -> None:
     response = await app_client.post("/api/v1/chat", json={"message": "Hola"})
     assert response.status_code == 200
+
+
+# --------------------------------------------------------------------------
+# Secure-cookie flag across environments
+# --------------------------------------------------------------------------
+
+
+def test_cookie_secure_is_false_in_development(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "environment", "development")
+    assert cookie_secure() is False
+
+
+def test_cookie_secure_is_true_outside_development(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "environment", "production")
+    assert cookie_secure() is True
+
+
+async def test_production_login_sets_secure_cookie(
+    app_client: AsyncClient, protected, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "environment", "production")
+    response = await _login(app_client, PASSWORD)
+    assert response.status_code == 303
+    assert SESSION_COOKIE_NAME in response.cookies
+    # httpx represents a Secure cookie with a leading "__Secure-" prefix marker.
+    assert "__Secure-" in response.headers["set-cookie"] or "Secure" in response.headers["set-cookie"]

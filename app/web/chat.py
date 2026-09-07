@@ -36,6 +36,7 @@ from app.api.deps import (
     get_db,
 )
 from app.repositories.conversation import ConversationRepository
+from app.security import cookie_secure
 from app.services.conversation import ChatResult, ConversationService
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ def _set_conversation_cookie(
         str(conversation_id),
         httponly=True,
         samesite="lax",
+        secure=cookie_secure(),
         path=_COOKIE_PATH,
     )
 

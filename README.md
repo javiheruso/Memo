@@ -674,3 +674,52 @@ Deferred by design (dossier phases) and not required for the MVP:
 - Dedicated tablet/touch client (the `/chat` page is the current text surface).
 - Client-side audio capture/playback and streaming.
 - Media image serving/upload (currently metadata-only).
+
+## Deploying
+
+### Docker Compose (whole stack)
+
+`compose.yaml` builds the app (`Dockerfile`) and runs it next to the
+`pgvector/pgvector:pg16` database:
+
+```bash
+docker compose up -d --build
+docker compose run --rm app alembic upgrade head   # apply migrations once
+```
+
+Then open <http://localhost:8000> (chat at `/chat`, admin at `/admin`, docs at
+`/docs`).
+
+Set the admin password before exposing the service, otherwise the admin
+surface stays unauthenticated (the app logs a startup warning in
+non-development environments):
+
+```bash
+MEMO_ADMIN_PASSWORD='a-strong-password' docker compose up -d
+```
+
+The database host inside the compose network is the service name (`postgres`);
+`compose.yaml` sets `MEMO_DATABASE_URL` accordingly. Data persists in the named
+`postgres_data` volume.
+
+### Minimal deployment checklist
+
+1. Set `MEMO_ENVIRONMENT=production` and a strong `MEMO_ADMIN_PASSWORD`.
+2. Put the app behind TLS (HTTPS); session cookies are `Secure`-flagged in
+   non-development environments.
+3. Configure the optional providers you want to use — `MEMO_LLM_*`,
+   `MEMO_EMBEDDER_*`, `MEMO_STT_*`, `MEMO_TTS_*` (OpenAI-compatible). Without
+   them the deterministic defaults keep text mode fully functional.
+4. Run `alembic upgrade head` against the target database.
+5. Keep `/chat` public (the companion) and `/admin` protected by the shared
+   password; do not expose the admin password in plaintext or commit it.
+
+### Production safety notes
+
+- Admin auth is **fail-open only when `MEMO_ADMIN_PASSWORD` is unset**; a
+  production deployment must set it.
+- The admin credential is a single shared password with no per-user audit,
+  no CSRF tokens, and no login rate limiting — adequate for a local/single
+  operator, not a multi-user public service.
+- Secret values (`MEMO_ADMIN_PASSWORD`, API keys) belong in the environment or
+  a secrets manager, never in the repository.

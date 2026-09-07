@@ -43,6 +43,16 @@ def admin_auth_enabled() -> bool:
     return bool(settings.admin_password)
 
 
+def cookie_secure() -> bool:
+    """True when session cookies should carry the ``Secure`` flag.
+
+    Local development runs over plain HTTP, so ``Secure`` is omitted there;
+    any non-development environment is assumed to sit behind TLS and gets the
+    flag.
+    """
+    return settings.environment != "development"
+
+
 def verify_password(submitted: str) -> bool:
     """Constant-time check of a submitted password against the configured one."""
     return _constant_time_eq(submitted, settings.admin_password)
@@ -119,6 +129,7 @@ __all__ = [
     "SESSION_TTL_SECONDS",
     "LoginRequired",
     "admin_auth_enabled",
+    "cookie_secure",
     "issue_session_cookie",
     "require_admin_api",
     "require_admin_ui",
