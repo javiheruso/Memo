@@ -702,6 +702,41 @@ The database host inside the compose network is the service name (`postgres`);
 `compose.yaml` sets `MEMO_DATABASE_URL` accordingly. Data persists in the named
 `postgres_data` volume.
 
+### Railway
+
+1. Create a Railway project and add a **PostgreSQL + pgvector** database from
+   the template at <https://railway.com/deploy/pgvector> (image
+   `pgvector/pgvector:pg18`).
+2. Add a **GitHub repo** service pointing at this repository. Railway detects
+   the `Dockerfile` automatically and serves the app on the injected `$PORT`.
+   Set the healthcheck path to `/api/v1/health`.
+3. On the app service, set these variables (Railway resolves `${{...}}`
+   references):
+
+   | Variable | Value |
+   |----------|-------|
+   | `MEMO_ENVIRONMENT` | `production` |
+   | `MEMO_ADMIN_PASSWORD` | a strong password |
+   | `MEMO_DATABASE_URL` | `${{pgvector.DATABASE_URL_PRIVATE}}` |
+
+   The bare `postgresql://` URL is normalized to `postgresql+psycopg://` at
+   startup automatically.
+4. Enable the extension once in the database (Railway CLI or the database
+   service's shell):
+
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS vector;
+   ```
+
+5. Apply migrations once (Railway CLI):
+
+   ```bash
+   railway run alembic upgrade head
+   ```
+
+6. Optionally add the provider variables (`MEMO_LLM_*`, `MEMO_EMBEDDER_*`,
+   `MEMO_STT_*`, `MEMO_TTS_*`); text mode works without them.
+
 ### Minimal deployment checklist
 
 1. Set `MEMO_ENVIRONMENT=production` and a strong `MEMO_ADMIN_PASSWORD`.

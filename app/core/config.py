@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,6 +45,22 @@ class Settings(BaseSettings):
     tts_voice: str = "alloy"
     tts_timeout_seconds: float = 30.0
     cors_origins: list[str] = ["http://localhost:3000"]
+
+    @field_validator("database_url", "test_database_url")
+    @classmethod
+    def _ensure_psycopg_driver(cls, value: str | None) -> str | None:
+        """Rewrite a bare ``postgres(ql)://`` URL to use the psycopg3 driver.
+
+        Managed Postgres providers (Railway, Supabase, Neon, Render) hand out
+        ``postgresql://`` URLs that SQLAlchemy maps to psycopg2 by default; this
+        project only installs psycopg3, so the URL must carry the explicit
+        ``+psycopg`` driver suffix.
+        """
+        if value and value.startswith("postgresql://"):
+            return "postgresql+psycopg://" + value[len("postgresql://") :]
+        if value and value.startswith("postgres://"):
+            return "postgresql+psycopg://" + value[len("postgres://") :]
+        return value
 
 
 @lru_cache
