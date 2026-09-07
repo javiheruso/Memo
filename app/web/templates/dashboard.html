@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Dashboard{% endblock %}
+{% block content %}
+<h1>Memo Admin</h1>
+<p class="muted">Operate the review queues and core data without calling the API by hand.</p>
+
+<table>
+  <thead>
+    <tr><th>Area</th><th>Count</th><th></th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Claim groups needing review</td>
+      <td>{{ counts.claim_groups_needs_review }}</td>
+      <td><a href="/admin/claim-groups?needs_review=true">Review</a></td>
+    </tr>
+    <tr>
+      <td>Claim groups active</td>
+      <td>{{ counts.claim_groups_active }}</td>
+      <td><a href="/admin/claim-groups">All</a></td>
+    </tr>
+    <tr>
+      <td>Knowledge gaps open</td>
+      <td>{{ counts.gaps_open }}</td>
+      <td><a href="/admin/knowledge-gaps">Review</a></td>
+    </tr>
+    <tr>
+      <td>Persons</td>
+      <td>{{ counts.persons }}</td>
+      <td><a href="/admin/persons">Manage</a></td>
+    </tr>
+    <tr>
+      <td>Sources</td>
+      <td>{{ counts.sources }}</td>
+      <td><a href="/admin/sources">Manage</a></td>
+    </tr>
+    <tr>
+      <td>Facts</td>
+      <td>{{ counts.facts }}</td>
+      <td><a href="/admin/facts">Manage</a></td>
+    </tr>
+    <tr>
+      <td>Memories</td>
+      <td>{{ counts.memories }}</td>
+      <td><a href="/admin/memories">Manage</a></td>
+    </tr>
+  </tbody>
+</table>
+{% endblock %}

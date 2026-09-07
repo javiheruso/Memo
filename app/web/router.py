@@ -1,0 +1,822 @@
+"""Server-rendered admin UI.
+
+Minimal HTML surface over the existing admin services and repositories so a
+human can operate the review queues (claim groups, knowledge gaps), the
+materialization actions, the embeddings backfill, and the core entity CRUD
+without hand-crafting API calls.
+
+Every write path builds the same pydantic schemas and calls the same
+repositories/services as the JSON admin API (``app/api/v1/endpoints/admin.py``),
+so the existing guardrails (trust-model defaults, materialization guards,
+status transitions, provenance) are preserved unchanged. This module adds no
+auth and no separate frontend toolchain: pages are rendered by FastAPI/Jinja2
+and forms post back to this same router.
+"""
+
+import os
+import uuid
+from typing import Annotated
+from urllib.parse import urlencode
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
+from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import EmbedderDep, get_db
+from app.domain.enums import (
+    ClaimGroupStatus,
+    FactStatus,
+    KnowledgeGapStatus,
+    MediaType,
+    MemoryStatus,
+    SensitivityLevel,
+    SourceType,
+)
+from app.embeddings.memory_text import memory_search_text
+from app.models import Fact, Memory, Person, Source
+from app.repositories.claim_group import ClaimGroupRepository
+from app.repositories.fact import FactRepository
+from app.repositories.knowledge_gap import KnowledgeGapRepository
+from app.repositories.media import MediaRepository
+from app.repositories.memory import MemoryRepository, UnsupportedVectorSearch
+from app.repositories.person import PersonRepository
+from app.repositories.source import SourceRepository
+from app.schemas.claim import ClaimGroupResolve
+from app.schemas.fact import FactCreate
+from app.schemas.knowledge_gap import KnowledgeGapStatusUpdate
+from app.schemas.materialization import (
+    FactMaterializeRequest,
+    MemoryMaterializeRequest,
+)
+from app.schemas.media import MediaCreate
+from app.schemas.memory import MemoryCreate
+from app.schemas.person import PersonCreate
+from app.schemas.source import SourceCreate
+from app.security import (
+    SESSION_COOKIE_NAME,
+    SESSION_TTL_SECONDS,
+    admin_auth_enabled,
+    issue_session_cookie,
+    require_admin_ui,
+    verify_password,
+)
+from app.services.claim_group_merge import (
+    ClaimGroupMergeError,
+    ClaimGroupMergeService,
+)
+from app.services.materialization import MaterializationError, MaterializationService
+from app.services.memory_embeddings import MemoryEmbeddingBackfillService
+
+router = APIRouter(
+    prefix="/admin",
+    tags=["admin-ui"],
+    include_in_schema=False,
+    dependencies=[Depends(require_admin_ui)],
+)
+
+auth_router = APIRouter(
+    prefix="/admin",
+    tags=["admin-auth"],
+    include_in_schema=False,
+)
+
+templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
+
+DbSession = Annotated[AsyncSession, Depends(get_db)]
+ClaimGroupStatusQuery = Annotated[ClaimGroupStatus | None, Query()]
+NeedsReviewQuery = Annotated[bool | None, Query()]
+KnowledgeGapStatusQuery = Annotated[KnowledgeGapStatus | None, Query()]
+
+
+def _ctx(request: Request, **extra) -> dict:
+    """Template context with the flash-message query params."""
+    ctx: dict = {
+        "message": request.query_params.get("message"),
+        "error": request.query_params.get("error"),
+        "auth_enabled": admin_auth_enabled(),
+    }
+    ctx.update(extra)
+    return ctx
+
+
+def _back(path: str, *, message: str | None = None, error: str | None = None) -> RedirectResponse:
+    query: dict[str, str] = {}
+    if message:
+        query["message"] = message
+    if error:
+        query["error"] = error
+    url = f"{path}?{urlencode(query)}" if query else path
+    return RedirectResponse(url=url, status_code=303)
+
+
+def _error_text(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        first = exc.errors()[0]
+        loc = ".".join(str(part) for part in first.get("loc", ()))
+        return f"{loc}: {first.get('msg')}" if loc else str(first.get("msg", "invalid input"))
+    if isinstance(exc, SQLAlchemyError):
+        detail = getattr(exc, "orig", exc)
+        return f"Database error: {str(detail)[:300]}"
+    return str(exc)
+
+
+def _text(form, key: str) -> str | None:
+    raw = form.get(key)
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    return value or None
+
+
+def _checked(form, key: str) -> bool:
+    return key in form
+
+
+def _person_links(form, prefix: str = "person") -> list[dict]:
+    person_id = _text(form, f"{prefix}_id")
+    if person_id is None:
+        return []
+    return [{"person_id": person_id, "role": _text(form, f"{prefix}_role")}]
+
+
+def _person_create(form) -> PersonCreate:
+    return PersonCreate(
+        first_name=_text(form, "first_name"),
+        last_name=_text(form, "last_name"),
+        birth_date=_text(form, "birth_date"),
+        is_deceased=_checked(form, "is_deceased"),
+        description=_text(form, "description"),
+        aliases=[],
+    )
+
+
+def _source_create(form) -> SourceCreate:
+    return SourceCreate(
+        source_type=_text(form, "source_type"),
+        person_id=_text(form, "person_id"),
+        description=_text(form, "description"),
+        external_reference=_text(form, "external_reference"),
+    )
+
+
+def _fact_create(form) -> FactCreate:
+    return FactCreate(
+        subject_person_id=_text(form, "subject_person_id"),
+        fact_type=_text(form, "fact_type"),
+        value_text=_text(form, "value_text"),
+        value_date=_text(form, "value_date"),
+        place_text=_text(form, "place_text"),
+        status=_text(form, "status") or FactStatus.pending.value,
+        source_id=_text(form, "source_id"),
+        notes=_text(form, "notes"),
+    )
+
+
+def _memory_create(form) -> MemoryCreate:
+    return MemoryCreate(
+        title=_text(form, "title"),
+        narrative=_text(form, "narrative"),
+        approx_period_text=_text(form, "approx_period_text"),
+        place_text=_text(form, "place_text"),
+        memory_status=_text(form, "memory_status") or MemoryStatus.candidate.value,
+        sensitivity_level=_text(form, "sensitivity_level") or SensitivityLevel.low.value,
+        source_id=_text(form, "source_id"),
+        people=_person_links(form),
+    )
+
+
+def _media_create(form) -> MediaCreate:
+    return MediaCreate(
+        media_type=_text(form, "media_type"),
+        storage_path=_text(form, "storage_path"),
+        title=_text(form, "title"),
+        description=_text(form, "description"),
+        approx_date=_text(form, "approx_date"),
+        place_text=_text(form, "place_text"),
+        source_id=_text(form, "source_id"),
+        people=[],
+    )
+
+
+def _fact_materialize(form) -> FactMaterializeRequest:
+    return FactMaterializeRequest(
+        subject_person_id=_text(form, "subject_person_id"),
+        fact_type=_text(form, "fact_type"),
+        value_text=_text(form, "value_text"),
+        value_date=_text(form, "value_date"),
+        place_text=_text(form, "place_text"),
+        status=_text(form, "status") or FactStatus.pending.value,
+        source_id=_text(form, "source_id"),
+        notes=_text(form, "notes"),
+    )
+
+
+def _memory_materialize(form) -> MemoryMaterializeRequest:
+    return MemoryMaterializeRequest(
+        title=_text(form, "title"),
+        narrative=_text(form, "narrative"),
+        approx_period_text=_text(form, "approx_period_text"),
+        place_text=_text(form, "place_text"),
+        memory_status=_text(form, "memory_status") or MemoryStatus.candidate.value,
+        sensitivity_level=_text(form, "sensitivity_level") or SensitivityLevel.low.value,
+        source_id=_text(form, "source_id"),
+        people=_person_links(form),
+    )
+
+
+def _claim_group_resolve(form) -> ClaimGroupResolve:
+    return ClaimGroupResolve(
+        status=_text(form, "status"),
+        resolution_note=_text(form, "resolution_note"),
+    )
+
+
+def _gap_status_update(form) -> KnowledgeGapStatusUpdate:
+    return KnowledgeGapStatusUpdate(
+        status=_text(form, "status"),
+        resolved_person_id=_text(form, "resolved_person_id"),
+        resolved_fact_id=_text(form, "resolved_fact_id"),
+    )
+
+
+async def _count(db: AsyncSession, model, *conditions) -> int:
+    stmt = select(func.count()).select_from(model)
+    if conditions:
+        stmt = stmt.where(*conditions)
+    return (await db.execute(stmt)).scalar_one()
+
+
+async def _person_names(db: AsyncSession) -> dict[uuid.UUID, str]:
+    persons = await PersonRepository(db).list(limit=500)
+    return {person.id: person.display_name for person in persons}
+
+
+async def _source_labels(db: AsyncSession) -> dict[uuid.UUID, str]:
+    sources = await SourceRepository(db).list(limit=500)
+    return {
+        source.id: source.description or source.source_type.value for source in sources
+    }
+
+
+# --------------------------------------------------------------------------
+# Browser login / logout (auth is a no-op when MEMO_ADMIN_PASSWORD is unset)
+# --------------------------------------------------------------------------
+
+
+@auth_router.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request) -> HTMLResponse:
+    if not admin_auth_enabled():
+        return RedirectResponse(url="/admin", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"error": request.query_params.get("error")},
+    )
+
+
+@auth_router.post("/login")
+async def login(request: Request) -> RedirectResponse:
+    if not admin_auth_enabled():
+        return RedirectResponse(url="/admin", status_code=303)
+    form = await request.form()
+    submitted = form.get("password")
+    if submitted is None or not verify_password(str(submitted)):
+        return RedirectResponse(url="/admin/login?error=Invalid%20password", status_code=303)
+    response = RedirectResponse(url="/admin", status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        issue_session_cookie(),
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+@auth_router.post("/logout")
+async def logout() -> RedirectResponse:
+    response = RedirectResponse(url="/admin/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return response
+
+
+# --------------------------------------------------------------------------
+# Dashboard / nav
+# --------------------------------------------------------------------------
+
+
+@router.get("", response_class=HTMLResponse)
+async def dashboard(request: Request, db: DbSession) -> HTMLResponse:
+    claim_groups = await ClaimGroupRepository(db).list_recent(limit=200)
+    gaps = await KnowledgeGapRepository(db).list_recent(limit=200)
+    open_gap_statuses = {
+        KnowledgeGapStatus.observed,
+        KnowledgeGapStatus.recurrent,
+        KnowledgeGapStatus.family_review,
+    }
+    counts = {
+        "claim_groups_needs_review": sum(1 for g in claim_groups if g.needs_review),
+        "claim_groups_active": sum(
+            1 for g in claim_groups if g.status == ClaimGroupStatus.active
+        ),
+        "gaps_open": sum(1 for g in gaps if g.status in open_gap_statuses),
+        "persons": await _count(db, Person),
+        "sources": await _count(db, Source),
+        "facts": await _count(db, Fact),
+        "memories": await _count(db, Memory),
+    }
+    return templates.TemplateResponse(request, "dashboard.html", _ctx(request, counts=counts))
+
+
+# --------------------------------------------------------------------------
+# Claim-group review queue
+# --------------------------------------------------------------------------
+
+
+@router.get("/claim-groups", response_class=HTMLResponse)
+async def claim_groups_page(
+    request: Request,
+    db: DbSession,
+    status: ClaimGroupStatusQuery = None,
+    needs_review: NeedsReviewQuery = None,
+) -> HTMLResponse:
+    groups = await ClaimGroupRepository(db).list_recent(
+        limit=200, needs_review=needs_review, status=status
+    )
+    return templates.TemplateResponse(
+        request,
+        "claim_groups.html",
+        _ctx(
+            request,
+            groups=groups,
+            filter_status=status,
+            filter_needs_review=needs_review,
+            status_options=ClaimGroupStatus,
+        ),
+    )
+
+
+@router.get("/claim-groups/{group_id}", response_class=HTMLResponse)
+async def claim_group_detail(request: Request, db: DbSession, group_id: uuid.UUID) -> HTMLResponse:
+    group = await ClaimGroupRepository(db).get_with_members(group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="Claim group not found")
+    persons = await PersonRepository(db).list(limit=500)
+    sources = await SourceRepository(db).list(limit=500)
+    claims = group.claims
+    if claims:
+        earliest = min(claims, key=lambda claim: (claim.first_seen_at, claim.created_at, claim.id))
+        default_text = earliest.original_text
+    else:
+        default_text = group.canonical_text
+    mergeable = group.status is ClaimGroupStatus.active
+    merge_candidates = (
+        await ClaimGroupMergeService(db).suggest(group.id) if mergeable else []
+    )
+    return templates.TemplateResponse(
+        request,
+        "claim_group_detail.html",
+        _ctx(
+            request,
+            group=group,
+            persons=persons,
+            sources=sources,
+            default_text=default_text,
+            mergeable=mergeable,
+            merge_candidates=merge_candidates,
+            status_options=ClaimGroupStatus,
+            fact_status_options=FactStatus,
+            memory_status_options=MemoryStatus,
+            sensitivity_options=SensitivityLevel,
+        ),
+    )
+
+
+@router.post("/claim-groups/{group_id}/status")
+async def claim_group_set_status(
+    request: Request, db: DbSession, group_id: uuid.UUID
+) -> RedirectResponse:
+    detail_url = f"/admin/claim-groups/{group_id}"
+    form = await request.form()
+    try:
+        payload = _claim_group_resolve(form)
+    except ValidationError as exc:
+        return _back(detail_url, error=_error_text(exc))
+    updated = await ClaimGroupRepository(db).set_status(
+        group_id, status=payload.status, resolution_note=payload.resolution_note
+    )
+    if updated is None:
+        return _back(detail_url, error="Claim group not found")
+    return _back(detail_url, message=f"Claim group marked as {payload.status.value}")
+
+
+@router.post("/claim-groups/{group_id}/merge")
+async def claim_group_merge(
+    request: Request, db: DbSession, group_id: uuid.UUID
+) -> RedirectResponse:
+    detail_url = f"/admin/claim-groups/{group_id}"
+    form = await request.form()
+    raw_target = _text(form, "target_group_id")
+    if raw_target is None:
+        return _back(detail_url, error="Select a surviving target group")
+    try:
+        target_group_id = uuid.UUID(raw_target)
+    except ValueError:
+        return _back(detail_url, error="Invalid target group id")
+    try:
+        survivor = await ClaimGroupMergeService(db).merge(
+            group_id,
+            target_group_id,
+            confirm_opposite_polarity=_checked(form, "confirm_opposite_polarity"),
+        )
+    except (ClaimGroupMergeError, SQLAlchemyError) as exc:
+        return _back(detail_url, error=_error_text(exc))
+    return _back(
+        f"/admin/claim-groups/{survivor.id}",
+        message=f"Merged claim group {group_id} into {survivor.id}",
+    )
+
+
+@router.post("/claim-groups/{group_id}/materialize-fact")
+async def claim_group_materialize_fact(
+    request: Request, db: DbSession, group_id: uuid.UUID
+) -> RedirectResponse:
+    detail_url = f"/admin/claim-groups/{group_id}"
+    form = await request.form()
+    try:
+        payload = _fact_materialize(form)
+        fact = await MaterializationService(db).materialize_claim_group_fact(
+            group_id, payload
+        )
+    except (ValidationError, SQLAlchemyError, MaterializationError) as exc:
+        return _back(detail_url, error=_error_text(exc))
+    return _back(detail_url, message=f"Materialized as fact {fact.id}")
+
+
+@router.post("/claim-groups/{group_id}/materialize-memory")
+async def claim_group_materialize_memory(
+    request: Request,
+    db: DbSession,
+    group_id: uuid.UUID,
+    embedder: EmbedderDep,
+) -> RedirectResponse:
+    detail_url = f"/admin/claim-groups/{group_id}"
+    form = await request.form()
+    try:
+        payload = _memory_materialize(form)
+        memory = await MaterializationService(
+            db, embedder=embedder
+        ).materialize_claim_group_memory(group_id, payload)
+    except (ValidationError, SQLAlchemyError, MaterializationError) as exc:
+        return _back(detail_url, error=_error_text(exc))
+    return _back(detail_url, message=f"Materialized as memory {memory.id}")
+
+
+# --------------------------------------------------------------------------
+# Knowledge-gap review queue
+# --------------------------------------------------------------------------
+
+
+@router.get("/knowledge-gaps", response_class=HTMLResponse)
+async def knowledge_gaps_page(
+    request: Request,
+    db: DbSession,
+    status: KnowledgeGapStatusQuery = None,
+) -> HTMLResponse:
+    gaps = await KnowledgeGapRepository(db).list_recent(limit=200, status=status)
+    return templates.TemplateResponse(
+        request,
+        "knowledge_gaps.html",
+        _ctx(request, gaps=gaps, filter_status=status, status_options=KnowledgeGapStatus),
+    )
+
+
+@router.get("/knowledge-gaps/{gap_id}", response_class=HTMLResponse)
+async def knowledge_gap_detail(request: Request, db: DbSession, gap_id: uuid.UUID) -> HTMLResponse:
+    gap = await KnowledgeGapRepository(db).get(gap_id)
+    if gap is None:
+        raise HTTPException(status_code=404, detail="Knowledge gap not found")
+    persons = await PersonRepository(db).list(limit=500)
+    facts = await FactRepository(db).list(limit=500)
+    sources = await SourceRepository(db).list(limit=500)
+    resolved_person = (
+        await PersonRepository(db).get(gap.resolved_person_id)
+        if gap.resolved_person_id is not None
+        else None
+    )
+    resolved_fact = (
+        await FactRepository(db).get(gap.resolved_fact_id)
+        if gap.resolved_fact_id is not None
+        else None
+    )
+    return templates.TemplateResponse(
+        request,
+        "knowledge_gap_detail.html",
+        _ctx(
+            request,
+            gap=gap,
+            persons=persons,
+            facts=facts,
+            sources=sources,
+            resolved_person=resolved_person,
+            resolved_fact=resolved_fact,
+            status_options=KnowledgeGapStatus,
+            fact_status_options=FactStatus,
+            memory_status_options=MemoryStatus,
+            sensitivity_options=SensitivityLevel,
+        ),
+    )
+
+
+@router.post("/knowledge-gaps/{gap_id}/status")
+async def knowledge_gap_set_status(
+    request: Request, db: DbSession, gap_id: uuid.UUID
+) -> RedirectResponse:
+    detail_url = f"/admin/knowledge-gaps/{gap_id}"
+    form = await request.form()
+    try:
+        payload = _gap_status_update(form)
+    except ValidationError as exc:
+        return _back(detail_url, error=_error_text(exc))
+    updated = await KnowledgeGapRepository(db).set_status(
+        gap_id,
+        status=payload.status,
+        resolved_person_id=payload.resolved_person_id,
+        resolved_fact_id=payload.resolved_fact_id,
+    )
+    if updated is None:
+        return _back(detail_url, error="Knowledge gap not found")
+    return _back(detail_url, message=f"Knowledge gap marked as {payload.status.value}")
+
+
+@router.post("/knowledge-gaps/{gap_id}/materialize-fact")
+async def knowledge_gap_materialize_fact(
+    request: Request, db: DbSession, gap_id: uuid.UUID
+) -> RedirectResponse:
+    detail_url = f"/admin/knowledge-gaps/{gap_id}"
+    form = await request.form()
+    try:
+        payload = _fact_materialize(form)
+        fact = await MaterializationService(db).materialize_gap_fact(gap_id, payload)
+    except (ValidationError, SQLAlchemyError, MaterializationError) as exc:
+        return _back(detail_url, error=_error_text(exc))
+    return _back(detail_url, message=f"Materialized as fact {fact.id}")
+
+
+@router.post("/knowledge-gaps/{gap_id}/materialize-memory")
+async def knowledge_gap_materialize_memory(
+    request: Request,
+    db: DbSession,
+    gap_id: uuid.UUID,
+    embedder: EmbedderDep,
+) -> RedirectResponse:
+    detail_url = f"/admin/knowledge-gaps/{gap_id}"
+    form = await request.form()
+    try:
+        payload = _memory_materialize(form)
+        memory = await MaterializationService(
+            db, embedder=embedder
+        ).materialize_gap_memory(gap_id, payload)
+    except (ValidationError, SQLAlchemyError, MaterializationError) as exc:
+        return _back(detail_url, error=_error_text(exc))
+    return _back(detail_url, message=f"Materialized as memory {memory.id}")
+
+
+# --------------------------------------------------------------------------
+# Core entity create/list pages
+# --------------------------------------------------------------------------
+
+
+@router.get("/sources", response_class=HTMLResponse)
+async def sources_page(request: Request, db: DbSession) -> HTMLResponse:
+    sources = await SourceRepository(db).list(limit=200)
+    persons = await PersonRepository(db).list(limit=500)
+    person_names = {p.id: p.display_name for p in persons}
+    return templates.TemplateResponse(
+        request,
+        "sources.html",
+        _ctx(
+            request,
+            sources=sources,
+            persons=persons,
+            person_names=person_names,
+            source_type_options=SourceType,
+        ),
+    )
+
+
+@router.post("/sources")
+async def sources_create(request: Request, db: DbSession) -> RedirectResponse:
+    form = await request.form()
+    try:
+        payload = _source_create(form)
+        source = await SourceRepository(db).create(payload)
+    except (ValidationError, SQLAlchemyError) as exc:
+        return _back("/admin/sources", error=_error_text(exc))
+    return _back("/admin/sources", message=f"Source {source.id} created")
+
+
+@router.get("/persons", response_class=HTMLResponse)
+async def persons_page(request: Request, db: DbSession) -> HTMLResponse:
+    persons = await PersonRepository(db).list(limit=200)
+    media = await MediaRepository(db).list(limit=200)
+    media_options = sorted(
+        (
+            {
+                "id": item.id,
+                "label": f"{item.media_type}: {item.title or item.storage_path}",
+            }
+            for item in media
+        ),
+        key=lambda option: option["label"].lower(),
+    )
+    media_labels = {option["id"]: option["label"] for option in media_options}
+    return templates.TemplateResponse(
+        request,
+        "persons.html",
+        _ctx(
+            request,
+            persons=persons,
+            media_options=media_options,
+            media_labels=media_labels,
+        ),
+    )
+
+
+@router.post("/persons")
+async def persons_create(request: Request, db: DbSession) -> RedirectResponse:
+    form = await request.form()
+    try:
+        payload = _person_create(form)
+        person = await PersonRepository(db).create(payload)
+    except (ValidationError, SQLAlchemyError) as exc:
+        return _back("/admin/persons", error=_error_text(exc))
+    return _back("/admin/persons", message=f"Person {person.display_name} created")
+
+
+@router.post("/persons/{person_id}/primary-media")
+async def persons_set_primary_media(
+    request: Request, db: DbSession, person_id: uuid.UUID
+) -> RedirectResponse:
+    """Set or clear a person's primary media from the persons page.
+
+    Reuses the same repository and media-existence check as the JSON admin
+    ``PATCH`` so both surfaces behave identically.
+    """
+    form = await request.form()
+    raw = _text(form, "media_id")
+    media_id = None
+    if raw is not None:
+        try:
+            media_id = uuid.UUID(raw)
+        except ValueError:
+            return _back("/admin/persons", error="Invalid media id")
+        if await MediaRepository(db).get(media_id) is None:
+            return _back("/admin/persons", error="Media not found")
+    person = await PersonRepository(db).set_primary_media(person_id, media_id)
+    if person is None:
+        return _back("/admin/persons", error="Person not found")
+    return _back(
+        "/admin/persons", message=f"Primary media updated for {person.display_name}"
+    )
+
+
+@router.get("/media", response_class=HTMLResponse)
+async def media_page(request: Request, db: DbSession) -> HTMLResponse:
+    media = await MediaRepository(db).list(limit=200)
+    persons = await PersonRepository(db).list(limit=500)
+    person_names = {p.id: p.display_name for p in persons}
+    sources = await SourceRepository(db).list(limit=500)
+    source_labels = {
+        source.id: source.description or source.source_type.value for source in sources
+    }
+    return templates.TemplateResponse(
+        request,
+        "media.html",
+        _ctx(
+            request,
+            media=media,
+            person_names=person_names,
+            source_labels=source_labels,
+            media_type_options=MediaType,
+        ),
+    )
+
+
+@router.post("/media")
+async def media_create(request: Request, db: DbSession) -> RedirectResponse:
+    form = await request.form()
+    try:
+        payload = _media_create(form)
+        media = await MediaRepository(db).create(payload)
+    except (ValidationError, SQLAlchemyError) as exc:
+        return _back("/admin/media", error=_error_text(exc))
+    return _back("/admin/media", message=f"Media {media.id} created")
+
+
+@router.get("/facts", response_class=HTMLResponse)
+async def facts_page(request: Request, db: DbSession) -> HTMLResponse:
+    facts = await FactRepository(db).list(limit=200)
+    return templates.TemplateResponse(
+        request,
+        "facts.html",
+        _ctx(
+            request,
+            facts=facts,
+            persons=await PersonRepository(db).list(limit=500),
+            sources=await SourceRepository(db).list(limit=500),
+            person_names=await _person_names(db),
+            source_labels=await _source_labels(db),
+            fact_status_options=FactStatus,
+        ),
+    )
+
+
+@router.post("/facts")
+async def facts_create(request: Request, db: DbSession) -> RedirectResponse:
+    form = await request.form()
+    try:
+        payload = _fact_create(form)
+        fact = await FactRepository(db).create(payload)
+    except (ValidationError, SQLAlchemyError) as exc:
+        return _back("/admin/facts", error=_error_text(exc))
+    return _back("/admin/facts", message=f"Fact {fact.id} created")
+
+
+@router.get("/memories", response_class=HTMLResponse)
+async def memories_page(request: Request, db: DbSession) -> HTMLResponse:
+    memories = await MemoryRepository(db).list(limit=200)
+    return templates.TemplateResponse(
+        request,
+        "memories.html",
+        _ctx(
+            request,
+            memories=memories,
+            persons=await PersonRepository(db).list(limit=500),
+            sources=await SourceRepository(db).list(limit=500),
+            person_names=await _person_names(db),
+            source_labels=await _source_labels(db),
+            memory_status_options=MemoryStatus,
+            sensitivity_options=SensitivityLevel,
+        ),
+    )
+
+
+@router.post("/memories")
+async def memories_create(
+    request: Request, db: DbSession, embedder: EmbedderDep
+) -> RedirectResponse:
+    form = await request.form()
+    try:
+        payload = _memory_create(form)
+    except ValidationError as exc:
+        return _back("/admin/memories", error=_error_text(exc))
+    repo = MemoryRepository(db)
+    embedding = None
+    if repo.supports_vector_search:
+        embedding = await embedder.embed(
+            memory_search_text(title=payload.title, narrative=payload.narrative)
+        )
+    try:
+        memory = await repo.create(payload, embedding=embedding)
+    except (SQLAlchemyError, UnsupportedVectorSearch) as exc:
+        return _back("/admin/memories", error=_error_text(exc))
+    return _back("/admin/memories", message=f"Memory {memory.id} created")
+
+
+# --------------------------------------------------------------------------
+# Embedding backfill
+# --------------------------------------------------------------------------
+
+
+@router.get("/embeddings", response_class=HTMLResponse)
+async def embeddings_page(request: Request, db: DbSession) -> HTMLResponse:
+    repo = MemoryRepository(db)
+    pending = len(await repo.list_without_embeddings(limit=500))
+    total = await _count(db, Memory)
+    return templates.TemplateResponse(
+        request,
+        "embeddings.html",
+        _ctx(
+            request,
+            total_memories=total,
+            pending_embeddings=pending,
+            supports_vector_search=repo.supports_vector_search,
+        ),
+    )
+
+
+@router.post("/embeddings/backfill")
+async def embeddings_backfill(request: Request, db: DbSession, embedder: EmbedderDep) -> RedirectResponse:
+    try:
+        processed = await MemoryEmbeddingBackfillService(
+            embedder=embedder, memory_repo=MemoryRepository(db)
+        ).backfill()
+    except UnsupportedVectorSearch as exc:
+        return _back("/admin/embeddings", error=str(exc))
+    return _back("/admin/embeddings", message=f"Backfilled {processed} memories")

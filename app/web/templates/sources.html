@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Sources{% endblock %}
+{% block content %}
+<h1>Sources</h1>
+
+<div class="grid">
+  <div>
+    <h2>All sources</h2>
+    <table>
+      <thead><tr><th>Type</th><th>Person</th><th>Description</th><th>External reference</th></tr></thead>
+      <tbody>
+        {% for source in sources %}
+        <tr>
+          <td>{{ source.source_type.value }}</td>
+          <td>{{ person_names.get(source.person_id, "—") if source.person_id else "—" }}</td>
+          <td>{{ source.description or "—" }}</td>
+          <td class="mono">{{ source.external_reference or "—" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="muted">No sources yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div>
+    <fieldset>
+      <legend>Create source</legend>
+      <form method="post" action="/admin/sources">
+        <label>Type</label>
+        <select name="source_type" required>
+          {% for item in source_type_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Linked person (optional)</label>
+        <select name="person_id">
+          <option value="">— none —</option>
+          {% for person in persons %}
+          <option value="{{ person.id }}">{{ person.display_name }}</option>
+          {% endfor %}
+        </select>
+        <label>Description</label>
+        <input name="description">
+        <label>External reference</label>
+        <input name="external_reference">
+        <button type="submit">Create source</button>
+      </form>
+    </fieldset>
+  </div>
+</div>
+{% endblock %}

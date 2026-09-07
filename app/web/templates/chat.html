@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memo · Conversación</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #f5f3ef; color: #1f2933; }
+  .shell { max-width: 780px; margin: 0 auto; padding: 24px 18px 48px; }
+  header { margin-bottom: 16px; }
+  h1 { font-size: 32px; margin: 0; }
+  header p { margin: 4px 0 0; color: #52606d; font-size: 19px; }
+  .banner { padding: 14px 16px; border-radius: 12px; font-size: 20px; line-height: 1.4; margin-bottom: 18px; }
+  .banner.info { background: #fff7e0; border: 1px solid #e0c25a; color: #5b4a00; }
+  .banner.err { background: #fdecea; border: 1px solid #e8a39c; color: #8f1d16; }
+  .transcript { display: flex; flex-direction: column; gap: 18px; }
+  .empty { background: #fff; border-radius: 16px; text-align: center; color: #52606d; font-size: 22px; line-height: 1.5; padding: 44px 20px; }
+  .turn .who { font-size: 18px; font-weight: 700; margin: 0 0 4px 6px; }
+  .turn.user .who { color: #276749; }
+  .turn.memo .who { color: #24466e; }
+  .bubble { background: #fff; border: 1px solid #d7dde3; border-radius: 14px; padding: 16px 20px; font-size: 24px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: break-word; }
+  .turn.user .bubble { background: #d9f0e1; border-color: #b7ddc6; }
+  .send { background: #fff; border: 1px solid #d7dde3; border-radius: 16px; padding: 16px; margin-top: 26px; }
+  .send label { display: block; font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+  .send textarea { width: 100%; min-height: 96px; font: inherit; font-size: 22px; padding: 12px 14px; border-radius: 10px; border: 1px solid #9aa7b1; resize: vertical; }
+  .send button { width: 100%; margin-top: 12px; font-size: 22px; padding: 14px; font-weight: 700; color: #fff; background: #276749; border: none; border-radius: 10px; cursor: pointer; }
+  .send button:hover { background: #1f5a3f; }
+  .reset { margin-top: 14px; text-align: center; }
+  .reset button { background: none; border: none; padding: 8px 12px; color: #52606d; font-size: 18px; text-decoration: underline; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>Memo</h1>
+    <p>Tu acompañante con memoria.</p>
+  </header>
+
+  {% if notice == "ambiguous" %}
+  <div class="banner info">Hay varias personas con ese nombre. Dime cuál de ellas es.</div>
+  {% elif notice == "unknown_person" %}
+  <div class="banner info">Todavía no conozco a esa persona. Lo he anotado para poder averiguarlo.</div>
+  {% endif %}
+  {% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+
+  {% if messages %}
+  <div class="transcript">
+    {% for message in messages %}
+    <div class="turn {{ 'user' if message.speaker == 'user' else 'memo' }}">
+      <p class="who">{{ 'Tú' if message.speaker == 'user' else 'Memo' }}</p>
+      <div class="bubble">{{ message.text }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">Hola, soy Memo. Escríbeme lo que quieras contarme o pregúntame por alguna persona.</div>
+  {% endif %}
+
+  <form class="send" action="/chat" method="post">
+    <label for="message">Escribe tu mensaje</label>
+    <textarea id="message" name="message" autocomplete="off"></textarea>
+    <button type="submit">Enviar</button>
+  </form>
+
+  {% if messages %}
+  <div class="reset">
+    <form action="/chat/reset" method="post">
+      <button type="submit">Empezar otra conversación</button>
+    </form>
+  </div>
+  {% endif %}
+</div>
+</body>
+</html>

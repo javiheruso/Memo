@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.env
+.env.local
+
+dist/
+build/
+
+.coverage
+htmlcov/
+
+# Tool-generated metadata and input context (not project source)
+.atl/
+*.zip
+*.zip:Zone.Identifier

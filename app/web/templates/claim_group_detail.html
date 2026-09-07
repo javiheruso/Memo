@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Claim group{% endblock %}
+{% block content %}
+<p><a href="/admin/claim-groups">&larr; Claim groups</a></p>
+<h1>Claim group</h1>
+
+<table>
+  <tr><th>Canonical text</th><td>{{ group.canonical_text }}</td></tr>
+  <tr><th>Status</th><td>
+    {% if group.needs_review %}<span class="badge alert">needs review</span>{% endif %}
+    <span class="badge">{{ group.status.value }}</span>
+  </td></tr>
+  <tr><th>Mentions</th><td>{{ group.total_mentions }}</td></tr>
+  <tr><th>Distinct conversations</th><td>{{ group.distinct_conversations }}</td></tr>
+  <tr><th>Distinct days</th><td>{{ group.distinct_days }}</td></tr>
+  <tr><th>First seen</th><td class="mono">{{ group.first_seen_at }}</td></tr>
+  <tr><th>Last seen</th><td class="mono">{{ group.last_seen_at }}</td></tr>
+  <tr><th>Resolved at</th><td class="mono">{{ group.resolved_at or "—" }}</td></tr>
+  <tr><th>Resolution note</th><td>{{ group.resolution_note or "—" }}</td></tr>
+</table>
+
+<h2>Member claims</h2>
+<table>
+  <thead><tr><th>Original text</th><th>Message</th><th>Speaker</th><th>Status</th><th>First seen</th><th>Conversation</th></tr></thead>
+  <tbody>
+    {% for claim in group.claims %}
+    <tr>
+      <td>{{ claim.original_text }}</td>
+      <td>{{ claim.message.text if claim.message else "—" }}</td>
+      <td>{{ claim.message.speaker if claim.message else "—" }}</td>
+      <td>{{ claim.status.value }}</td>
+      <td class="mono">{{ claim.first_seen_at }}</td>
+      <td class="mono">{{ claim.conversation_id }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">No member claims.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Contradiction signals</h2>
+<table>
+  <thead><tr><th>Detector</th><th>Fact (value_text)</th><th>Fact place</th><th>Matched terms</th><th>Count</th><th>First detected</th></tr></thead>
+  <tbody>
+    {% for signal in group.contradictions %}
+    <tr>
+      <td>{{ signal.detector_name }}</td>
+      <td>{{ signal.fact.value_text or "—" }}</td>
+      <td>{{ signal.fact.place_text or "—" }}</td>
+      <td>{{ signal.matched_terms or "—" }}</td>
+      <td>{{ signal.detection_count }}</td>
+      <td class="mono">{{ signal.first_detected_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">No contradiction signals.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if mergeable %}
+<h2>Merge into another group</h2>
+<p class="muted">Fold this group into a surviving group when two groups only differ in wording. Member claims and contradiction evidence move to the survivor, then this group is removed and its wording keeps routing future claims to the survivor.</p>
+<form method="post" action="/admin/claim-groups/{{ group.id }}/merge">
+  <label>Surviving target group</label>
+  <select name="target_group_id" required>
+    <option value="">— select —</option>
+    {% for item in merge_candidates %}
+    <option value="{{ item.group_id }}">{{ item.canonical_text }} · {{ item.total_mentions }} mention(s){% if item.shared_terms > 0 %} · {{ item.shared_terms }} shared word(s){% endif %}{% if item.opposite_polarity %} · opposite polarity{% endif %}</option>
+    {% else %}
+    <option value="">No other active groups available</option>
+    {% endfor %}
+  </select>
+  <label><input type="checkbox" name="confirm_opposite_polarity" style="width:auto;"> Confirm opposite-polarity merge</label>
+  <p class="muted">Check this only when intentionally merging a negated wording into a non-negated survivor (or vice versa).</p>
+  <button type="submit">Merge into selected group</button>
+</form>
+{% elif group.status.value == "ignored" %}
+<p class="muted">Ignored groups cannot be merged.</p>
+{% else %}
+<p class="muted">Only active claim groups can be merged.</p>
+{% endif %}
+
+<div class="grid">
+  <div>
+    <fieldset>
+      <legend>Review status</legend>
+      <form method="post" action="/admin/claim-groups/{{ group.id }}/status">
+        <label>Status</label>
+        <select name="status">
+          {% for item in status_options %}
+            <option value="{{ item.value }}" {% if group.status.value == item.value %}selected{% endif %}>{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Resolution note</label>
+        <textarea name="resolution_note" rows="3" placeholder="Optional note for the audit trail">{{ group.resolution_note or "" }}</textarea>
+        <button type="submit">Apply</button>
+      </form>
+    </fieldset>
+  </div>
+
+  {% if group.status.value != "ignored" %}
+  <div>
+    <fieldset>
+      <legend>Materialize as fact</legend>
+      <form method="post" action="/admin/claim-groups/{{ group.id }}/materialize-fact">
+        <label>Subject person</label>
+        <select name="subject_person_id" required>
+          <option value="">— select —</option>
+          {% for person in persons %}
+          <option value="{{ person.id }}">{{ person.display_name }}</option>
+          {% endfor %}
+        </select>
+        <label>Fact type</label>
+        <input name="fact_type" value="residence" required>
+        <label>Value text <span class="muted">(pre-filled with the first-seen wording; falls back to the canonical text when empty)</span></label>
+        <input name="value_text" value="{{ default_text }}">
+        <label>Value date</label>
+        <input type="date" name="value_date">
+        <label>Place text</label>
+        <input name="place_text">
+        <label>Status</label>
+        <select name="status">
+          {% for item in fact_status_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Source</label>
+        <select name="source_id" required>
+          <option value="">— select —</option>
+          {% for source in sources %}
+          <option value="{{ source.id }}">{{ source.description or source.source_type.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Notes</label>
+        <textarea name="notes" rows="2"></textarea>
+        <button type="submit">Materialize as fact</button>
+      </form>
+    </fieldset>
+  </div>
+
+  <div>
+    <fieldset>
+      <legend>Materialize as memory</legend>
+      <form method="post" action="/admin/claim-groups/{{ group.id }}/materialize-memory">
+        <label>Title <span class="muted">(pre-filled with the first-seen wording; falls back to the canonical text when empty)</span></label>
+        <input name="title" value="{{ default_text }}">
+        <label>Narrative <span class="muted">(pre-filled with the first-seen wording; falls back to the canonical text when empty)</span></label>
+        <textarea name="narrative" rows="3">{{ default_text }}</textarea>
+        <label>Approximate period</label>
+        <input name="approx_period_text">
+        <label>Place text</label>
+        <input name="place_text">
+        <label>Memory status</label>
+        <select name="memory_status">
+          {% for item in memory_status_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Sensitivity</label>
+        <select name="sensitivity_level">
+          {% for item in sensitivity_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Source</label>
+        <select name="source_id" required>
+          <option value="">— select —</option>
+          {% for source in sources %}
+          <option value="{{ source.id }}">{{ source.description or source.source_type.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Linked person (optional)</label>
+        <select name="person_id">
+          <option value="">— none —</option>
+          {% for person in persons %}
+          <option value="{{ person.id }}">{{ person.display_name }}</option>
+          {% endfor %}
+        </select>
+        <label>Role</label>
+        <input name="person_role">
+        <button type="submit">Materialize as memory</button>
+      </form>
+    </fieldset>
+  </div>
+  {% else %}
+  <p class="muted">Ignored groups cannot be materialized.</p>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Knowledge gaps{% endblock %}
+{% block content %}
+<h1>Knowledge gaps</h1>
+
+<form method="get" action="/admin/knowledge-gaps" style="display: flex; gap: 12px; align-items: end; margin-bottom: 8px;">
+  <div>
+    <label>Status</label>
+    <select name="status" style="width: 180px;">
+      <option value="">any</option>
+      {% for item in status_options %}
+        <option value="{{ item.value }}" {% if filter_status and filter_status.value == item.value %}selected{% endif %}>{{ item.value }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Filter</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Reference</th>
+      <th>Occurrences</th>
+      <th>Sessions</th>
+      <th>Last seen</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for gap in gaps %}
+    <tr>
+      <td>{{ gap.gap_type }}</td>
+      <td>{{ gap.canonical_reference }}</td>
+      <td>{{ gap.occurrence_count }}</td>
+      <td>{{ gap.distinct_sessions }}</td>
+      <td class="mono">{{ gap.last_seen_at }}</td>
+      <td><span class="badge">{{ gap.status.value }}</span></td>
+      <td><a href="/admin/knowledge-gaps/{{ gap.id }}">Open</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="muted">No knowledge gaps match.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

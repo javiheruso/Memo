@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Facts{% endblock %}
+{% block content %}
+<h1>Facts</h1>
+
+<div class="grid">
+  <div>
+    <h2>All facts</h2>
+    <table>
+      <thead><tr><th>Subject</th><th>Type</th><th>Value</th><th>Place</th><th>Status</th><th>Source</th></tr></thead>
+      <tbody>
+        {% for fact in facts %}
+        <tr>
+          <td>{{ person_names.get(fact.subject_person_id, fact.subject_person_id) }}</td>
+          <td>{{ fact.fact_type }}</td>
+          <td>{{ fact.value_text or "—" }}</td>
+          <td>{{ fact.place_text or "—" }}</td>
+          <td><span class="badge">{{ fact.status.value }}</span></td>
+          <td class="mono">{{ source_labels.get(fact.source_id, fact.source_id) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">No facts yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div>
+    <fieldset>
+      <legend>Create fact</legend>
+      <form method="post" action="/admin/facts">
+        <label>Subject person</label>
+        <select name="subject_person_id" required>
+          <option value="">— select —</option>
+          {% for person in persons %}
+          <option value="{{ person.id }}">{{ person.display_name }}</option>
+          {% endfor %}
+        </select>
+        <label>Fact type</label>
+        <input name="fact_type" required>
+        <label>Value text</label>
+        <input name="value_text">
+        <label>Value date</label>
+        <input type="date" name="value_date">
+        <label>Place text</label>
+        <input name="place_text">
+        <label>Status</label>
+        <select name="status">
+          {% for item in fact_status_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Source</label>
+        <select name="source_id" required>
+          <option value="">— select —</option>
+          {% for source in sources %}
+          <option value="{{ source.id }}">{{ source.description or source.source_type.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Notes</label>
+        <textarea name="notes" rows="2"></textarea>
+        <button type="submit">Create fact</button>
+      </form>
+    </fieldset>
+  </div>
+</div>
+{% endblock %}

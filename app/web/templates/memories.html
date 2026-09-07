@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Memories{% endblock %}
+{% block content %}
+<h1>Memories</h1>
+
+<div class="grid">
+  <div>
+    <h2>All memories</h2>
+    <table>
+      <thead><tr><th>Title</th><th>Narrative</th><th>Period / place</th><th>Status</th><th>Sensitivity</th><th>People</th></tr></thead>
+      <tbody>
+        {% for memory in memories %}
+        <tr>
+          <td>{{ memory.title or "—" }}</td>
+          <td>{{ memory.narrative[:120] }}{% if memory.narrative | length > 120 %}…{% endif %}</td>
+          <td>{{ memory.approx_period_text or "—" }} / {{ memory.place_text or "—" }}</td>
+          <td><span class="badge">{{ memory.memory_status.value }}</span></td>
+          <td>{{ memory.sensitivity_level.value }}</td>
+          <td>
+            {% for person in memory.people %}
+              {{ person_names.get(person.person_id, person.person_id) }}{% if not loop.last %}, {% endif %}
+            {% else %}—{% endfor %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">No memories yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div>
+    <fieldset>
+      <legend>Create memory</legend>
+      <form method="post" action="/admin/memories">
+        <label>Title</label>
+        <input name="title">
+        <label>Narrative</label>
+        <textarea name="narrative" rows="4" required></textarea>
+        <label>Approximate period</label>
+        <input name="approx_period_text">
+        <label>Place text</label>
+        <input name="place_text">
+        <label>Memory status</label>
+        <select name="memory_status">
+          {% for item in memory_status_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Sensitivity</label>
+        <select name="sensitivity_level">
+          {% for item in sensitivity_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Source</label>
+        <select name="source_id" required>
+          <option value="">— select —</option>
+          {% for source in sources %}
+          <option value="{{ source.id }}">{{ source.description or source.source_type.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Linked person (optional)</label>
+        <select name="person_id">
+          <option value="">— none —</option>
+          {% for person in persons %}
+          <option value="{{ person.id }}">{{ person.display_name }}</option>
+          {% endfor %}
+        </select>
+        <label>Role</label>
+        <input name="person_role">
+        <button type="submit">Create memory</button>
+      </form>
+    </fieldset>
+  </div>
+</div>
+{% endblock %}

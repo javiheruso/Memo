@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Knowledge gap{% endblock %}
+{% block content %}
+<p><a href="/admin/knowledge-gaps">&larr; Knowledge gaps</a></p>
+<h1>Knowledge gap</h1>
+
+<table>
+  <tr><th>Type</th><td>{{ gap.gap_type }}</td></tr>
+  <tr><th>Reference</th><td>{{ gap.canonical_reference }}</td></tr>
+  <tr><th>Description</th><td>{{ gap.description or "—" }}</td></tr>
+  <tr><th>Status</th><td><span class="badge">{{ gap.status.value }}</span></td></tr>
+  <tr><th>Occurrences</th><td>{{ gap.occurrence_count }}</td></tr>
+  <tr><th>Distinct sessions</th><td>{{ gap.distinct_sessions }}</td></tr>
+  <tr><th>First seen</th><td class="mono">{{ gap.first_seen_at }}</td></tr>
+  <tr><th>Last seen</th><td class="mono">{{ gap.last_seen_at }}</td></tr>
+  <tr><th>Resolved person</th><td>{{ resolved_person.display_name if resolved_person else "—" }}</td></tr>
+  <tr><th>Resolved fact</th><td>{{ resolved_fact.value_text if resolved_fact else "—" }}</td></tr>
+</table>
+
+<div class="grid">
+  <div>
+    <fieldset>
+      <legend>Review status</legend>
+      <form method="post" action="/admin/knowledge-gaps/{{ gap.id }}/status">
+        <label>Status</label>
+        <select name="status">
+          {% for item in status_options %}
+            <option value="{{ item.value }}" {% if gap.status.value == item.value %}selected{% endif %}>{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Resolved person <span class="muted">(only with status resolved)</span></label>
+        <select name="resolved_person_id">
+          <option value="">— none —</option>
+          {% for person in persons %}
+          <option value="{{ person.id }}">{{ person.display_name }}</option>
+          {% endfor %}
+        </select>
+        <label>Resolved fact <span class="muted">(only with status resolved)</span></label>
+        <select name="resolved_fact_id">
+          <option value="">— none —</option>
+          {% for fact in facts %}
+          <option value="{{ fact.id }}">{{ fact.value_text or fact.id }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Apply</button>
+      </form>
+    </fieldset>
+  </div>
+
+  {% if gap.status.value != "ignored" %}
+  <div>
+    <fieldset>
+      <legend>Materialize as fact</legend>
+      <form method="post" action="/admin/knowledge-gaps/{{ gap.id }}/materialize-fact">
+        <label>Subject person</label>
+        <select name="subject_person_id" required>
+          <option value="">— select —</option>
+          {% for person in persons %}
+          <option value="{{ person.id }}">{{ person.display_name }}</option>
+          {% endfor %}
+        </select>
+        <label>Fact type</label>
+        <input name="fact_type" value="other" required>
+        <label>Value text <span class="muted">(defaults to the reference when empty)</span></label>
+        <input name="value_text" value="{{ gap.canonical_reference }}">
+        <label>Value date</label>
+        <input type="date" name="value_date">
+        <label>Place text</label>
+        <input name="place_text">
+        <label>Status</label>
+        <select name="status">
+          {% for item in fact_status_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Source</label>
+        <select name="source_id" required>
+          <option value="">— select —</option>
+          {% for source in sources %}
+          <option value="{{ source.id }}">{{ source.description or source.source_type.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Notes</label>
+        <textarea name="notes" rows="2"></textarea>
+        <button type="submit">Materialize as fact</button>
+      </form>
+    </fieldset>
+  </div>
+
+  <div>
+    <fieldset>
+      <legend>Materialize as memory</legend>
+      <form method="post" action="/admin/knowledge-gaps/{{ gap.id }}/materialize-memory">
+        <label>Title <span class="muted">(defaults to the reference when empty)</span></label>
+        <input name="title" value="{{ gap.canonical_reference }}">
+        <label>Narrative <span class="muted">(defaults to the reference when empty)</span></label>
+        <textarea name="narrative" rows="3">{{ gap.canonical_reference }}</textarea>
+        <label>Approximate period</label>
+        <input name="approx_period_text">
+        <label>Place text</label>
+        <input name="place_text">
+        <label>Memory status</label>
+        <select name="memory_status">
+          {% for item in memory_status_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Sensitivity</label>
+        <select name="sensitivity_level">
+          {% for item in sensitivity_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Source</label>
+        <select name="source_id" required>
+          <option value="">— select —</option>
+          {% for source in sources %}
+          <option value="{{ source.id }}">{{ source.description or source.source_type.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Linked person (optional)</label>
+        <select name="person_id">
+          <option value="">— none —</option>
+          {% for person in persons %}
+          <option value="{{ person.id }}">{{ person.display_name }}</option>
+          {% endfor %}
+        </select>
+        <label>Role</label>
+        <input name="person_role">
+        <button type="submit">Materialize as memory</button>
+      </form>
+    </fieldset>
+  </div>
+  {% else %}
+  <p class="muted">Ignored gaps cannot be materialized.</p>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Embeddings{% endblock %}
+{% block content %}
+<h1>Memory embeddings backfill</h1>
+
+<table>
+  <tr><th>Total memories</th><td>{{ total_memories }}</td></tr>
+  <tr><th>Memories without an embedding</th><td>{{ pending_embeddings }}</td></tr>
+  <tr><th>Backend supports pgvector writes</th><td>{{ "yes" if supports_vector_search else "no" }}</td></tr>
+</table>
+
+<p class="muted">
+  The backfill embeds the narrative memories that still have a NULL embedding.
+  It only runs against a PostgreSQL dialect (pgvector); on other dialects the
+  action is refused with an error and nothing is written.
+</p>
+
+<form method="post" action="/admin/embeddings/backfill">
+  <button type="submit" {% if not supports_vector_search %}disabled title="Requires PostgreSQL (pgvector)"{% endif %}>
+    Backfill embeddings
+  </button>
+</form>
+{% endblock %}

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin login — Memo</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; color: #222; background: #f4f6f8; }
+  main { max-width: 360px; margin: 96px auto; padding: 24px; background: #fff; border: 1px solid #ddd; border-radius: 8px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  label { display: block; margin-top: 14px; font-size: 13px; }
+  input { width: 100%; box-sizing: border-box; padding: 7px; font-size: 14px; }
+  button { margin-top: 16px; padding: 7px 16px; font-size: 14px; }
+  .flash { padding: 8px 12px; border-radius: 4px; margin: 12px 0; }
+  .flash.err { background: #fdecea; color: #b42318; }
+  .muted { color: #666; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Memo admin</h1>
+  <p class="muted">Enter the admin password to continue.</p>
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  <form method="post" action="/admin/login">
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autofocus required>
+    <button type="submit">Login</button>
+  </form>
+  <p class="muted"><a href="/">Back to app root</a></p>
+</main>
+</body>
+</html>

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Claim groups{% endblock %}
+{% block content %}
+<h1>Claim groups</h1>
+
+<form method="get" action="/admin/claim-groups" style="display: flex; gap: 12px; align-items: end; margin-bottom: 8px;">
+  <div>
+    <label>Status</label>
+    <select name="status" style="width: 160px;">
+      <option value="">any</option>
+      {% for item in status_options %}
+        <option value="{{ item.value }}" {% if filter_status and filter_status.value == item.value %}selected{% endif %}>{{ item.value }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>Needs review</label>
+    <select name="needs_review" style="width: 160px;">
+      <option value="">any</option>
+      <option value="true" {% if filter_needs_review is true %}selected{% endif %}>yes</option>
+      <option value="false" {% if filter_needs_review is false %}selected{% endif %}>no</option>
+    </select>
+  </div>
+  <button type="submit">Filter</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Canonical text</th>
+      <th>Mentions</th>
+      <th>Conversations</th>
+      <th>Days</th>
+      <th>Last seen</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for group in groups %}
+    <tr>
+      <td>{{ group.canonical_text }}</td>
+      <td>{{ group.total_mentions }}</td>
+      <td>{{ group.distinct_conversations }}</td>
+      <td>{{ group.distinct_days }}</td>
+      <td class="mono">{{ group.last_seen_at }}</td>
+      <td>
+        {% if group.needs_review %}<span class="badge alert">needs review</span>{% endif %}
+        <span class="badge">{{ group.status.value }}</span>
+      </td>
+      <td><a href="/admin/claim-groups/{{ group.id }}">Open</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="muted">No claim groups match.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

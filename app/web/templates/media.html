@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Media{% endblock %}
+{% block content %}
+<h1>Media</h1>
+
+<div class="grid">
+  <div>
+    <h2>All media</h2>
+    <p class="muted">Metadata only — no upload, serving, or image-content analysis.</p>
+    <table>
+      <thead><tr><th>Type</th><th>Title / path</th><th>Date</th><th>Place</th><th>People</th><th>Source</th></tr></thead>
+      <tbody>
+        {% for item in media %}
+        <tr>
+          <td>{{ item.media_type }}</td>
+          <td>{{ item.title or item.storage_path }}{% if item.title %} <span class="mono">{{ item.storage_path }}</span>{% endif %}</td>
+          <td>{{ item.approx_date or "—" }}</td>
+          <td>{{ item.place_text or "—" }}</td>
+          <td>
+            {% for link in item.people %}
+              {{ person_names.get(link.person_id, "?") }}{% if link.is_primary %} <span class="badge">primary</span>{% endif %}{% if not loop.last %}, {% endif %}
+            {% else %}—{% endfor %}
+          </td>
+          <td>{{ source_labels.get(item.source_id, "—") if item.source_id else "—" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">No media yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div>
+    <fieldset>
+      <legend>Create media</legend>
+      <form method="post" action="/admin/media">
+        <label>Type</label>
+        <select name="media_type" required>
+          {% for item in media_type_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Storage path</label>
+        <input name="storage_path" required>
+        <label>Title</label>
+        <input name="title">
+        <label>Description</label>
+        <textarea name="description" rows="3"></textarea>
+        <label>Approximate date</label>
+        <input type="date" name="approx_date">
+        <label>Place</label>
+        <input name="place_text">
+        <label>Source (optional)</label>
+        <select name="source_id">
+          <option value="">— none —</option>
+          {% for source_id, label in source_labels.items() %}
+          <option value="{{ source_id }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Create media</button>
+      </form>
+    </fieldset>
+  </div>
+</div>
+{% endblock %}
