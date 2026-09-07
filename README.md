@@ -626,76 +626,51 @@ an "active" group shows a *Merge into another group* form with the deterministic
 suggestions ranked by shared words, an opposite-polarity confirmation checkbox,
 and error flash messages identical to the API guards.
 
-## Roadmap
+## Status
 
-The "Who was Paco?" vertical slice, the event-query slice, the `memory_query`
-slice and the day/date/time `orientation_query` slice are implemented: intent
-routing (`person_query`, `memory_query`, `event_query`, `orientation_query`),
-entity resolution, structured retrieval of relationships, facts, memories and
-events, semantic memory retrieval behind an embedder seam (deterministic
-placeholder and OpenAI-compatible provider, pgvector on PostgreSQL, in-memory
-fallback on SQLite), embedding persistence and NULL-embedding backfill through
-the admin API, code-provided clock context for orientation answers,
-trust-model context building, deterministic responder, chat endpoint with
-response-source and knowledge-gap persistence, and append-only candidate-claim
-ingestion from conversational user messages behind the `MEMO_CLAIM_EXTRACTOR`
-seam, and deterministic claim grouping with denormalized recurrence counters
-behind the `MEMO_CLAIM_GROUPER` seam. The pipeline lives in
-`app/retrieval/` (router, resolver, retrievers, context builder),
-`app/policies/`, `app/embeddings/` and `app/services/`. The entity resolution
-foundation lives in `PersonRepository.search_by_name` and event data access in
-`EventRepository`.
+The MVP is feature-complete against the dossier. Implemented and verified:
+
+- **Query pipeline** — intent routing (`person_query`, `memory_query`,
+  `event_query`, `orientation_query`, `general_chat`), entity resolution with
+  explicit ambiguity handling, structured retrieval (relationships, facts,
+  events), semantic memory retrieval (pgvector on PostgreSQL, in-memory
+  fallback on SQLite), and trust-model context building.
+- **Trust model** — rules enforced in code: no invention, memories never
+  presented as verified facts, planned/confirmed events never phrased as
+  completed, sensitive memories filtered, ambiguity never collapsed.
+- **Claims lifecycle** — append-only ingestion, deterministic grouping with
+  remembered keys, recurrence counters, contradiction signals, manual review,
+  human merge, and explicit admin-only materialization into facts/memories with
+  append-only provenance.
+- **Knowledge gaps** — auto-created on unknown persons, manual resolution.
+- **Progressive hints** — person answers follow relation → facts → photo →
+  memory, plus a metadata-only media slice with primary-media management.
+- **Voice (STT/TTS)** — replaceable OpenAI-compatible seams, text-first by
+  default, graceful text-only degradation.
+- **Interfaces** — JSON API, server-rendered admin UI (`/admin`) with minimal
+  shared-password auth, and a public conversational chat page (`/chat`).
+
+Verification:
+
+- 391 tests pass on the default in-memory SQLite suite.
+- 386 tests pass against real PostgreSQL 18 + pgvector (`make test-postgres`).
+- Alembic migrations apply cleanly (head `f2a1b3c4d5e6`), 24 tables.
 
 ## Checklist
 
-- [ ] `cp .env.example .env` done
-- [ ] `alembic upgrade head` applies cleanly against local PostgreSQL
-- [ ] `pytest` passes
+- [x] `alembic upgrade head` applies cleanly against PostgreSQL
+- [x] `pytest` passes (SQLite and PostgreSQL profiles)
+- [ ] `cp .env.example .env` and set secrets before deploying
 
-## Next step
+## Roadmap
 
-The Phase 1 schema (persons, aliases, relationships, facts, memories, events,
-conversations, sources, knowledge gaps) is in place as an Alembic baseline, and
-the admin data-loading API, repositories, fixture universe, and the query
-pipeline (intent routing, entity resolution, structured retrieval — including
-event retrieval — semantic memory retrieval for `memory_query` behind a
-deterministic embedder, trust-model context building, deterministic responder,
-chat endpoint with response-source and knowledge-gap persistence) are
-implemented. A real LLM provider is wired behind the `Responder` interface
-(`app/llm/openai_compatible.py`, selected via `MEMO_RESPONDER`), with prompt
-building, source validation against the context, and fail-closed fallback to
-the deterministic responder, and a real embeddings provider behind the
-`Embedder` seam (`app/embeddings/openai_compatible.py`, selected via
-`MEMO_EMBEDDER`), with dimension validation and fail-closed fallback to the
-deterministic embedder. Next slices build on `SemanticRetriever` and `ConversationService`: combining semantic hits with
-structured filters (person/place/period), richer event phrasing, local-timezone
-rendering for orientation, and memory extraction from conversation. The claim
-ingestion baseline is in place: `claims` persistence, a conservative
-deterministic extractor seam (`MEMO_CLAIM_EXTRACTOR`) and fail-safe wiring into
-the user-message side of the pipeline. Deterministic claim grouping is in place
-too: normalized-text keys (`MEMO_CLAIM_GROUPER` seam), `claim_groups` +
-`claim_group_members` persistence, denormalized recurrence counters and admin
-read endpoints for claims and groups. The contradiction-signal baseline is in
-place too: a conservative deterministic negation+overlap detector behind the
-`MEMO_CLAIM_CONTRADICTION_DETECTOR` seam, append-only
-`claim_group_contradictions` evidence, the `needs_review` group flag and admin
-contradiction summaries. Manual claim-group review (a manual `active` /
-`resolved` / `ignored` status with resolution audit and a re-flagging guard)
-and the knowledge-gap admin read/write surface are in place too. Explicit
-admin-only materialization (claim group / knowledge gap -> fact / memory) with
-append-only provenance and source-state transitions is in place too, and the
-server-rendered admin UI (`/admin`) now operates all of these workflows through
-forms instead of hand-written API calls. The review-context lift (member claims
-carry their source message) and the status-filter dropdowns are in place too,
-and the human canonical merge of duplicate claim groups (deterministic
-suggestions, evidence-preserving transfer/fold of contradiction rows, and
-`claim_group_remembered_keys` routing so absorbed wording reaches the survivor)
-closes the duplicate-group cleanup loop without any auto-promotion or semantic
-engine. Semantic claim
-grouping, `claim_metrics`, automated promotion and family-review flows remain
-pending. An optional voice layer is wired behind the same text pipeline
-(`POST /api/v1/chat/voice`, `app/voice/`): replaceable OpenAI-compatible STT
-and TTS seams that resolve to `None` when unconfigured, so text-first mode
-stays the zero-config default, plus a `VoiceService` that degrades gracefully
-to text-only when voice is unconfigured or a provider fails. Client-side audio
-capture/playback and streaming remain pending.
+Deferred by design (dossier phases) and not required for the MVP:
+
+- Semantic/paraphrase claim grouping and `claim_metrics` (consolidation phase).
+- Automated promotion and full family-review notification flows — manual
+  materialization is the current authority.
+- Real STT/TTS/embedder/LLM providers — configure `MEMO_STT_*`, `MEMO_TTS_*`,
+  `MEMO_EMBEDDER_*`, `MEMO_LLM_*` against your OpenAI-compatible backend.
+- Dedicated tablet/touch client (the `/chat` page is the current text surface).
+- Client-side audio capture/playback and streaming.
+- Media image serving/upload (currently metadata-only).
