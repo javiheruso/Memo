@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -6,6 +7,7 @@ from fastapi.responses import RedirectResponse
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.db.migrate import run_migrations
 from app.security import LoginRequired, admin_auth_enabled
 from app.web.chat import router as chat_ui_router
 from app.web.router import auth_router
@@ -23,6 +25,8 @@ async def lifespan(app: FastAPI):
             "exposing the service.",
             settings.environment,
         )
+    if settings.auto_migrate:
+        await asyncio.to_thread(run_migrations)
     yield
 
 

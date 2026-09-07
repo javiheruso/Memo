@@ -718,9 +718,11 @@ The database host inside the compose network is the service name (`postgres`);
    | `MEMO_ENVIRONMENT` | `production` |
    | `MEMO_ADMIN_PASSWORD` | a strong password |
    | `MEMO_DATABASE_URL` | `${{pgvector.DATABASE_URL_PRIVATE}}` |
+   | `MEMO_AUTO_MIGRATE` | `true` |
 
    The bare `postgresql://` URL is normalized to `postgresql+psycopg://` at
-   startup automatically.
+   startup automatically, and `MEMO_AUTO_MIGRATE=true` applies migrations on
+   boot (no shell command needed).
 4. Enable the extension once in the database (Railway CLI or the database
    service's shell):
 
@@ -728,13 +730,7 @@ The database host inside the compose network is the service name (`postgres`);
    CREATE EXTENSION IF NOT EXISTS vector;
    ```
 
-5. Apply migrations once (Railway CLI):
-
-   ```bash
-   railway run alembic upgrade head
-   ```
-
-6. Optionally add the provider variables (`MEMO_LLM_*`, `MEMO_EMBEDDER_*`,
+5. Optionally add the provider variables (`MEMO_LLM_*`, `MEMO_EMBEDDER_*`,
    `MEMO_STT_*`, `MEMO_TTS_*`); text mode works without them.
 
 ### Minimal deployment checklist

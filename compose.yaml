@@ -29,6 +29,8 @@ services:
       MEMO_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-memo}:${POSTGRES_PASSWORD:-memo}@postgres:5432/${POSTGRES_DB:-memo}
       # Set this to enable admin auth; leave empty to run fail-open (dev only).
       MEMO_ADMIN_PASSWORD: ${MEMO_ADMIN_PASSWORD:-}
+      # Apply migrations on boot so the stack comes up ready.
+      MEMO_AUTO_MIGRATE: "true"
     ports:
       - "${APP_PORT:-8000}:8000"
     depends_on:

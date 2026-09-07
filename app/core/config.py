@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
     admin_password: str = ""
+    auto_migrate: bool = False
     database_url: str = "postgresql+psycopg://memo:memo@localhost:5432/memo"
     test_database_url: str | None = None
     responder: str = "deterministic"
