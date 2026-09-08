@@ -70,6 +70,35 @@ async def test_dashboard_renders(app_client: AsyncClient) -> None:
     assert "Brechas de conocimiento" in response.text
 
 
+async def test_dashboard_shows_load_example_button(app_client: AsyncClient) -> None:
+    response = await app_client.get(UI)
+    assert response.status_code == 200
+    assert "Cargar datos de ejemplo" in response.text
+
+
+async def test_dashboard_load_example_flow(app_client: AsyncClient) -> None:
+    assert (await app_client.get(f"{API}/persons")).json() == []
+
+    response = await app_client.post(f"{UI}/seed", follow_redirects=True)
+    assert response.status_code == 200
+    assert "Se han cargado los datos de ejemplo" in response.text
+    assert "7 personas" in response.text
+
+    persons = (await app_client.get(f"{API}/persons")).json()
+    assert len(persons) == 7
+
+
+async def test_dashboard_load_example_refused_when_already_seeded(
+    app_client: AsyncClient, seed: SeedUniverse
+) -> None:
+    response = await app_client.post(f"{UI}/seed", follow_redirects=True)
+    assert response.status_code == 200
+    assert "ya se han cargado" in response.text
+
+    persons = (await app_client.get(f"{API}/persons")).json()
+    assert len(persons) == 7
+
+
 async def test_claim_groups_page_lists_groups(app_client: AsyncClient) -> None:
     await _claim_group(app_client, text="Teníamos un perro.")
     response = await app_client.get(f"{UI}/claim-groups")

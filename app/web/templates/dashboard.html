@@ -46,4 +46,14 @@
     </tr>
   </tbody>
 </table>
+
+<fieldset>
+  <legend>Cargar datos de ejemplo</legend>
+  <p class="muted">Puebla la base de datos con un universo ficticio de ejemplo (Carmen, Antonio,
+    Francisco/Paco, María, Javi, Luisa, relaciones, hechos, recuerdos y multimedia). Solo se carga
+    cuando la base de datos está vacía; si ya existen personas, la operación se rechaza.</p>
+  <form action="/admin/seed" method="post">
+    <button type="submit">Cargar datos de ejemplo</button>
+  </form>
+</fieldset>
 {% endblock %}

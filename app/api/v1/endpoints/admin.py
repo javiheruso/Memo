@@ -49,6 +49,7 @@ from app.schemas.media import MediaCreate, MediaRead
 from app.schemas.memory import MemoryBackfillRead, MemoryCreate, MemoryRead
 from app.schemas.person import PersonCreate, PersonPrimaryMediaUpdate, PersonRead
 from app.schemas.relationship import RelationshipCreate, RelationshipRead
+from app.schemas.seed import SeedSummaryRead
 from app.schemas.source import SourceCreate, SourceRead
 from app.security import require_admin_api
 from app.services.claim_group_merge import (
@@ -63,6 +64,7 @@ from app.services.materialization import (
     UnknownSourceRefError,
 )
 from app.services.memory_embeddings import MemoryEmbeddingBackfillService
+from app.services.seed import AlreadySeededError, seed_if_empty
 
 router = APIRouter(
     prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin_api)]
@@ -477,3 +479,30 @@ async def materialize_gap_memory(
         ).materialize_gap_memory(gap_id, payload)
     except MaterializationError as exc:
         raise _materialization_http_error(exc) from exc
+
+
+# --------------------------------------------------------------------------
+# Load example data (fictional universe)
+# --------------------------------------------------------------------------
+
+
+@router.post("/seed", response_model=SeedSummaryRead)
+async def seed_example_data(db: DbSession) -> SeedSummaryRead:
+    """Load the fictional example universe into an empty database.
+
+    Idempotent by refusal: when any person already exists the call is rejected
+    with ``409`` instead of duplicating data. The response reports how many
+    persons, relationships, facts, memories and media rows were created.
+    """
+    try:
+        universe = await seed_if_empty(db)
+    except AlreadySeededError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    created = universe.created
+    return SeedSummaryRead(
+        persons=created.persons,
+        relationships=created.relationships,
+        facts=created.facts,
+        memories=created.memories,
+        media=created.media,
+    )

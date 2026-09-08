@@ -181,3 +181,34 @@ async def test_admin_event_roundtrip_with_people(app_client: AsyncClient) -> Non
 async def test_admin_event_not_found(app_client: AsyncClient) -> None:
     response = await app_client.get(f"{API}/events/{uuid.uuid4()}")
     assert response.status_code == 404
+
+
+async def test_admin_seed_loads_example_universe_on_empty_db(
+    app_client: AsyncClient,
+) -> None:
+    response = await app_client.post(f"{API}/seed")
+    assert response.status_code == 200
+    assert response.json() == {
+        "persons": 7,
+        "relationships": 5,
+        "facts": 5,
+        "memories": 7,
+        "media": 1,
+    }
+
+    listed = await app_client.get(f"{API}/persons")
+    assert len(listed.json()) == 7
+
+
+async def test_admin_seed_refuses_with_409_when_already_seeded(
+    app_client: AsyncClient,
+) -> None:
+    first = await app_client.post(f"{API}/seed")
+    assert first.status_code == 200
+
+    second = await app_client.post(f"{API}/seed")
+    assert second.status_code == 409
+    assert second.json()["detail"] == "already seeded"
+
+    listed = await app_client.get(f"{API}/persons")
+    assert len(listed.json()) == 7

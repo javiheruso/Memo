@@ -126,6 +126,31 @@ async def test_protected_api_accepts_bearer_on_write(
     assert response.json()["display_name"] == "Carmen"
 
 
+async def test_protected_api_seed_rejects_missing_token(
+    app_client: AsyncClient, protected
+) -> None:
+    response = await app_client.post(f"{API}/seed")
+    assert response.status_code == 401
+
+
+async def test_protected_api_seed_accepts_bearer_password(
+    app_client: AsyncClient, protected
+) -> None:
+    response = await app_client.post(
+        f"{API}/seed", headers={"Authorization": f"Bearer {PASSWORD}"}
+    )
+    assert response.status_code == 200
+    assert response.json()["persons"] == 7
+
+
+async def test_protected_ui_seed_redirects_to_login(
+    app_client: AsyncClient, protected
+) -> None:
+    response = await app_client.post(f"{UI}/seed")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/admin/login"
+
+
 # --------------------------------------------------------------------------
 # Browser login / logout flow
 # --------------------------------------------------------------------------

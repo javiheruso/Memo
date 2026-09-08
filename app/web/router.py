@@ -84,6 +84,7 @@ from app.services.materialization import (
     UnknownSourceRefError,
 )
 from app.services.memory_embeddings import MemoryEmbeddingBackfillService
+from app.services.seed import AlreadySeededError, seed_if_empty
 
 router = APIRouter(
     prefix="/admin",
@@ -375,6 +376,32 @@ async def dashboard(request: Request, db: DbSession) -> HTMLResponse:
         "memories": await _count(db, Memory),
     }
     return templates.TemplateResponse(request, "dashboard.html", _ctx(request, counts=counts))
+
+
+@router.post("/seed")
+async def seed_example(request: Request, db: DbSession) -> RedirectResponse:
+    """Load the fictional example universe from the dashboard button.
+
+    Refuses (with a friendly notice) when any person already exists, so the
+    example data is only ever loaded into an empty database.
+    """
+    try:
+        universe = await seed_if_empty(db)
+    except AlreadySeededError:
+        return _back(
+            "/admin",
+            message="Los datos de ejemplo ya se han cargado anteriormente y no se han duplicado.",
+        )
+    created = universe.created
+    media_label = "recurso multimedia" if created.media == 1 else "recursos multimedia"
+    return _back(
+        "/admin",
+        message=(
+            f"Se han cargado los datos de ejemplo: {created.persons} personas, "
+            f"{created.relationships} relaciones, {created.facts} hechos, "
+            f"{created.memories} recuerdos y {created.media} {media_label}."
+        ),
+    )
 
 
 # --------------------------------------------------------------------------
