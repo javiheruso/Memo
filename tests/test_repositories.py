@@ -93,6 +93,37 @@ async def test_person_search_returns_ambiguous_matches(db_session: AsyncSession)
     assert sorted(r.id for r in results) == sorted([first.id, second.id])
 
 
+async def test_person_search_is_accent_insensitive(db_session: AsyncSession) -> None:
+    repo = PersonRepository(db_session)
+    created = await repo.create(
+        PersonCreate(first_name="Paco", last_name="García")
+    )
+    assert [p.id for p in await repo.search_by_name("garcia")] == [created.id]
+    assert [p.id for p in await repo.search_by_name("GARCÍA")] == [created.id]
+
+
+async def test_person_search_matches_alias_plus_last_name(db_session: AsyncSession) -> None:
+    repo = PersonRepository(db_session)
+    navarro = await repo.create(
+        PersonCreate(
+            first_name="Francisco",
+            last_name="Navarro",
+            aliases=[PersonAliasCreate(alias="Paco", alias_type="nickname")],
+        )
+    )
+    garcia = await repo.create(
+        PersonCreate(
+            first_name="Paco",
+            last_name="García",
+            aliases=[PersonAliasCreate(alias="Paco", alias_type="nickname")],
+        )
+    )
+    # "paco navarro" must resolve to the Navarro person (alias + last name),
+    # and "paco garcia" to the García person (alias + accent-folded last name).
+    assert [p.id for p in await repo.search_by_name("paco navarro")] == [navarro.id]
+    assert [p.id for p in await repo.search_by_name("paco garcia")] == [garcia.id]
+
+
 async def test_person_search_unknown_returns_empty(db_session: AsyncSession) -> None:
     results = await PersonRepository(db_session).search_by_name("nobody")
     assert results == []

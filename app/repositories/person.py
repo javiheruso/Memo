@@ -1,11 +1,20 @@
+import unicodedata
 import uuid
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.models import Person, PersonAlias
 from app.repositories.base import SQLRepository
 from app.schemas.person import PersonCreate
+
+
+def _fold(value: str | None) -> str:
+    """Lowercase and strip accents for accent-insensitive matching."""
+    if not value:
+        return ""
+    normalized = unicodedata.normalize("NFKD", value).lower()
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
 
 
 class PersonRepository(SQLRepository[Person]):
@@ -49,23 +58,52 @@ class PersonRepository(SQLRepository[Person]):
         return await self.get(person_id)
 
     async def search_by_name(self, name: str) -> list[Person]:
-        term = name.strip().lower()
+        """Resolve a person by name/alias, accent- and token-aware.
+
+        The match is done in Python (the dataset is a personal, small corpus)
+        so accents can be folded ("garcia" matches "García") and multi-word
+        terms can match across fields ("paco navarro" matches the alias "Paco"
+        plus the last name "Navarro"). Exact field matches are returned before
+        token-subset matches.
+        """
+        term = _fold(name).strip()
         if not term:
             return []
-        stmt = (
-            select(Person)
-            .outerjoin(PersonAlias, PersonAlias.person_id == Person.id)
-            .where(
-                or_(
-                    func.lower(PersonAlias.alias) == term,
-                    func.lower(Person.first_name) == term,
-                    func.lower(Person.last_name) == term,
-                    func.lower(Person.display_name) == term,
-                )
-            )
-            .options(selectinload(Person.aliases))
-            .order_by(Person.id)
-            .distinct()
-        )
+        persons = await self._list_all()
+        term_tokens = set(term.split())
+
+        exact: list[Person] = []
+        token_matches: list[Person] = []
+        for person in persons:
+            fields = {
+                _fold(person.first_name),
+                _fold(person.last_name),
+                _fold(person.display_name),
+            }
+            for alias in person.aliases:
+                fields.add(_fold(alias.alias))
+            fields = {field for field in fields if field}
+
+            if term in fields:
+                exact.append(person)
+                continue
+
+            person_tokens: set[str] = set()
+            for field in fields:
+                person_tokens.update(field.split())
+            if term_tokens and term_tokens.issubset(person_tokens):
+                token_matches.append(person)
+
+        result = exact + token_matches
+        seen: set[uuid.UUID] = set()
+        unique: list[Person] = []
+        for person in result:
+            if person.id not in seen:
+                seen.add(person.id)
+                unique.append(person)
+        return unique
+
+    async def _list_all(self) -> list[Person]:
+        stmt = select(Person).options(*self.load_options).order_by(Person.id)
         result = await self._session.execute(stmt)
         return list(result.scalars())
