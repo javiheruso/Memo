@@ -1,30 +1,30 @@
 {% extends "base.html" %}
-{% block title %}Memo Admin · Knowledge gaps{% endblock %}
+{% block title %}Memo Admin · Brechas de conocimiento{% endblock %}
 {% block content %}
-<h1>Knowledge gaps</h1>
+<h1>Brechas de conocimiento</h1>
 
 <form method="get" action="/admin/knowledge-gaps" style="display: flex; gap: 12px; align-items: end; margin-bottom: 8px;">
   <div>
-    <label>Status</label>
+    <label>Estado</label>
     <select name="status" style="width: 180px;">
-      <option value="">any</option>
+      <option value="">cualquiera</option>
       {% for item in status_options %}
         <option value="{{ item.value }}" {% if filter_status and filter_status.value == item.value %}selected{% endif %}>{{ item.value }}</option>
       {% endfor %}
     </select>
   </div>
-  <button type="submit">Filter</button>
+  <button type="submit">Filtrar</button>
 </form>
 
 <table>
   <thead>
     <tr>
-      <th>Type</th>
-      <th>Reference</th>
-      <th>Occurrences</th>
-      <th>Sessions</th>
-      <th>Last seen</th>
-      <th>Status</th>
+      <th>Tipo</th>
+      <th>Referencia</th>
+      <th>Ocurrencias</th>
+      <th>Sesiones</th>
+      <th>Última aparición</th>
+      <th>Estado</th>
       <th></th>
     </tr>
   </thead>
@@ -37,10 +37,10 @@
       <td>{{ gap.distinct_sessions }}</td>
       <td class="mono">{{ gap.last_seen_at }}</td>
       <td><span class="badge">{{ gap.status.value }}</span></td>
-      <td><a href="/admin/knowledge-gaps/{{ gap.id }}">Open</a></td>
+      <td><a href="/admin/knowledge-gaps/{{ gap.id }}">Abrir</a></td>
     </tr>
     {% else %}
-    <tr><td colspan="7" class="muted">No knowledge gaps match.</td></tr>
+    <tr><td colspan="7" class="muted">Ninguna brecha de conocimiento coincide.</td></tr>
     {% endfor %}
   </tbody>
 </table>

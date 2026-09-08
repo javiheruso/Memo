@@ -1,13 +1,13 @@
 {% extends "base.html" %}
-{% block title %}Memo Admin · Facts{% endblock %}
+{% block title %}Memo Admin · Hechos{% endblock %}
 {% block content %}
-<h1>Facts</h1>
+<h1>Hechos</h1>
 
 <div class="grid">
   <div>
-    <h2>All facts</h2>
+    <h2>Todos los hechos</h2>
     <table>
-      <thead><tr><th>Subject</th><th>Type</th><th>Value</th><th>Place</th><th>Status</th><th>Source</th></tr></thead>
+      <thead><tr><th>Persona</th><th>Tipo</th><th>Valor</th><th>Lugar</th><th>Estado</th><th>Fuente</th></tr></thead>
       <tbody>
         {% for fact in facts %}
         <tr>
@@ -19,7 +19,7 @@
           <td class="mono">{{ source_labels.get(fact.source_id, fact.source_id) }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="6" class="muted">No facts yet.</td></tr>
+        <tr><td colspan="6" class="muted">Aún no hay hechos.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -27,39 +27,39 @@
 
   <div>
     <fieldset>
-      <legend>Create fact</legend>
+      <legend>Crear hecho</legend>
       <form method="post" action="/admin/facts">
-        <label>Subject person</label>
+        <label>Persona protagonista</label>
         <select name="subject_person_id" required>
-          <option value="">— select —</option>
+          <option value="">— seleccionar —</option>
           {% for person in persons %}
           <option value="{{ person.id }}">{{ person.display_name }}</option>
           {% endfor %}
         </select>
-        <label>Fact type</label>
+        <label>Tipo de hecho</label>
         <input name="fact_type" required>
-        <label>Value text</label>
+        <label>Texto del valor</label>
         <input name="value_text">
-        <label>Value date</label>
+        <label>Fecha del valor</label>
         <input type="date" name="value_date">
-        <label>Place text</label>
+        <label>Lugar</label>
         <input name="place_text">
-        <label>Status</label>
+        <label>Estado</label>
         <select name="status">
           {% for item in fact_status_options %}
           <option value="{{ item.value }}">{{ item.value }}</option>
           {% endfor %}
         </select>
-        <label>Source</label>
+        <label>Fuente</label>
         <select name="source_id" required>
-          <option value="">— select —</option>
+          <option value="">— seleccionar —</option>
           {% for source in sources %}
           <option value="{{ source.id }}">{{ source.description or source.source_type.value }}</option>
           {% endfor %}
         </select>
-        <label>Notes</label>
+        <label>Notas</label>
         <textarea name="notes" rows="2"></textarea>
-        <button type="submit">Create fact</button>
+        <button type="submit">Crear hecho</button>
       </form>
     </fieldset>
   </div>

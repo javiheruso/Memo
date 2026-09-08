@@ -1,48 +1,48 @@
 {% extends "base.html" %}
-{% block title %}Memo Admin · Dashboard{% endblock %}
+{% block title %}Memo Admin · Panel{% endblock %}
 {% block content %}
 <h1>Memo Admin</h1>
-<p class="muted">Operate the review queues and core data without calling the API by hand.</p>
+<p class="muted">Gestiona las colas de revisión y los datos principales sin llamar a la API manualmente.</p>
 
 <table>
   <thead>
-    <tr><th>Area</th><th>Count</th><th></th></tr>
+    <tr><th>Área</th><th>Cantidad</th><th></th></tr>
   </thead>
   <tbody>
     <tr>
-      <td>Claim groups needing review</td>
+      <td>Grupos de afirmaciones pendientes de revisión</td>
       <td>{{ counts.claim_groups_needs_review }}</td>
-      <td><a href="/admin/claim-groups?needs_review=true">Review</a></td>
+      <td><a href="/admin/claim-groups?needs_review=true">Revisar</a></td>
     </tr>
     <tr>
-      <td>Claim groups active</td>
+      <td>Grupos de afirmaciones activos</td>
       <td>{{ counts.claim_groups_active }}</td>
-      <td><a href="/admin/claim-groups">All</a></td>
+      <td><a href="/admin/claim-groups">Ver todos</a></td>
     </tr>
     <tr>
-      <td>Knowledge gaps open</td>
+      <td>Brechas de conocimiento abiertas</td>
       <td>{{ counts.gaps_open }}</td>
-      <td><a href="/admin/knowledge-gaps">Review</a></td>
+      <td><a href="/admin/knowledge-gaps">Revisar</a></td>
     </tr>
     <tr>
-      <td>Persons</td>
+      <td>Personas</td>
       <td>{{ counts.persons }}</td>
-      <td><a href="/admin/persons">Manage</a></td>
+      <td><a href="/admin/persons">Gestionar</a></td>
     </tr>
     <tr>
-      <td>Sources</td>
+      <td>Fuentes</td>
       <td>{{ counts.sources }}</td>
-      <td><a href="/admin/sources">Manage</a></td>
+      <td><a href="/admin/sources">Gestionar</a></td>
     </tr>
     <tr>
-      <td>Facts</td>
+      <td>Hechos</td>
       <td>{{ counts.facts }}</td>
-      <td><a href="/admin/facts">Manage</a></td>
+      <td><a href="/admin/facts">Gestionar</a></td>
     </tr>
     <tr>
-      <td>Memories</td>
+      <td>Recuerdos</td>
       <td>{{ counts.memories }}</td>
-      <td><a href="/admin/memories">Manage</a></td>
+      <td><a href="/admin/memories">Gestionar</a></td>
     </tr>
   </tbody>
 </table>

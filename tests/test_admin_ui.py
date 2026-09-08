@@ -66,8 +66,8 @@ async def test_dashboard_renders(app_client: AsyncClient) -> None:
     response = await app_client.get(UI)
     assert response.status_code == 200
     assert "Memo Admin" in response.text
-    assert "Claim groups" in response.text
-    assert "Knowledge gaps" in response.text
+    assert "Grupos de afirmaciones" in response.text
+    assert "Brechas de conocimiento" in response.text
 
 
 async def test_claim_groups_page_lists_groups(app_client: AsyncClient) -> None:
@@ -89,8 +89,8 @@ async def test_claim_group_detail_renders_evidence_and_forms(
     assert response.status_code == 200
     assert group["canonical_text"] in response.text
     assert "Vivíamos en Madrid" in response.text
-    assert "Materialize as fact" in response.text
-    assert "Materialize as memory" in response.text
+    assert "Materializar como hecho" in response.text
+    assert "Materializar como recuerdo" in response.text
 
 
 async def test_claim_group_detail_404(app_client: AsyncClient) -> None:
@@ -114,8 +114,8 @@ async def test_knowledge_gap_detail_renders_forms(
     response = await app_client.get(f"{UI}/knowledge-gaps/{gap.id}")
     assert response.status_code == 200
     assert gap.canonical_reference in response.text
-    assert "Materialize as fact" in response.text
-    assert "Materialize as memory" in response.text
+    assert "Materializar como hecho" in response.text
+    assert "Materializar como recuerdo" in response.text
 
 
 async def test_claim_groups_status_dropdown_has_all_options(
@@ -152,7 +152,7 @@ async def test_claim_group_detail_shows_message_context_and_verbatim_default(
     assert page.status_code == 200
     assert "Vivíamos en Madrid. Teníamos un perro." in page.text
     assert 'value="Vivíamos en Madrid"' in page.text
-    assert "Merge into another group" in page.text
+    assert "Fusionar en otro grupo" in page.text
 
 
 async def test_claim_group_merge_form_flow(
@@ -168,7 +168,7 @@ async def test_claim_group_merge_form_flow(
 
     page = await app_client.get(f"{UI}/claim-groups/{source['id']}")
     assert page.status_code == 200
-    assert "Merge into another group" in page.text
+    assert "Fusionar en otro grupo" in page.text
     assert f'value="{survivor["id"]}"' in page.text
 
     merged = await app_client.post(
@@ -177,7 +177,7 @@ async def test_claim_group_merge_form_flow(
         follow_redirects=True,
     )
     assert merged.status_code == 200
-    assert "Merged claim group" in merged.text
+    assert "se ha fusionado en" in merged.text
 
     remaining = (await app_client.get(f"{API}/claim-groups")).json()
     assert [g["id"] for g in remaining] == [survivor["id"]]
@@ -232,7 +232,7 @@ async def test_claim_group_ignore_form_flow(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "marked as ignored" in response.text
+    assert "se ha marcado como ignored" in response.text
     stored = (
         await db_session.execute(
             select(ClaimGroup).where(ClaimGroup.id == uuid.UUID(group["id"]))
@@ -255,7 +255,7 @@ async def test_claim_group_materialize_fact_form_flow(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "Materialized as fact" in response.text
+    assert "Se ha materializado como hecho" in response.text
 
     provenance = list((await db_session.execute(select(Materialization))).scalars())
     assert len(provenance) == 1
@@ -285,7 +285,7 @@ async def test_claim_group_materialize_memory_form_flow(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "Materialized as memory" in response.text
+    assert "Se ha materializado como recuerdo" in response.text
 
     memories = list(
         (
@@ -320,7 +320,7 @@ async def test_claim_group_materialize_duplicate_is_refused(
         follow_redirects=True,
     )
     assert second.status_code == 200
-    assert "already materialized" in second.text
+    assert "ya fue materializada" in second.text
 
 
 async def test_claim_group_materialize_ignored_is_refused(
@@ -340,7 +340,7 @@ async def test_claim_group_materialize_ignored_is_refused(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "ignored" in response.text
+    assert "no se puede materializar" in response.text
 
 
 # --------------------------------------------------------------------------
@@ -361,7 +361,7 @@ async def test_knowledge_gap_resolve_form_flow(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "marked as resolved" in response.text
+    assert "se ha marcado como resolved" in response.text
 
     await db_session.refresh(gap)
     assert gap.status.value == "resolved"
@@ -381,7 +381,7 @@ async def test_knowledge_gap_materialize_memory_form_flow(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "Materialized as memory" in response.text
+    assert "Se ha materializado como recuerdo" in response.text
 
     provenance = list((await db_session.execute(select(Materialization))).scalars())
     assert len(provenance) == 1
@@ -406,7 +406,7 @@ async def test_sources_create_form_flow(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "created" in response.text
+    assert "Se ha creado la fuente" in response.text
     sources = list((await db_session.execute(select(Source))).scalars())
     assert len(sources) == 1
     assert sources[0].source_type.value == "photo"
@@ -432,7 +432,7 @@ async def test_media_page_lists_and_create_form_flow(
 ) -> None:
     page = await app_client.get(f"{UI}/media")
     assert page.status_code == 200
-    assert "Create media" in page.text
+    assert "Crear multimedia" in page.text
 
     response = await app_client.post(
         f"{UI}/media",
@@ -446,7 +446,7 @@ async def test_media_page_lists_and_create_form_flow(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "created" in response.text
+    assert "Se ha creado el recurso multimedia" in response.text
     assert "Foto de Vera" in response.text
 
     media = list((await db_session.execute(select(Media))).scalars())
@@ -462,8 +462,8 @@ async def test_persons_page_sets_and_clears_primary_media(
 ) -> None:
     page = await app_client.get(f"{UI}/persons")
     assert page.status_code == 200
-    assert "Primary media" in page.text
-    assert "Set primary" in page.text
+    assert "Multimedia principal" in page.text
+    assert "Establecer principal" in page.text
 
     set_response = await app_client.post(
         f"{UI}/persons/{seed.person_ids['maria']}/primary-media",
@@ -471,7 +471,7 @@ async def test_persons_page_sets_and_clears_primary_media(
         follow_redirects=True,
     )
     assert set_response.status_code == 200
-    assert "Primary media updated" in set_response.text
+    assert "Se ha actualizado la multimedia principal" in set_response.text
 
     stored = (
         await db_session.execute(
@@ -487,7 +487,7 @@ async def test_persons_page_sets_and_clears_primary_media(
         follow_redirects=True,
     )
     assert clear_response.status_code == 200
-    assert "Primary media updated" in clear_response.text
+    assert "Se ha actualizado la multimedia principal" in clear_response.text
 
     await db_session.refresh(stored)
     assert stored.primary_media_id is None
@@ -507,7 +507,7 @@ async def test_facts_create_form_defaults_to_pending(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "created" in response.text
+    assert "Se ha creado el hecho" in response.text
     facts = list(
         (
             await db_session.execute(
@@ -533,7 +533,7 @@ async def test_memories_create_form_flow(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "created" in response.text
+    assert "Se ha creado el recuerdo" in response.text
     memories = list(
         (
             await db_session.execute(
@@ -560,7 +560,7 @@ async def test_memories_create_form_rejects_unknown_source(
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "Database error" in response.text
+    assert "Error de base de datos" in response.text
     count_after = (
         await db_session.execute(select(func.count()).select_from(Memory))
     ).scalar_one()
@@ -578,10 +578,10 @@ async def test_backfill_page_and_action_on_sqlite(
 ) -> None:
     page = await app_client.get(f"{UI}/embeddings")
     assert page.status_code == 200
-    assert "Backfill embeddings" in page.text
+    assert "Regenerar embeddings" in page.text
 
     response = await app_client.post(
         f"{UI}/embeddings/backfill", follow_redirects=True
     )
     assert response.status_code == 200
-    assert "requires a PostgreSQL dialect" in response.text
+    assert "requiere una base de datos PostgreSQL" in response.text

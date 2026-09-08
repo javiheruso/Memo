@@ -136,7 +136,8 @@ async def test_login_page_renders_when_protected(
 ) -> None:
     response = await app_client.get(f"{UI}/login")
     assert response.status_code == 200
-    assert "Memo admin" in response.text
+    assert "Memo Admin" in response.text
+    assert "Iniciar sesión" in response.text
 
 
 async def test_login_success_sets_cookie_and_grants_access(
@@ -157,7 +158,10 @@ async def test_login_failure_redirects_with_error(
 ) -> None:
     response = await _login(app_client, "wrong-password")
     assert response.status_code == 303
-    assert response.headers["location"] == "/admin/login?error=Invalid%20password"
+    assert (
+        response.headers["location"]
+        == "/admin/login?error=Contrase%C3%B1a%20incorrecta"
+    )
     assert SESSION_COOKIE_NAME not in response.cookies
 
     dashboard = await app_client.get(UI)

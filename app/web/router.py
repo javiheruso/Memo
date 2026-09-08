@@ -68,8 +68,21 @@ from app.security import (
 from app.services.claim_group_merge import (
     ClaimGroupMergeError,
     ClaimGroupMergeService,
+    IgnoredClaimGroupMergeError,
+    InactiveClaimGroupMergeError,
+    MaterializedClaimGroupMergeError,
+    OppositePolarityMergeError,
+    SelfClaimGroupMergeError,
+    UnknownClaimGroupMergeError,
 )
-from app.services.materialization import MaterializationError, MaterializationService
+from app.services.materialization import (
+    DuplicateMaterializationError,
+    IgnoredSourceError,
+    MaterializationError,
+    MaterializationService,
+    UnknownSourceError,
+    UnknownSourceRefError,
+)
 from app.services.memory_embeddings import MemoryEmbeddingBackfillService
 
 router = APIRouter(
@@ -118,10 +131,37 @@ def _error_text(exc: Exception) -> str:
     if isinstance(exc, ValidationError):
         first = exc.errors()[0]
         loc = ".".join(str(part) for part in first.get("loc", ()))
-        return f"{loc}: {first.get('msg')}" if loc else str(first.get("msg", "invalid input"))
+        msg = str(first.get("msg", "invalid input"))
+        return f"{loc}: {msg}" if loc else msg
     if isinstance(exc, SQLAlchemyError):
         detail = getattr(exc, "orig", exc)
-        return f"Database error: {str(detail)[:300]}"
+        return f"Error de base de datos: {str(detail)[:300]}"
+    if isinstance(exc, DuplicateMaterializationError):
+        return "La fuente ya fue materializada en este tipo de destino."
+    if isinstance(exc, IgnoredSourceError):
+        return "La fuente está marcada como ignorada y no se puede materializar."
+    if isinstance(exc, UnknownSourceRefError):
+        return "La fuente de evidencia indicada no existe."
+    if isinstance(exc, UnknownSourceError):
+        return "El elemento de la cola de revisión no existe."
+    if isinstance(exc, SelfClaimGroupMergeError):
+        return "Un grupo de afirmaciones no se puede fusionar consigo mismo."
+    if isinstance(exc, UnknownClaimGroupMergeError):
+        return "Uno de los grupos de afirmaciones de la fusión no existe."
+    if isinstance(exc, (IgnoredClaimGroupMergeError, InactiveClaimGroupMergeError)):
+        return "Solo los grupos de afirmaciones activos y no ignorados se pueden fusionar."
+    if isinstance(exc, MaterializedClaimGroupMergeError):
+        return (
+            "Un grupo de afirmaciones que ya generó una materialización no se puede "
+            "fusionar."
+        )
+    if isinstance(exc, OppositePolarityMergeError):
+        return (
+            "La fusión combina una redacción negada con una no negada; confirma la "
+            "fusión de polaridad opuesta para continuar."
+        )
+    if isinstance(exc, UnsupportedVectorSearch):
+        return "Esta acción requiere una base de datos PostgreSQL (pgvector)."
     return str(exc)
 
 
@@ -286,7 +326,9 @@ async def login(request: Request) -> RedirectResponse:
     form = await request.form()
     submitted = form.get("password")
     if submitted is None or not verify_password(str(submitted)):
-        return RedirectResponse(url="/admin/login?error=Invalid%20password", status_code=303)
+        return RedirectResponse(
+            url="/admin/login?error=Contrase%C3%B1a%20incorrecta", status_code=303
+        )
     response = RedirectResponse(url="/admin", status_code=303)
     response.set_cookie(
         SESSION_COOKIE_NAME,
@@ -367,7 +409,7 @@ async def claim_groups_page(
 async def claim_group_detail(request: Request, db: DbSession, group_id: uuid.UUID) -> HTMLResponse:
     group = await ClaimGroupRepository(db).get_with_members(group_id)
     if group is None:
-        raise HTTPException(status_code=404, detail="Claim group not found")
+        raise HTTPException(status_code=404, detail="Grupo de afirmaciones no encontrado")
     persons = await PersonRepository(db).list(limit=500)
     sources = await SourceRepository(db).list(limit=500)
     claims = group.claims
@@ -413,8 +455,11 @@ async def claim_group_set_status(
         group_id, status=payload.status, resolution_note=payload.resolution_note
     )
     if updated is None:
-        return _back(detail_url, error="Claim group not found")
-    return _back(detail_url, message=f"Claim group marked as {payload.status.value}")
+        return _back(detail_url, error="Grupo de afirmaciones no encontrado")
+    return _back(
+        detail_url,
+        message=f"El grupo de afirmaciones se ha marcado como {payload.status.value}",
+    )
 
 
 @router.post("/claim-groups/{group_id}/merge")
@@ -425,11 +470,11 @@ async def claim_group_merge(
     form = await request.form()
     raw_target = _text(form, "target_group_id")
     if raw_target is None:
-        return _back(detail_url, error="Select a surviving target group")
+        return _back(detail_url, error="Selecciona un grupo de destino superviviente")
     try:
         target_group_id = uuid.UUID(raw_target)
     except ValueError:
-        return _back(detail_url, error="Invalid target group id")
+        return _back(detail_url, error="El identificador del grupo de destino no es válido")
     try:
         survivor = await ClaimGroupMergeService(db).merge(
             group_id,
@@ -440,7 +485,7 @@ async def claim_group_merge(
         return _back(detail_url, error=_error_text(exc))
     return _back(
         f"/admin/claim-groups/{survivor.id}",
-        message=f"Merged claim group {group_id} into {survivor.id}",
+        message=f"El grupo de afirmaciones {group_id} se ha fusionado en {survivor.id}",
     )
 
 
@@ -457,7 +502,7 @@ async def claim_group_materialize_fact(
         )
     except (ValidationError, SQLAlchemyError, MaterializationError) as exc:
         return _back(detail_url, error=_error_text(exc))
-    return _back(detail_url, message=f"Materialized as fact {fact.id}")
+    return _back(detail_url, message=f"Se ha materializado como hecho {fact.id}")
 
 
 @router.post("/claim-groups/{group_id}/materialize-memory")
@@ -476,7 +521,7 @@ async def claim_group_materialize_memory(
         ).materialize_claim_group_memory(group_id, payload)
     except (ValidationError, SQLAlchemyError, MaterializationError) as exc:
         return _back(detail_url, error=_error_text(exc))
-    return _back(detail_url, message=f"Materialized as memory {memory.id}")
+    return _back(detail_url, message=f"Se ha materializado como recuerdo {memory.id}")
 
 
 # --------------------------------------------------------------------------
@@ -502,7 +547,7 @@ async def knowledge_gaps_page(
 async def knowledge_gap_detail(request: Request, db: DbSession, gap_id: uuid.UUID) -> HTMLResponse:
     gap = await KnowledgeGapRepository(db).get(gap_id)
     if gap is None:
-        raise HTTPException(status_code=404, detail="Knowledge gap not found")
+        raise HTTPException(status_code=404, detail="Brecha de conocimiento no encontrada")
     persons = await PersonRepository(db).list(limit=500)
     facts = await FactRepository(db).list(limit=500)
     sources = await SourceRepository(db).list(limit=500)
@@ -552,8 +597,11 @@ async def knowledge_gap_set_status(
         resolved_fact_id=payload.resolved_fact_id,
     )
     if updated is None:
-        return _back(detail_url, error="Knowledge gap not found")
-    return _back(detail_url, message=f"Knowledge gap marked as {payload.status.value}")
+        return _back(detail_url, error="Brecha de conocimiento no encontrada")
+    return _back(
+        detail_url,
+        message=f"La brecha de conocimiento se ha marcado como {payload.status.value}",
+    )
 
 
 @router.post("/knowledge-gaps/{gap_id}/materialize-fact")
@@ -567,7 +615,7 @@ async def knowledge_gap_materialize_fact(
         fact = await MaterializationService(db).materialize_gap_fact(gap_id, payload)
     except (ValidationError, SQLAlchemyError, MaterializationError) as exc:
         return _back(detail_url, error=_error_text(exc))
-    return _back(detail_url, message=f"Materialized as fact {fact.id}")
+    return _back(detail_url, message=f"Se ha materializado como hecho {fact.id}")
 
 
 @router.post("/knowledge-gaps/{gap_id}/materialize-memory")
@@ -586,7 +634,7 @@ async def knowledge_gap_materialize_memory(
         ).materialize_gap_memory(gap_id, payload)
     except (ValidationError, SQLAlchemyError, MaterializationError) as exc:
         return _back(detail_url, error=_error_text(exc))
-    return _back(detail_url, message=f"Materialized as memory {memory.id}")
+    return _back(detail_url, message=f"Se ha materializado como recuerdo {memory.id}")
 
 
 # --------------------------------------------------------------------------
@@ -620,7 +668,7 @@ async def sources_create(request: Request, db: DbSession) -> RedirectResponse:
         source = await SourceRepository(db).create(payload)
     except (ValidationError, SQLAlchemyError) as exc:
         return _back("/admin/sources", error=_error_text(exc))
-    return _back("/admin/sources", message=f"Source {source.id} created")
+    return _back("/admin/sources", message=f"Se ha creado la fuente {source.id}")
 
 
 @router.get("/persons", response_class=HTMLResponse)
@@ -658,7 +706,7 @@ async def persons_create(request: Request, db: DbSession) -> RedirectResponse:
         person = await PersonRepository(db).create(payload)
     except (ValidationError, SQLAlchemyError) as exc:
         return _back("/admin/persons", error=_error_text(exc))
-    return _back("/admin/persons", message=f"Person {person.display_name} created")
+    return _back("/admin/persons", message=f"Se ha creado la persona {person.display_name}")
 
 
 @router.post("/persons/{person_id}/primary-media")
@@ -677,14 +725,15 @@ async def persons_set_primary_media(
         try:
             media_id = uuid.UUID(raw)
         except ValueError:
-            return _back("/admin/persons", error="Invalid media id")
+            return _back("/admin/persons", error="El identificador del recurso multimedia no es válido")
         if await MediaRepository(db).get(media_id) is None:
-            return _back("/admin/persons", error="Media not found")
+            return _back("/admin/persons", error="Recurso multimedia no encontrado")
     person = await PersonRepository(db).set_primary_media(person_id, media_id)
     if person is None:
-        return _back("/admin/persons", error="Person not found")
+        return _back("/admin/persons", error="Persona no encontrada")
     return _back(
-        "/admin/persons", message=f"Primary media updated for {person.display_name}"
+        "/admin/persons",
+        message=f"Se ha actualizado la multimedia principal de {person.display_name}",
     )
 
 
@@ -718,7 +767,9 @@ async def media_create(request: Request, db: DbSession) -> RedirectResponse:
         media = await MediaRepository(db).create(payload)
     except (ValidationError, SQLAlchemyError) as exc:
         return _back("/admin/media", error=_error_text(exc))
-    return _back("/admin/media", message=f"Media {media.id} created")
+    return _back(
+        "/admin/media", message=f"Se ha creado el recurso multimedia {media.id}"
+    )
 
 
 @router.get("/facts", response_class=HTMLResponse)
@@ -747,7 +798,7 @@ async def facts_create(request: Request, db: DbSession) -> RedirectResponse:
         fact = await FactRepository(db).create(payload)
     except (ValidationError, SQLAlchemyError) as exc:
         return _back("/admin/facts", error=_error_text(exc))
-    return _back("/admin/facts", message=f"Fact {fact.id} created")
+    return _back("/admin/facts", message=f"Se ha creado el hecho {fact.id}")
 
 
 @router.get("/memories", response_class=HTMLResponse)
@@ -788,7 +839,7 @@ async def memories_create(
         memory = await repo.create(payload, embedding=embedding)
     except (SQLAlchemyError, UnsupportedVectorSearch) as exc:
         return _back("/admin/memories", error=_error_text(exc))
-    return _back("/admin/memories", message=f"Memory {memory.id} created")
+    return _back("/admin/memories", message=f"Se ha creado el recuerdo {memory.id}")
 
 
 # --------------------------------------------------------------------------
@@ -820,5 +871,8 @@ async def embeddings_backfill(request: Request, db: DbSession, embedder: Embedde
             embedder=embedder, memory_repo=MemoryRepository(db)
         ).backfill()
     except UnsupportedVectorSearch as exc:
-        return _back("/admin/embeddings", error=str(exc))
-    return _back("/admin/embeddings", message=f"Backfilled {processed} memories")
+        return _back("/admin/embeddings", error=_error_text(exc))
+    return _back(
+        "/admin/embeddings",
+        message=f"Se han generado los embeddings de {processed} recuerdos",
+    )

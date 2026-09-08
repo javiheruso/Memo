@@ -1,38 +1,38 @@
 {% extends "base.html" %}
-{% block title %}Memo Admin · Claim groups{% endblock %}
+{% block title %}Memo Admin · Grupos de afirmaciones{% endblock %}
 {% block content %}
-<h1>Claim groups</h1>
+<h1>Grupos de afirmaciones</h1>
 
 <form method="get" action="/admin/claim-groups" style="display: flex; gap: 12px; align-items: end; margin-bottom: 8px;">
   <div>
-    <label>Status</label>
+    <label>Estado</label>
     <select name="status" style="width: 160px;">
-      <option value="">any</option>
+      <option value="">cualquiera</option>
       {% for item in status_options %}
         <option value="{{ item.value }}" {% if filter_status and filter_status.value == item.value %}selected{% endif %}>{{ item.value }}</option>
       {% endfor %}
     </select>
   </div>
   <div>
-    <label>Needs review</label>
+    <label>Requiere revisión</label>
     <select name="needs_review" style="width: 160px;">
-      <option value="">any</option>
-      <option value="true" {% if filter_needs_review is true %}selected{% endif %}>yes</option>
+      <option value="">cualquiera</option>
+      <option value="true" {% if filter_needs_review is true %}selected{% endif %}>sí</option>
       <option value="false" {% if filter_needs_review is false %}selected{% endif %}>no</option>
     </select>
   </div>
-  <button type="submit">Filter</button>
+  <button type="submit">Filtrar</button>
 </form>
 
 <table>
   <thead>
     <tr>
-      <th>Canonical text</th>
-      <th>Mentions</th>
-      <th>Conversations</th>
-      <th>Days</th>
-      <th>Last seen</th>
-      <th>Status</th>
+      <th>Texto canónico</th>
+      <th>Menciones</th>
+      <th>Conversaciones</th>
+      <th>Días</th>
+      <th>Última aparición</th>
+      <th>Estado</th>
       <th></th>
     </tr>
   </thead>
@@ -45,13 +45,13 @@
       <td>{{ group.distinct_days }}</td>
       <td class="mono">{{ group.last_seen_at }}</td>
       <td>
-        {% if group.needs_review %}<span class="badge alert">needs review</span>{% endif %}
+        {% if group.needs_review %}<span class="badge alert">requiere revisión</span>{% endif %}
         <span class="badge">{{ group.status.value }}</span>
       </td>
-      <td><a href="/admin/claim-groups/{{ group.id }}">Open</a></td>
+      <td><a href="/admin/claim-groups/{{ group.id }}">Abrir</a></td>
     </tr>
     {% else %}
-    <tr><td colspan="7" class="muted">No claim groups match.</td></tr>
+    <tr><td colspan="7" class="muted">Ningún grupo de afirmaciones coincide.</td></tr>
     {% endfor %}
   </tbody>
 </table>

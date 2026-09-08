@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -32,19 +32,19 @@
 </head>
 <body>
 <nav>
-  <a href="/admin">Dashboard</a>
-  <a href="/admin/claim-groups">Claim groups</a>
-  <a href="/admin/knowledge-gaps">Knowledge gaps</a>
-  <a href="/admin/sources">Sources</a>
-  <a href="/admin/persons">Persons</a>
-  <a href="/admin/media">Media</a>
-  <a href="/admin/facts">Facts</a>
-  <a href="/admin/memories">Memories</a>
+  <a href="/admin">Panel</a>
+  <a href="/admin/claim-groups">Grupos de afirmaciones</a>
+  <a href="/admin/knowledge-gaps">Brechas de conocimiento</a>
+  <a href="/admin/sources">Fuentes</a>
+  <a href="/admin/persons">Personas</a>
+  <a href="/admin/media">Multimedia</a>
+  <a href="/admin/facts">Hechos</a>
+  <a href="/admin/memories">Recuerdos</a>
   <a href="/admin/embeddings">Embeddings</a>
-  <a href="/docs">API docs</a>
+  <a href="/docs">Documentación de la API</a>
   {% if auth_enabled %}
   <form action="/admin/logout" method="post" style="display:inline; margin-left:16px;">
-    <button type="submit" style="margin:0; padding:2px 10px; font-size:14px;">Logout</button>
+    <button type="submit" style="margin:0; padding:2px 10px; font-size:14px;">Cerrar sesión</button>
   </form>
   {% endif %}
 </nav>

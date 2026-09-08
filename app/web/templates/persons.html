@@ -1,17 +1,17 @@
 {% extends "base.html" %}
-{% block title %}Memo Admin · Persons{% endblock %}
+{% block title %}Memo Admin · Personas{% endblock %}
 {% block content %}
-<h1>Persons</h1>
+<h1>Personas</h1>
 
 <div class="grid">
   <div>
-    <h2>All persons</h2>
+    <h2>Todas las personas</h2>
     <table>
-      <thead><tr><th>Name</th><th>Birth</th><th>Primary media</th><th>Aliases</th><th>Description</th></tr></thead>
+      <thead><tr><th>Nombre</th><th>Nacimiento</th><th>Multimedia principal</th><th>Alias</th><th>Descripción</th></tr></thead>
       <tbody>
         {% for person in persons %}
         <tr>
-          <td>{{ person.display_name }}{% if person.is_deceased %} <span class="badge">deceased</span>{% endif %}</td>
+          <td>{{ person.display_name }}{% if person.is_deceased %} <span class="badge">fallecido</span>{% endif %}</td>
           <td>{{ person.birth_date or "—" }}</td>
           <td>
             {% if person.primary_media_id %}
@@ -19,19 +19,19 @@
             {% endif %}
             <form method="post" action="/admin/persons/{{ person.id }}/primary-media">
               <select name="media_id">
-                <option value="">— none —</option>
+                <option value="">— ninguna —</option>
                 {% for option in media_options %}
                 <option value="{{ option.id }}" {% if person.primary_media_id == option.id %}selected{% endif %}>{{ option.label }}</option>
                 {% endfor %}
               </select>
-              <button type="submit">Set primary</button>
+              <button type="submit">Establecer principal</button>
             </form>
           </td>
           <td>{{ person.aliases | map(attribute="alias") | join(", ") or "—" }}</td>
           <td>{{ person.description or "—" }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="5" class="muted">No persons yet.</td></tr>
+        <tr><td colspan="5" class="muted">Aún no hay personas.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -39,18 +39,18 @@
 
   <div>
     <fieldset>
-      <legend>Create person</legend>
+      <legend>Crear persona</legend>
       <form method="post" action="/admin/persons">
-        <label>First name</label>
+        <label>Nombre</label>
         <input name="first_name" required>
-        <label>Last name</label>
+        <label>Apellido</label>
         <input name="last_name">
-        <label>Birth date</label>
+        <label>Fecha de nacimiento</label>
         <input type="date" name="birth_date">
-        <label><input type="checkbox" name="is_deceased"> Deceased</label>
-        <label>Description</label>
+        <label><input type="checkbox" name="is_deceased"> Fallecido</label>
+        <label>Descripción</label>
         <textarea name="description" rows="3"></textarea>
-        <button type="submit">Create person</button>
+        <button type="submit">Crear persona</button>
       </form>
     </fieldset>
   </div>

@@ -1,13 +1,13 @@
 {% extends "base.html" %}
-{% block title %}Memo Admin · Sources{% endblock %}
+{% block title %}Memo Admin · Fuentes{% endblock %}
 {% block content %}
-<h1>Sources</h1>
+<h1>Fuentes</h1>
 
 <div class="grid">
   <div>
-    <h2>All sources</h2>
+    <h2>Todas las fuentes</h2>
     <table>
-      <thead><tr><th>Type</th><th>Person</th><th>Description</th><th>External reference</th></tr></thead>
+      <thead><tr><th>Tipo</th><th>Persona</th><th>Descripción</th><th>Referencia externa</th></tr></thead>
       <tbody>
         {% for source in sources %}
         <tr>
@@ -17,7 +17,7 @@
           <td class="mono">{{ source.external_reference or "—" }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="4" class="muted">No sources yet.</td></tr>
+        <tr><td colspan="4" class="muted">Aún no hay fuentes.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -25,26 +25,26 @@
 
   <div>
     <fieldset>
-      <legend>Create source</legend>
+      <legend>Crear fuente</legend>
       <form method="post" action="/admin/sources">
-        <label>Type</label>
+        <label>Tipo</label>
         <select name="source_type" required>
           {% for item in source_type_options %}
           <option value="{{ item.value }}">{{ item.value }}</option>
           {% endfor %}
         </select>
-        <label>Linked person (optional)</label>
+        <label>Persona vinculada (opcional)</label>
         <select name="person_id">
-          <option value="">— none —</option>
+          <option value="">— ninguna —</option>
           {% for person in persons %}
           <option value="{{ person.id }}">{{ person.display_name }}</option>
           {% endfor %}
         </select>
-        <label>Description</label>
+        <label>Descripción</label>
         <input name="description">
-        <label>External reference</label>
+        <label>Referencia externa</label>
         <input name="external_reference">
-        <button type="submit">Create source</button>
+        <button type="submit">Crear fuente</button>
       </form>
     </fieldset>
   </div>

@@ -1,13 +1,13 @@
 {% extends "base.html" %}
-{% block title %}Memo Admin · Memories{% endblock %}
+{% block title %}Memo Admin · Recuerdos{% endblock %}
 {% block content %}
-<h1>Memories</h1>
+<h1>Recuerdos</h1>
 
 <div class="grid">
   <div>
-    <h2>All memories</h2>
+    <h2>Todos los recuerdos</h2>
     <table>
-      <thead><tr><th>Title</th><th>Narrative</th><th>Period / place</th><th>Status</th><th>Sensitivity</th><th>People</th></tr></thead>
+      <thead><tr><th>Título</th><th>Narración</th><th>Período / lugar</th><th>Estado</th><th>Sensibilidad</th><th>Personas</th></tr></thead>
       <tbody>
         {% for memory in memories %}
         <tr>
@@ -23,7 +23,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="6" class="muted">No memories yet.</td></tr>
+        <tr><td colspan="6" class="muted">Aún no hay recuerdos.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -31,45 +31,45 @@
 
   <div>
     <fieldset>
-      <legend>Create memory</legend>
+      <legend>Crear recuerdo</legend>
       <form method="post" action="/admin/memories">
-        <label>Title</label>
+        <label>Título</label>
         <input name="title">
-        <label>Narrative</label>
+        <label>Narración</label>
         <textarea name="narrative" rows="4" required></textarea>
-        <label>Approximate period</label>
+        <label>Período aproximado</label>
         <input name="approx_period_text">
-        <label>Place text</label>
+        <label>Lugar</label>
         <input name="place_text">
-        <label>Memory status</label>
+        <label>Estado del recuerdo</label>
         <select name="memory_status">
           {% for item in memory_status_options %}
           <option value="{{ item.value }}">{{ item.value }}</option>
           {% endfor %}
         </select>
-        <label>Sensitivity</label>
+        <label>Sensibilidad</label>
         <select name="sensitivity_level">
           {% for item in sensitivity_options %}
           <option value="{{ item.value }}">{{ item.value }}</option>
           {% endfor %}
         </select>
-        <label>Source</label>
+        <label>Fuente</label>
         <select name="source_id" required>
-          <option value="">— select —</option>
+          <option value="">— seleccionar —</option>
           {% for source in sources %}
           <option value="{{ source.id }}">{{ source.description or source.source_type.value }}</option>
           {% endfor %}
         </select>
-        <label>Linked person (optional)</label>
+        <label>Persona vinculada (opcional)</label>
         <select name="person_id">
-          <option value="">— none —</option>
+          <option value="">— ninguna —</option>
           {% for person in persons %}
           <option value="{{ person.id }}">{{ person.display_name }}</option>
           {% endfor %}
         </select>
-        <label>Role</label>
+        <label>Rol</label>
         <input name="person_role">
-        <button type="submit">Create memory</button>
+        <button type="submit">Crear recuerdo</button>
       </form>
     </fieldset>
   </div>

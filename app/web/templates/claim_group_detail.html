@@ -1,27 +1,27 @@
 {% extends "base.html" %}
-{% block title %}Memo Admin · Claim group{% endblock %}
+{% block title %}Memo Admin · Grupo de afirmaciones{% endblock %}
 {% block content %}
-<p><a href="/admin/claim-groups">&larr; Claim groups</a></p>
-<h1>Claim group</h1>
+<p><a href="/admin/claim-groups">&larr; Grupos de afirmaciones</a></p>
+<h1>Grupo de afirmaciones</h1>
 
 <table>
-  <tr><th>Canonical text</th><td>{{ group.canonical_text }}</td></tr>
-  <tr><th>Status</th><td>
-    {% if group.needs_review %}<span class="badge alert">needs review</span>{% endif %}
+  <tr><th>Texto canónico</th><td>{{ group.canonical_text }}</td></tr>
+  <tr><th>Estado</th><td>
+    {% if group.needs_review %}<span class="badge alert">requiere revisión</span>{% endif %}
     <span class="badge">{{ group.status.value }}</span>
   </td></tr>
-  <tr><th>Mentions</th><td>{{ group.total_mentions }}</td></tr>
-  <tr><th>Distinct conversations</th><td>{{ group.distinct_conversations }}</td></tr>
-  <tr><th>Distinct days</th><td>{{ group.distinct_days }}</td></tr>
-  <tr><th>First seen</th><td class="mono">{{ group.first_seen_at }}</td></tr>
-  <tr><th>Last seen</th><td class="mono">{{ group.last_seen_at }}</td></tr>
-  <tr><th>Resolved at</th><td class="mono">{{ group.resolved_at or "—" }}</td></tr>
-  <tr><th>Resolution note</th><td>{{ group.resolution_note or "—" }}</td></tr>
+  <tr><th>Menciones</th><td>{{ group.total_mentions }}</td></tr>
+  <tr><th>Conversaciones distintas</th><td>{{ group.distinct_conversations }}</td></tr>
+  <tr><th>Días distintos</th><td>{{ group.distinct_days }}</td></tr>
+  <tr><th>Primera aparición</th><td class="mono">{{ group.first_seen_at }}</td></tr>
+  <tr><th>Última aparición</th><td class="mono">{{ group.last_seen_at }}</td></tr>
+  <tr><th>Resuelto en</th><td class="mono">{{ group.resolved_at or "—" }}</td></tr>
+  <tr><th>Nota de resolución</th><td>{{ group.resolution_note or "—" }}</td></tr>
 </table>
 
-<h2>Member claims</h2>
+<h2>Afirmaciones del grupo</h2>
 <table>
-  <thead><tr><th>Original text</th><th>Message</th><th>Speaker</th><th>Status</th><th>First seen</th><th>Conversation</th></tr></thead>
+  <thead><tr><th>Texto original</th><th>Mensaje</th><th>Hablante</th><th>Estado</th><th>Primera aparición</th><th>Conversación</th></tr></thead>
   <tbody>
     {% for claim in group.claims %}
     <tr>
@@ -33,14 +33,14 @@
       <td class="mono">{{ claim.conversation_id }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="6" class="muted">No member claims.</td></tr>
+    <tr><td colspan="6" class="muted">No hay afirmaciones en este grupo.</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
-<h2>Contradiction signals</h2>
+<h2>Señales de contradicción</h2>
 <table>
-  <thead><tr><th>Detector</th><th>Fact (value_text)</th><th>Fact place</th><th>Matched terms</th><th>Count</th><th>First detected</th></tr></thead>
+  <thead><tr><th>Detector</th><th>Hecho (texto del valor)</th><th>Lugar del hecho</th><th>Términos coincidentes</th><th>Veces</th><th>Primera detección</th></tr></thead>
   <tbody>
     {% for signal in group.contradictions %}
     <tr>
@@ -52,48 +52,48 @@
       <td class="mono">{{ signal.first_detected_at }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="6" class="muted">No contradiction signals.</td></tr>
+    <tr><td colspan="6" class="muted">No hay señales de contradicción.</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
 {% if mergeable %}
-<h2>Merge into another group</h2>
-<p class="muted">Fold this group into a surviving group when two groups only differ in wording. Member claims and contradiction evidence move to the survivor, then this group is removed and its wording keeps routing future claims to the survivor.</p>
+<h2>Fusionar en otro grupo</h2>
+<p class="muted">Fusiona este grupo en un grupo superviviente cuando dos grupos solo se diferencian en la redacción. Las afirmaciones integrantes y las evidencias de contradicción se trasladan al superviviente, este grupo se elimina y su redacción sigue dirigiendo futuras afirmaciones al superviviente.</p>
 <form method="post" action="/admin/claim-groups/{{ group.id }}/merge">
-  <label>Surviving target group</label>
+  <label>Grupo de destino superviviente</label>
   <select name="target_group_id" required>
-    <option value="">— select —</option>
+    <option value="">— seleccionar —</option>
     {% for item in merge_candidates %}
-    <option value="{{ item.group_id }}">{{ item.canonical_text }} · {{ item.total_mentions }} mention(s){% if item.shared_terms > 0 %} · {{ item.shared_terms }} shared word(s){% endif %}{% if item.opposite_polarity %} · opposite polarity{% endif %}</option>
+    <option value="{{ item.group_id }}">{{ item.canonical_text }} · {{ item.total_mentions }} mención(es){% if item.shared_terms > 0 %} · {{ item.shared_terms }} palabra(s) compartida(s){% endif %}{% if item.opposite_polarity %} · polaridad opuesta{% endif %}</option>
     {% else %}
-    <option value="">No other active groups available</option>
+    <option value="">No hay otros grupos activos disponibles</option>
     {% endfor %}
   </select>
-  <label><input type="checkbox" name="confirm_opposite_polarity" style="width:auto;"> Confirm opposite-polarity merge</label>
-  <p class="muted">Check this only when intentionally merging a negated wording into a non-negated survivor (or vice versa).</p>
-  <button type="submit">Merge into selected group</button>
+  <label><input type="checkbox" name="confirm_opposite_polarity" style="width:auto;"> Confirmar fusión de polaridad opuesta</label>
+  <p class="muted">Marca esta opción solo cuando fusionas intencionalmente una redacción negada en un superviviente no negado (o viceversa).</p>
+  <button type="submit">Fusionar en el grupo seleccionado</button>
 </form>
 {% elif group.status.value == "ignored" %}
-<p class="muted">Ignored groups cannot be merged.</p>
+<p class="muted">Los grupos ignorados no se pueden fusionar.</p>
 {% else %}
-<p class="muted">Only active claim groups can be merged.</p>
+<p class="muted">Solo los grupos de afirmaciones activos se pueden fusionar.</p>
 {% endif %}
 
 <div class="grid">
   <div>
     <fieldset>
-      <legend>Review status</legend>
+      <legend>Estado de revisión</legend>
       <form method="post" action="/admin/claim-groups/{{ group.id }}/status">
-        <label>Status</label>
+        <label>Estado</label>
         <select name="status">
           {% for item in status_options %}
             <option value="{{ item.value }}" {% if group.status.value == item.value %}selected{% endif %}>{{ item.value }}</option>
           {% endfor %}
         </select>
-        <label>Resolution note</label>
-        <textarea name="resolution_note" rows="3" placeholder="Optional note for the audit trail">{{ group.resolution_note or "" }}</textarea>
-        <button type="submit">Apply</button>
+        <label>Nota de resolución</label>
+        <textarea name="resolution_note" rows="3" placeholder="Nota opcional para el registro de auditoría">{{ group.resolution_note or "" }}</textarea>
+        <button type="submit">Aplicar</button>
       </form>
     </fieldset>
   </div>
@@ -101,89 +101,89 @@
   {% if group.status.value != "ignored" %}
   <div>
     <fieldset>
-      <legend>Materialize as fact</legend>
+      <legend>Materializar como hecho</legend>
       <form method="post" action="/admin/claim-groups/{{ group.id }}/materialize-fact">
-        <label>Subject person</label>
+        <label>Persona protagonista</label>
         <select name="subject_person_id" required>
-          <option value="">— select —</option>
+          <option value="">— seleccionar —</option>
           {% for person in persons %}
           <option value="{{ person.id }}">{{ person.display_name }}</option>
           {% endfor %}
         </select>
-        <label>Fact type</label>
+        <label>Tipo de hecho</label>
         <input name="fact_type" value="residence" required>
-        <label>Value text <span class="muted">(pre-filled with the first-seen wording; falls back to the canonical text when empty)</span></label>
+        <label>Texto del valor <span class="muted">(se rellena con la redacción de la primera aparición; usa el texto canónico si está vacío)</span></label>
         <input name="value_text" value="{{ default_text }}">
-        <label>Value date</label>
+        <label>Fecha del valor</label>
         <input type="date" name="value_date">
-        <label>Place text</label>
+        <label>Lugar</label>
         <input name="place_text">
-        <label>Status</label>
+        <label>Estado</label>
         <select name="status">
           {% for item in fact_status_options %}
           <option value="{{ item.value }}">{{ item.value }}</option>
           {% endfor %}
         </select>
-        <label>Source</label>
+        <label>Fuente</label>
         <select name="source_id" required>
-          <option value="">— select —</option>
+          <option value="">— seleccionar —</option>
           {% for source in sources %}
           <option value="{{ source.id }}">{{ source.description or source.source_type.value }}</option>
           {% endfor %}
         </select>
-        <label>Notes</label>
+        <label>Notas</label>
         <textarea name="notes" rows="2"></textarea>
-        <button type="submit">Materialize as fact</button>
+        <button type="submit">Materializar como hecho</button>
       </form>
     </fieldset>
   </div>
 
   <div>
     <fieldset>
-      <legend>Materialize as memory</legend>
+      <legend>Materializar como recuerdo</legend>
       <form method="post" action="/admin/claim-groups/{{ group.id }}/materialize-memory">
-        <label>Title <span class="muted">(pre-filled with the first-seen wording; falls back to the canonical text when empty)</span></label>
+        <label>Título <span class="muted">(se rellena con la redacción de la primera aparición; usa el texto canónico si está vacío)</span></label>
         <input name="title" value="{{ default_text }}">
-        <label>Narrative <span class="muted">(pre-filled with the first-seen wording; falls back to the canonical text when empty)</span></label>
+        <label>Narración <span class="muted">(se rellena con la redacción de la primera aparición; usa el texto canónico si está vacío)</span></label>
         <textarea name="narrative" rows="3">{{ default_text }}</textarea>
-        <label>Approximate period</label>
+        <label>Período aproximado</label>
         <input name="approx_period_text">
-        <label>Place text</label>
+        <label>Lugar</label>
         <input name="place_text">
-        <label>Memory status</label>
+        <label>Estado del recuerdo</label>
         <select name="memory_status">
           {% for item in memory_status_options %}
           <option value="{{ item.value }}">{{ item.value }}</option>
           {% endfor %}
         </select>
-        <label>Sensitivity</label>
+        <label>Sensibilidad</label>
         <select name="sensitivity_level">
           {% for item in sensitivity_options %}
           <option value="{{ item.value }}">{{ item.value }}</option>
           {% endfor %}
         </select>
-        <label>Source</label>
+        <label>Fuente</label>
         <select name="source_id" required>
-          <option value="">— select —</option>
+          <option value="">— seleccionar —</option>
           {% for source in sources %}
           <option value="{{ source.id }}">{{ source.description or source.source_type.value }}</option>
           {% endfor %}
         </select>
-        <label>Linked person (optional)</label>
+        <label>Persona vinculada (opcional)</label>
         <select name="person_id">
-          <option value="">— none —</option>
+          <option value="">— ninguna —</option>
           {% for person in persons %}
           <option value="{{ person.id }}">{{ person.display_name }}</option>
           {% endfor %}
         </select>
-        <label>Role</label>
+        <label>Rol</label>
         <input name="person_role">
-        <button type="submit">Materialize as memory</button>
+        <button type="submit">Materializar como recuerdo</button>
       </form>
     </fieldset>
   </div>
   {% else %}
-  <p class="muted">Ignored groups cannot be materialized.</p>
+  <p class="muted">Los grupos ignorados no se pueden materializar.</p>
   {% endif %}
 </div>
 {% endblock %}

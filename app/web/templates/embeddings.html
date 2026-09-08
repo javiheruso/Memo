@@ -1,23 +1,24 @@
 {% extends "base.html" %}
 {% block title %}Memo Admin · Embeddings{% endblock %}
 {% block content %}
-<h1>Memory embeddings backfill</h1>
+<h1>Regeneración de embeddings de recuerdos</h1>
 
 <table>
-  <tr><th>Total memories</th><td>{{ total_memories }}</td></tr>
-  <tr><th>Memories without an embedding</th><td>{{ pending_embeddings }}</td></tr>
-  <tr><th>Backend supports pgvector writes</th><td>{{ "yes" if supports_vector_search else "no" }}</td></tr>
+  <tr><th>Recuerdos en total</th><td>{{ total_memories }}</td></tr>
+  <tr><th>Recuerdos sin embedding</th><td>{{ pending_embeddings }}</td></tr>
+  <tr><th>El backend admite escrituras pgvector</th><td>{{ "sí" if supports_vector_search else "no" }}</td></tr>
 </table>
 
 <p class="muted">
-  The backfill embeds the narrative memories that still have a NULL embedding.
-  It only runs against a PostgreSQL dialect (pgvector); on other dialects the
-  action is refused with an error and nothing is written.
+  La regeneración genera embeddings para los recuerdos narrativos que todavía
+  tienen un embedding NULL. Solo se ejecuta con un dialecto PostgreSQL
+  (pgvector); con otros dialectos la acción se rechaza con un error y no se
+  escribe nada.
 </p>
 
 <form method="post" action="/admin/embeddings/backfill">
-  <button type="submit" {% if not supports_vector_search %}disabled title="Requires PostgreSQL (pgvector)"{% endif %}>
-    Backfill embeddings
+  <button type="submit" {% if not supports_vector_search %}disabled title="Requiere PostgreSQL (pgvector)"{% endif %}>
+    Regenerar embeddings
   </button>
 </form>
 {% endblock %}
