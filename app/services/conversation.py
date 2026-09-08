@@ -11,7 +11,7 @@ from app.claims.grouping import ClaimGrouper, DeterministicClaimGrouper
 from app.domain.enums import Intent
 from app.embeddings.base import Embedder
 from app.llm.base import Responder
-from app.models import KnowledgeGap
+from app.models import KnowledgeGap, Person
 from app.repositories.conversation import (
     ConversationRepository,
     ResponseSourceRef,
@@ -24,6 +24,7 @@ from app.repositories.memory import MemoryRepository
 from app.repositories.person import PersonRepository
 from app.repositories.relationship import RelationshipRepository
 from app.retrieval.context_builder import AnswerContext, ContextBuilder
+from app.retrieval.disambiguation import DisambiguationResolver
 from app.retrieval.entity_resolver import EntityResolver, Resolution, ResolutionKind
 from app.retrieval.intent_router import IntentRouter
 from app.retrieval.semantic_retriever import SemanticRetriever
@@ -87,6 +88,7 @@ class ConversationService:
         self._context_builder = ContextBuilder()
         self._responder = responder
         self._conversations = ConversationRepository(session)
+        self._disambiguation = DisambiguationResolver(PersonRepository(session))
         self._gaps = KnowledgeGapRepository(session)
         self._claim_extractor = claim_extractor or DeterministicClaimExtractor()
         self._claim_ingestion = ClaimIngestionService(
@@ -102,6 +104,17 @@ class ConversationService:
     ) -> ChatResult:
         route = self._router.route(text)
         conversation = await self._conversations.get_or_create(conversation_id)
+
+        pending = await self._conversations.last_assistant_candidates(
+            conversation.id
+        )
+        if pending:
+            person = await self._disambiguation.resolve(text, pending)
+            if person is not None:
+                return await self._disambiguation_turn(
+                    conversation.id, text, person
+                )
+
         user_message = await self._conversations.add_message(
             conversation.id, speaker="user", text=text, intent=route.intent.value
         )
@@ -164,6 +177,44 @@ class ConversationService:
             ),
             gap=gap,
             gap_created=gap_created,
+        )
+
+    async def _disambiguation_turn(
+        self, conversation_id: uuid.UUID, text: str, person: Person
+    ) -> ChatResult:
+        """Answer a follow-up that selected one pending ambiguity candidate.
+
+        The user is picking a person already listed by the previous assistant
+        turn, not making a new query or a declarative statement, so neither
+        claim ingestion nor a knowledge-gap upsert runs for this turn.
+        """
+        await self._conversations.add_message(
+            conversation_id,
+            speaker="user",
+            text=text,
+            intent=Intent.person_query.value,
+        )
+        resolution = Resolution.from_people(person.display_name, [person])
+        data = await self._structured_retriever.retrieve(person.id)
+        context = self._context_builder.build_from_person_data(
+            data, resolution, intent=Intent.person_query
+        )
+        answer = await self._responder.respond(context)
+        assistant_message = await self._conversations.add_message(
+            conversation_id,
+            speaker="assistant",
+            text=answer.text,
+            intent=Intent.person_query.value,
+        )
+        if answer.sources:
+            await self._conversations.add_response_sources(
+                assistant_message.id, answer.sources
+            )
+        return ChatResult(
+            conversation_id=conversation_id,
+            intent=Intent.person_query,
+            answer=answer.text,
+            sources=answer.sources,
         )
 
     async def _ingest_claims(
