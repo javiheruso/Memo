@@ -19,3 +19,4 @@ htmlcov/
 .atl/
 *.zip
 *.zip:Zone.Identifier
+.codegraph/
