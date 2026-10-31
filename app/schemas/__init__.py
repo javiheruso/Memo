@@ -21,6 +21,12 @@ from app.schemas.memory import (
     MemoryPersonRead,
     MemoryRead,
 )
+from app.schemas.profile import (
+    ConversationProfileCreate,
+    ConversationProfileRead,
+    SensitiveTopicCreate,
+    SensitiveTopicRead,
+)
 from app.schemas.person import (
     PersonAliasCreate,
     PersonAliasRead,
@@ -53,11 +59,15 @@ __all__ = [
     "MemoryPersonCreate",
     "MemoryPersonRead",
     "MemoryRead",
+    "ConversationProfileCreate",
+    "ConversationProfileRead",
     "PersonAliasCreate",
     "PersonAliasRead",
     "PersonCreate",
     "PersonPrimaryMediaUpdate",
     "PersonRead",
+    "SensitiveTopicCreate",
+    "SensitiveTopicRead",
     "RelationshipCreate",
     "RelationshipRead",
     "SourceCreate",

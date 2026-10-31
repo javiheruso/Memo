@@ -13,6 +13,10 @@ from app.models.materialization import Materialization
 from app.models.media import Media, MediaPerson, MemoryMedia
 from app.models.memory import Memory, MemoryPerson
 from app.models.person import Person, PersonAlias, Relationship
+from app.models.profile import (
+    ConversationProfile,
+    ConversationProfileSensitiveTopic,
+)
 from app.models.source import Source
 
 __all__ = [
@@ -22,6 +26,8 @@ __all__ = [
     "ClaimGroupMember",
     "ClaimGroupRememberedKey",
     "Conversation",
+    "ConversationProfile",
+    "ConversationProfileSensitiveTopic",
     "Event",
     "EventPerson",
     "Fact",
