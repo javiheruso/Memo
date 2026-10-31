@@ -13,10 +13,14 @@ Design notes:
 * The document is explicitly fictional. The JSON ``verified`` status is stored
   as ``probable`` for facts and relationships: a simulated verification inside
   a story is not real-world verification.
-* Sections without a repository/domain model (conversational profile, consent
-  policy, attributed testimonies/versions, unresolved questions, media
-  placeholders) are not silently discarded. The returned report names each
-  skipped section, its item count, and the reason.
+* The conversational profile is imported as a durable profile plus its
+  configured sensitive topics. The imported profile is marked fictional, keeps
+  the source provenance resolved from the document, and is activated only when
+  no other profile is already active. Consent review flags are stored, not
+  silently dropped.
+* Sections without a repository/domain model (attributed testimonies/versions,
+  unresolved questions, media placeholders) are not silently discarded. The
+  returned report names each skipped section, its item count, and the reason.
 * Year-only birth dates are stored as ``NULL`` because the schema has no
   precision column; the report lists every affected person.
 * The whole document is validated before any write, and every row is flushed
@@ -51,10 +55,12 @@ from app.repositories.fact import FactRepository
 from app.repositories.memory import MemoryRepository
 from app.repositories.person import PersonRepository
 from app.repositories.relationship import RelationshipRepository
+from app.repositories.profile import ConversationProfileRepository
 from app.repositories.source import SourceRepository
 from app.schemas.fact import FactCreate
 from app.schemas.memory import MemoryCreate, MemoryPersonCreate
 from app.schemas.person import PersonAliasCreate, PersonCreate
+from app.schemas.profile import ConversationProfileCreate, SensitiveTopicCreate
 from app.schemas.relationship import RelationshipCreate
 from app.schemas.source import SourceCreate
 
@@ -105,6 +111,26 @@ _FACT_FIELDS = {
     "status",
     "source_id",
     "notes",
+}
+_PROFILE_FIELDS = {
+    "id",
+    "person_id",
+    "preferred_name",
+    "language",
+    "conversational_style",
+    "positive_topics",
+    "sensitive_topics",
+    "beliefs_policy",
+    "never_do",
+    "orientation",
+    "data_origin",
+    "source_id",
+}
+_SENSITIVE_TOPIC_FIELDS = {
+    "topic",
+    "handling",
+    "consent_review_required",
+    "triggers",
 }
 _MEMORY_FIELDS = {
     "id",
@@ -198,6 +224,41 @@ def _relationship_symbolic_id(item: dict[str, Any]) -> str:
             "source_id",
         )
     )
+
+
+def _profile_source_id(
+    profile: dict[str, Any],
+    source_items: dict[str, dict[str, Any]],
+    source_ids: dict[str, uuid.UUID],
+    person_ids: dict[str, uuid.UUID],
+) -> uuid.UUID | None:
+    """Resolve a provenance source for the imported profile.
+
+    An explicit JSON ``source_id`` wins. Otherwise prefer the profile person's
+    own user source, then any source attached to that person, then a system
+    source. Returning ``None`` is honest: the profile is still marked fictional
+    and its ``data_origin`` is stored verbatim.
+    """
+    explicit = profile.get("source_id")
+    if explicit is not None:
+        return source_ids[explicit]
+
+    person_id = person_ids[profile["person_id"]]
+    candidates = [
+        source
+        for source in source_items.values()
+        if source.get("person_id") is not None
+        and person_ids.get(source.get("person_id")) == person_id
+    ]
+    for source in candidates:
+        if source.get("source_type") == SourceType.user.value:
+            return source_ids[source["id"]]
+    if candidates:
+        return source_ids[candidates[0]["id"]]
+    for source in source_items.values():
+        if source.get("source_type") == SourceType.system.value:
+            return source_ids[source["id"]]
+    return None
 
 
 def _as_list(document: dict[str, Any], key: str) -> list[Any]:
@@ -306,6 +367,85 @@ def _index_unique(
             )
         indexed[symbolic_id] = item
     return indexed, items
+
+
+def _optional_text_list(
+    item: dict[str, Any], key: str, context: str
+) -> list[str]:
+    value = item.get(key, [])
+    if not isinstance(value, list):
+        raise OnboardingDemoError(f"{context}.{key} must be a JSON array")
+    result: list[str] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, str) or not entry.strip():
+            raise OnboardingDemoError(
+                f"{context}.{key}[{index}] must be a non-empty string"
+            )
+        result.append(entry.strip())
+    return result
+
+
+def _optional_bool(item: dict[str, Any], key: str, context: str) -> bool:
+    value = item.get(key, False)
+    if not isinstance(value, bool):
+        raise OnboardingDemoError(f"{context}.{key} must be a boolean")
+    return value
+
+
+def _validate_profile(
+    document: dict[str, Any],
+    persons: dict[str, dict[str, Any]],
+    sources: dict[str, dict[str, Any]],
+) -> None:
+    if "profile" not in document:
+        return
+    profile = document.get("profile")
+    if not isinstance(profile, dict):
+        raise OnboardingDemoError("'profile' must be a JSON object")
+
+    context = "profile"
+    _required_text(profile, "id", context)
+    person_reference = profile.get("person_id")
+    if person_reference not in persons:
+        raise OnboardingDemoError(
+            f"{context}.person_id references an unknown person "
+            f"{person_reference!r}"
+        )
+    _optional_text(profile, "preferred_name", context, max_length=255)
+    _optional_text(profile, "language", context, max_length=50)
+    for key in (
+        "conversational_style",
+        "beliefs_policy",
+        "orientation",
+        "data_origin",
+    ):
+        _optional_text(profile, key, context)
+    _optional_text_list(profile, "positive_topics", context)
+    _optional_text_list(profile, "never_do", context)
+    source_reference = profile.get("source_id")
+    if source_reference is not None and source_reference not in sources:
+        raise OnboardingDemoError(
+            f"{context}.source_id references an unknown source "
+            f"{source_reference!r}"
+        )
+
+    topics = profile.get("sensitive_topics", [])
+    if not isinstance(topics, list):
+        raise OnboardingDemoError(f"{context}.sensitive_topics must be a JSON array")
+    seen: set[str] = set()
+    for index, topic in enumerate(topics):
+        topic_context = f"{context}.sensitive_topics[{index}]"
+        topic = _as_object(topic, f"{context}.sensitive_topics", index)
+        name = _required_text(topic, "topic", topic_context, max_length=255)
+        folded = name.strip().lower()
+        if folded in seen:
+            raise OnboardingDemoError(
+                f"{context}.sensitive_topics contains duplicate topic {name!r}"
+            )
+        seen.add(folded)
+        _optional_text(topic, "handling", topic_context)
+        _optional_bool(topic, "consent_review_required", topic_context)
+        _optional_text_list(topic, "triggers", topic_context)
 
 
 def _validate_document(document: dict[str, Any]) -> None:
@@ -451,6 +591,8 @@ def _validate_document(document: dict[str, Any]) -> None:
                 max_length=50,
             )
 
+    _validate_profile(document, persons, sources)
+
 
 def _person_birth_date(
     person: dict[str, Any],
@@ -501,6 +643,7 @@ class OnboardingDemoImporter:
         self._relationships = RelationshipRepository(session)
         self._facts = FactRepository(session)
         self._memories = MemoryRepository(session)
+        self._profiles = ConversationProfileRepository(session)
 
     async def run(self, document: dict[str, Any]) -> ImportReport:
         _validate_document(document)
@@ -520,6 +663,8 @@ class OnboardingDemoImporter:
                 "facts": 0,
                 "memories": 0,
                 "memory_people": 0,
+                "profiles": 0,
+                "sensitive_topics": 0,
             },
             existing={
                 "persons": 0,
@@ -527,6 +672,7 @@ class OnboardingDemoImporter:
                 "relationships": 0,
                 "facts": 0,
                 "memories": 0,
+                "profiles": 0,
             },
         )
 
@@ -624,6 +770,60 @@ class OnboardingDemoImporter:
                 commit=False,
             )
             report.created["sources"] += 1
+
+        profile = document.get("profile")
+        if isinstance(profile, dict):
+            profile_id = _stable_id("profile", profile["id"])
+            if await self._profiles.get(profile_id) is not None:
+                report.existing["profiles"] += 1
+            else:
+                sensitive_topics = profile.get("sensitive_topics", [])
+                await self._profiles.create(
+                    ConversationProfileCreate(
+                        person_id=person_ids[profile["person_id"]],
+                        preferred_name=profile.get("preferred_name"),
+                        language=profile.get("language"),
+                        conversational_style=profile.get("conversational_style"),
+                        positive_topics=_optional_text_list(
+                            profile, "positive_topics", "profile"
+                        ),
+                        sensitive_topics=[
+                            SensitiveTopicCreate(
+                                topic=_required_text(
+                                    topic,
+                                    "topic",
+                                    f"profile.sensitive_topics[{index}]",
+                                    max_length=255,
+                                ),
+                                handling=topic.get("handling"),
+                                consent_review_required=_optional_bool(
+                                    topic,
+                                    "consent_review_required",
+                                    f"profile.sensitive_topics[{index}]",
+                                ),
+                                triggers=_optional_text_list(
+                                    topic,
+                                    "triggers",
+                                    f"profile.sensitive_topics[{index}]",
+                                ),
+                            )
+                            for index, topic in enumerate(sensitive_topics)
+                        ],
+                        beliefs_policy=profile.get("beliefs_policy"),
+                        never_do=_optional_text_list(profile, "never_do", "profile"),
+                        orientation=profile.get("orientation"),
+                        data_origin=profile.get("data_origin") or _IMPORT_NOTE,
+                        source_id=_profile_source_id(
+                            profile, source_items, source_ids, person_ids
+                        ),
+                        is_fictional=True,
+                        is_active=not await self._profiles.has_active(),
+                    ),
+                    entity_id=profile_id,
+                    commit=False,
+                )
+                report.created["profiles"] += 1
+                report.created["sensitive_topics"] += len(sensitive_topics)
 
         for relationship in relationship_items:
             key = _relationship_symbolic_id(relationship)
@@ -752,17 +952,6 @@ class OnboardingDemoImporter:
     @staticmethod
     def _skipped_sections(document: dict[str, Any]) -> list[SkippedSection]:
         skipped: list[SkippedSection] = []
-        if "profile" in document:
-            skipped.append(
-                SkippedSection(
-                    section="profile",
-                    count=1 if document.get("profile") else 0,
-                    reason=(
-                        "No conversational-profile model exists; importing it "
-                        "would silently invent persistence."
-                    ),
-                )
-            )
         for section, reason in (
             (
                 "testimonies_and_disputes",
@@ -825,6 +1014,18 @@ class OnboardingDemoImporter:
                     fields.update(_extra_fields(item, supported))
             if fields:
                 result[section] = sorted(fields)
+
+        profile = document.get("profile")
+        if isinstance(profile, dict):
+            profile_fields = _extra_fields(profile, _PROFILE_FIELDS)
+            if profile_fields:
+                result["profile"] = sorted(profile_fields)
+            topic_fields: set[str] = set()
+            for topic in profile.get("sensitive_topics", []):
+                if isinstance(topic, dict):
+                    topic_fields.update(_extra_fields(topic, _SENSITIVE_TOPIC_FIELDS))
+            if topic_fields:
+                result["profile.sensitive_topics"] = sorted(topic_fields)
         return result
 
 

@@ -19,6 +19,8 @@ from app.importers.onboarding_demo import (
     import_path,
 )
 from app.models import (
+    ConversationProfile,
+    ConversationProfileSensitiveTopic,
     Fact,
     Media,
     Memory,
@@ -217,6 +219,8 @@ async def test_import_path_creates_entities_aliases_and_links(
         "facts": 2,
         "memories": 2,
         "memory_people": 3,
+        "profiles": 1,
+        "sensitive_topics": 1,
     }
 
     persons = (
@@ -283,6 +287,7 @@ async def test_import_is_idempotent(db_session: AsyncSession) -> None:
         "relationships": 2,
         "facts": 2,
         "memories": 2,
+        "profiles": 1,
     }
     counts_after_second = {
         "persons": await _count(db_session, Person),
@@ -325,7 +330,6 @@ async def test_import_reports_unsupported_sections_and_date_precision(
 
     skipped = {item.section: item for item in report.skipped_sections}
     assert set(skipped) == {
-        "profile",
         "testimonies_and_disputes",
         "unresolved_questions",
         "media_placeholders",
@@ -354,6 +358,56 @@ async def test_import_reports_unsupported_sections_and_date_precision(
     assert high_sensitivity.title == "Una despedida difícil"
 
     assert await _count(db_session, Media) == 0
+
+
+async def test_import_persists_fictional_profile_with_provenance(
+    db_session: AsyncSession,
+) -> None:
+    report = await OnboardingDemoImporter(db_session).run(DEMO_DOCUMENT)
+
+    assert report.created["profiles"] == 1
+    assert report.created["sensitive_topics"] == 1
+    profile = (
+        await db_session.execute(
+            select(ConversationProfile).options(
+                selectinload(ConversationProfile.sensitive_topics)
+            )
+        )
+    ).scalar_one()
+    assert profile.preferred_name == "Elena"
+    assert profile.positive_topics == []
+    assert profile.is_fictional is True
+    assert profile.is_active is True
+    assert profile.data_origin == "Fictional for tests"
+    source = await db_session.get(Source, profile.source_id)
+    assert source is not None
+    assert source.external_reference == "memo-onboarding-demo/src_elena"
+
+    topic = profile.sensitive_topics[0]
+    assert topic.topic == "fallecimiento de Miguel"
+    assert topic.consent_review_required is True
+    assert "Do not start this topic." in (topic.handling or "")
+
+    rerun = await OnboardingDemoImporter(db_session).run(DEMO_DOCUMENT)
+    assert rerun.created["profiles"] == 0
+    assert rerun.created["sensitive_topics"] == 0
+    assert rerun.existing["profiles"] == 1
+    assert await _count(db_session, ConversationProfile) == 1
+    assert await _count(db_session, ConversationProfileSensitiveTopic) == 1
+
+
+async def test_import_reports_unknown_profile_fields(
+    db_session: AsyncSession,
+) -> None:
+    document = copy.deepcopy(DEMO_DOCUMENT)
+    document["profile"]["future_field"] = "not modeled yet"
+
+    report = await OnboardingDemoImporter(db_session).run(document)
+
+    assert report.unsupported_fields == {
+        "persons": ["role_for_user"],
+        "profile": ["future_field"],
+    }
 
 
 async def test_import_refuses_documents_not_marked_fictional(
