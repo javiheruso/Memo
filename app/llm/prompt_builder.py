@@ -26,6 +26,7 @@ Rules:
 - If several people are listed as candidates, ask which one the user means; never pick one yourself.
 - If there is no stored data about the person, say you do not have details stored and never invent any.
 - If a stored photograph is referenced, only ever mention its stored metadata (type, title, date, place). Never describe what the photograph shows or invent visual details.
+- Never initiate a configured sensitive topic. Only discuss one when the person explicitly raises it; then do not invent details and gently redirect to a safer subject.
 - The user speaks Spanish. Reply in Spanish, naturally and with warmth.
 
 Reply with a single JSON object and nothing else:
@@ -114,6 +115,23 @@ def build_prompt(context: AnswerContext) -> BuiltPrompt:
             lines.append(
                 f"  - id {item.entity_id} | type {item.media_type} | {rendered}"
             )
+
+    if context.blocked_sensitive_topics:
+        lines.append(
+            "- Sensitive topics that must not be initiated: "
+            + "; ".join(context.blocked_sensitive_topics)
+        )
+
+    if context.sensitive_topic_requested is not None:
+        lines.append(
+            "- Sensitive topic explicitly raised by the person: "
+            f"{context.sensitive_topic_requested}"
+        )
+        redirect = context.sensitive_redirect_topic or "a safer subject"
+        lines.append(
+            "- Respond carefully without inventing details and gently redirect "
+            f"toward {redirect}."
+        )
 
     if context.policies:
         lines.append("- Policies already applied (do not override):")
