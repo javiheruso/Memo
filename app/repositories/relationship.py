@@ -12,7 +12,11 @@ class RelationshipRepository(SQLRepository[Relationship]):
     model = Relationship
 
     async def create(
-        self, data: RelationshipCreate, *, entity_id: uuid.UUID | None = None
+        self,
+        data: RelationshipCreate,
+        *,
+        entity_id: uuid.UUID | None = None,
+        commit: bool = True,
     ) -> Relationship:
         if data.person_a_id == data.person_b_id:
             raise ValueError("A relationship must connect two different persons")
@@ -27,7 +31,8 @@ class RelationshipRepository(SQLRepository[Relationship]):
                 source_id=data.source_id,
                 valid_from=data.valid_from,
                 valid_to=data.valid_to,
-            )
+            ),
+            commit=commit,
         )
 
     async def for_person(self, person_id: uuid.UUID) -> list[Relationship]:

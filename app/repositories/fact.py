@@ -12,7 +12,11 @@ class FactRepository(SQLRepository[Fact]):
     model = Fact
 
     async def create(
-        self, data: FactCreate, *, entity_id: uuid.UUID | None = None
+        self,
+        data: FactCreate,
+        *,
+        entity_id: uuid.UUID | None = None,
+        commit: bool = True,
     ) -> Fact:
         id_kwargs = {"id": entity_id} if entity_id is not None else {}
         return await self._create(
@@ -30,7 +34,8 @@ class FactRepository(SQLRepository[Fact]):
                 status=data.status,
                 source_id=data.source_id,
                 notes=data.notes,
-            )
+            ),
+            commit=commit,
         )
 
     async def for_subject_person(self, person_id: uuid.UUID) -> list[Fact]:

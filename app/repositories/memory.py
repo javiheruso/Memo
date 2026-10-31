@@ -57,6 +57,7 @@ class MemoryRepository(SQLRepository[Memory]):
         *,
         embedding: list[float] | None = None,
         entity_id: uuid.UUID | None = None,
+        commit: bool = True,
     ) -> Memory:
         if embedding is not None and not self.supports_vector_search:
             raise UnsupportedVectorSearch(
@@ -80,7 +81,8 @@ class MemoryRepository(SQLRepository[Memory]):
                     MemoryPerson(person_id=person.person_id, role=person.role)
                     for person in data.people
                 ],
-            )
+            ),
+            commit=commit,
         )
 
     async def list_without_embeddings(

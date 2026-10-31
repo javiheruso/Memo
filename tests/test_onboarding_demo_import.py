@@ -1,3 +1,4 @@
+import copy
 import json
 from datetime import date
 
@@ -362,3 +363,49 @@ async def test_import_refuses_documents_not_marked_fictional(
 
     with pytest.raises(OnboardingDemoError, match="fictional=true"):
         await OnboardingDemoImporter(db_session).run(document)
+
+
+async def test_import_rejects_missing_fact_type_without_persisting_rows(
+    db_session: AsyncSession,
+) -> None:
+    document = copy.deepcopy(DEMO_DOCUMENT)
+    document["facts"][-1].pop("fact_type")
+
+    with pytest.raises(OnboardingDemoError, match=r"facts\[fact_002\]\.fact_type"):
+        await OnboardingDemoImporter(db_session).run(document)
+
+    for model in (
+        Person,
+        PersonAlias,
+        Source,
+        Relationship,
+        Fact,
+        Memory,
+        MemoryPerson,
+    ):
+        assert await _count(db_session, model) == 0
+
+
+async def test_import_rolls_back_every_row_when_a_write_fails(
+    db_session: AsyncSession, monkeypatch
+) -> None:
+    importer = OnboardingDemoImporter(db_session)
+
+    async def fail_create(*args, **kwargs):
+        raise RuntimeError("injected write failure")
+
+    monkeypatch.setattr(importer._facts, "create", fail_create)
+
+    with pytest.raises(RuntimeError, match="injected write failure"):
+        await importer.run(DEMO_DOCUMENT)
+
+    for model in (
+        Person,
+        PersonAlias,
+        Source,
+        Relationship,
+        Fact,
+        Memory,
+        MemoryPerson,
+    ):
+        assert await _count(db_session, model) == 0
