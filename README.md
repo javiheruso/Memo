@@ -430,7 +430,8 @@ deployment), and the whole surface speaks to whatever person is at the device
 3. retrieval — structured data for person/event queries, semantic memory
    retrieval for `memory_query`;
 4. trust-model context building (no invention, no memory-as-fact, no silent
-   ambiguity collapse, sensitive memories filtered, event status preserved);
+   ambiguity collapse, sensitive memories filtered, event status preserved,
+   configured sensitive topics withheld unless explicitly raised);
 5. a replaceable responder — today a deterministic Spanish text responder,
    selected through the `MEMO_RESPONDER` setting;
 6. persistence of the conversation, messages, `response_sources`, and a
@@ -461,6 +462,42 @@ answer is built from a code-provided clock carried in `AnswerContext.now`
 and the prompt builder hands that same trusted clock to the LLM path, so a
 date/time statement is grounded in the application's clock, never the model's
 own knowledge.
+
+### Conversational profiles and sensitive topics
+
+A person's conversational profile is stored in `conversation_profiles` with its
+configured topics in `conversation_profile_sensitive_topics`. At most one
+profile is active; the chat pipeline reads it on every turn. Profiles can be
+created and activated through the admin API (`POST /api/v1/admin/profiles`,
+`GET /api/v1/admin/profiles`, `GET /api/v1/admin/profiles/active`,
+`POST /api/v1/admin/profiles/{id}/activate`) or imported from the fictional
+onboarding demo. The imported profile is marked `is_fictional=true`, keeps the
+source provenance resolved from the document, stores consent-review flags, and
+is activated only when no other profile is already active.
+
+The policy is enforced in the conversation path, not in a UI flag:
+
+- **No spontaneous initiation.** Each turn is evaluated deterministically
+  against the active profile. When the person did not explicitly raise a
+  configured topic, memories, facts, events and media metadata that match that
+  topic are withheld from the responder context. A final output guard also
+  checks the responder's text: if a blocked topic still appears (for example,
+  an LLM ignores the prompt), the answer is replaced with a safe generic reply
+  and its sources are dropped.
+- **Explicit questions are handled carefully.** A topic is explicit when the
+  person names its phrase, all of its significant words, or a configured/theme
+  trigger. The turn is marked as requested, the prompt instructs the responder
+  not to invent details and to redirect gently, and the deterministic responder
+  uses a cautious template that cites no stored details and offers a configured
+  positive topic instead. No stored detail is fabricated to fill the gap.
+- **Existing safeguards still run first.** High-sensitivity memory filtering,
+  provenance, epistemic tags, uncertainty handling and event-status rules are
+  unchanged and are never relaxed for an explicit sensitive-topic question.
+
+The importer treats the demo profile as fictional data, not verified
+real-world information. Deferred for this slice: onboarding UI, consent
+revocation, roles/auth for profile management, media, and broader profile
+feature sets.
 
 ### Memory queries and the semantic retrieval seam
 
@@ -711,9 +748,9 @@ The MVP is feature-complete against the dossier. Implemented and verified:
 
 Verification:
 
-- 391 tests pass on the default in-memory SQLite suite.
-- 386 tests pass against real PostgreSQL 18 + pgvector (`make test-postgres`).
-- Alembic migrations apply cleanly (head `f2a1b3c4d5e6`), 24 tables.
+- 447 tests pass on the default in-memory SQLite suite.
+- The same suite runs against real PostgreSQL + pgvector with `make test-postgres`.
+- Alembic migrations apply cleanly (head `a1b2c3d4e5f6`), 25 tables.
 
 ## Checklist
 
