@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, UniqueConstraint, Uuid, func
+from sqlalchemy import Enum, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
 from app.domain.enums import (
     MaterializationSourceType,
     MaterializationTargetType,
@@ -56,5 +57,5 @@ class Materialization(Base):
     )
     target_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )

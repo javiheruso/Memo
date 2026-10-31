@@ -16,7 +16,6 @@ from datetime import datetime
 from sqlalchemy import (
     JSON,
     Boolean,
-    DateTime,
     ForeignKey,
     String,
     Text,
@@ -26,6 +25,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
 
 
 class ConversationProfile(Base):
@@ -47,10 +47,10 @@ class ConversationProfile(Base):
     is_fictional: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
     )
 
     sensitive_topics: Mapped[list["ConversationProfileSensitiveTopic"]] = relationship(
@@ -78,7 +78,7 @@ class ConversationProfileSensitiveTopic(Base):
     consent_review_required: Mapped[bool] = mapped_column(Boolean, default=False)
     triggers: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
 
     profile: Mapped["ConversationProfile"] = relationship(

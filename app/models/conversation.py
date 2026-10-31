@@ -1,23 +1,24 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, Uuid, func
+from sqlalchemy import ForeignKey, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
 
 
 class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    ended_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     initiated_by: Mapped[str] = mapped_column(String(50))
     initiation_reason: Mapped[str | None] = mapped_column(String(500))
     device_id: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
 
     messages: Mapped[list["Message"]] = relationship(
@@ -33,7 +34,7 @@ class Message(Base):
     speaker: Mapped[str] = mapped_column(String(50))
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     intent: Mapped[str | None] = mapped_column(String(100))
     audio_path: Mapped[str | None] = mapped_column(String(500))
@@ -53,7 +54,7 @@ class ResponseSource(Base):
     source_entity_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     usage_type: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
 
     message: Mapped["Message"] = relationship(back_populates="response_sources")

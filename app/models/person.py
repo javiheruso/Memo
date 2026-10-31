@@ -4,7 +4,6 @@ from datetime import date, datetime
 from sqlalchemy import (
     Boolean,
     Date,
-    DateTime,
     Enum,
     ForeignKey,
     String,
@@ -14,6 +13,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
 from app.domain.enums import RelationshipStatus, RelationshipType
 
 
@@ -30,10 +30,10 @@ class Person(Base):
     description: Mapped[str | None] = mapped_column(Text)
     primary_media_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("media.id"))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
     )
 
     aliases: Mapped[list["PersonAlias"]] = relationship(
@@ -50,7 +50,7 @@ class PersonAlias(Base):
     alias: Mapped[str] = mapped_column(String(255))
     alias_type: Mapped[str] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
 
     person: Mapped["Person"] = relationship(back_populates="aliases")
@@ -81,10 +81,10 @@ class Relationship(Base):
     valid_from: Mapped[date | None] = mapped_column(Date)
     valid_to: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
     )
 
     person_a: Mapped["Person"] = relationship(foreign_keys=[person_a_id])

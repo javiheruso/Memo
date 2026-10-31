@@ -4,7 +4,6 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Date,
-    DateTime,
     Enum,
     ForeignKey,
     Numeric,
@@ -15,6 +14,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
 from app.domain.enums import FactStatus
 
 
@@ -41,10 +41,10 @@ class Fact(Base):
     source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sources.id"))
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
     )
 
     subject_person: Mapped["Person"] = relationship(foreign_keys=[subject_person_id])

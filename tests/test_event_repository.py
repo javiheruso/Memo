@@ -77,6 +77,23 @@ async def test_upcoming_for_person_filters_by_time_and_status(
     assert "Baile en la sala" not in titles
 
 
+async def test_event_datetimes_are_aware_utc_after_reload(
+    db_session: AsyncSession,
+) -> None:
+    start = datetime(2026, 9, 5, 10, 0, tzinfo=UTC)
+    event = await EventRepository(db_session).create(
+        EventCreate(title="Cita", start_at=start)
+    )
+    event_id = event.id
+    db_session.expire_all()
+
+    fetched = await EventRepository(db_session).get(event_id)
+
+    assert fetched is not None
+    assert fetched.start_at == start
+    assert fetched.start_at.tzinfo is UTC
+
+
 async def test_upcoming_excludes_cancelled_and_completed(
     db_session: AsyncSession, seed: SeedUniverse
 ) -> None:
