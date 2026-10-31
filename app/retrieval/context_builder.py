@@ -99,6 +99,9 @@ class AnswerContext:
     events: list[EventItem] = field(default_factory=list)
     media: list[MediaItem] = field(default_factory=list)
     policies: list[str] = field(default_factory=list)
+    sensitive_topic_requested: str | None = None
+    sensitive_redirect_topic: str | None = None
+    blocked_sensitive_topics: tuple[str, ...] = ()
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
