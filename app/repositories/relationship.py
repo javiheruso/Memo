@@ -11,11 +11,15 @@ from app.schemas.relationship import RelationshipCreate
 class RelationshipRepository(SQLRepository[Relationship]):
     model = Relationship
 
-    async def create(self, data: RelationshipCreate) -> Relationship:
+    async def create(
+        self, data: RelationshipCreate, *, entity_id: uuid.UUID | None = None
+    ) -> Relationship:
         if data.person_a_id == data.person_b_id:
             raise ValueError("A relationship must connect two different persons")
+        id_kwargs = {"id": entity_id} if entity_id is not None else {}
         return await self._create(
             lambda: Relationship(
+                **id_kwargs,
                 person_a_id=data.person_a_id,
                 person_b_id=data.person_b_id,
                 relationship_type=data.relationship_type,
