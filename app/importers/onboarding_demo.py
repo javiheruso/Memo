@@ -19,6 +19,9 @@ Design notes:
   skipped section, its item count, and the reason.
 * Year-only birth dates are stored as ``NULL`` because the schema has no
   precision column; the report lists every affected person.
+* The whole document is validated before any write, and every row is flushed
+  inside one transaction that is committed only after the last entity. Any
+  failure rolls the entire import back, so no partial demo universe persists.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -209,10 +213,39 @@ def _as_object(item: Any, section: str, index: int) -> dict[str, Any]:
     return item
 
 
-def _required_text(item: dict[str, Any], key: str, context: str) -> str:
+def _required_text(
+    item: dict[str, Any],
+    key: str,
+    context: str,
+    *,
+    max_length: int | None = None,
+) -> str:
     value = item.get(key)
     if not isinstance(value, str) or not value.strip():
         raise OnboardingDemoError(f"{context}.{key} must be a non-empty string")
+    if max_length is not None and len(value) > max_length:
+        raise OnboardingDemoError(
+            f"{context}.{key} must be at most {max_length} characters"
+        )
+    return value
+
+
+def _optional_text(
+    item: dict[str, Any],
+    key: str,
+    context: str,
+    *,
+    max_length: int | None = None,
+) -> str | None:
+    value = item.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise OnboardingDemoError(f"{context}.{key} must be a string or null")
+    if max_length is not None and len(value) > max_length:
+        raise OnboardingDemoError(
+            f"{context}.{key} must be at most {max_length} characters"
+        )
     return value
 
 
@@ -227,6 +260,24 @@ def _optional_date(value: Any, context: str) -> date | None:
         raise OnboardingDemoError(
             f"{context} is not a valid ISO date: {value!r}"
         ) from exc
+
+
+def _optional_decimal(value: Any, context: str) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise OnboardingDemoError(
+            f"{context} must be a number, a numeric string, or null"
+        )
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise OnboardingDemoError(
+            f"{context} is not a valid number: {value!r}"
+        ) from exc
+    if not parsed.is_finite():
+        raise OnboardingDemoError(f"{context} must be a finite number")
+    return parsed
 
 
 def _enum_value(enum_type, value: Any, context: str):
@@ -278,19 +329,27 @@ def _validate_document(document: dict[str, Any]) -> None:
     ]
 
     for person_id, person in persons.items():
-        _required_text(person, "first_name", f"persons[{person_id}]")
-        _required_text(person, "display_name", f"persons[{person_id}]")
-        _optional_date(person.get("birth_date"), f"persons[{person_id}].birth_date")
-        _optional_date(person.get("death_date"), f"persons[{person_id}].death_date")
+        context = f"persons[{person_id}]"
+        _required_text(person, "first_name", context, max_length=255)
+        _required_text(person, "display_name", context, max_length=255)
+        _optional_text(person, "last_name", context, max_length=255)
+        _optional_text(person, "alias", context, max_length=255)
+        _optional_text(person, "description", context)
+        _optional_date(person.get("birth_date"), f"{context}.birth_date")
+        _optional_date(person.get("death_date"), f"{context}.death_date")
 
     for source_id, source in sources.items():
-        _enum_value(
-            SourceType, source.get("source_type"), f"sources[{source_id}].source_type"
-        )
+        context = f"sources[{source_id}]"
+        _enum_value(SourceType, source.get("source_type"), f"{context}.source_type")
+        _optional_text(source, "description", context)
+        if len(f"{_PROVENANCE_PREFIX}/{source_id}") > 500:
+            raise OnboardingDemoError(
+                f"{context}.id is too long to build an external reference"
+            )
         person_id = source.get("person_id")
         if person_id is not None and person_id not in persons:
             raise OnboardingDemoError(
-                f"sources[{source_id}].person_id references unknown person {person_id!r}"
+                f"{context}.person_id references unknown person {person_id!r}"
             )
 
     relationship_keys: set[str] = set()
@@ -302,6 +361,10 @@ def _validate_document(document: dict[str, Any]) -> None:
                     f"{context}.{key} references an unknown person "
                     f"{relationship.get(key)!r}"
                 )
+        if relationship.get("person_a_id") == relationship.get("person_b_id"):
+            raise OnboardingDemoError(
+                f"{context} must connect two different persons"
+            )
         source_reference = relationship.get("source_id")
         if source_reference is not None and source_reference not in sources:
             raise OnboardingDemoError(
@@ -328,6 +391,11 @@ def _validate_document(document: dict[str, Any]) -> None:
 
     for fact_id, fact in facts.items():
         context = f"facts[{fact_id}]"
+        _required_text(fact, "fact_type", context, max_length=50)
+        _optional_text(fact, "value_text", context)
+        _optional_text(fact, "place_text", context, max_length=500)
+        _optional_text(fact, "notes", context)
+        _optional_decimal(fact.get("value_number"), f"{context}.value_number")
         if fact.get("subject_person_id") not in persons:
             raise OnboardingDemoError(
                 f"{context}.subject_person_id references an unknown person"
@@ -349,6 +417,9 @@ def _validate_document(document: dict[str, Any]) -> None:
     for memory_id, memory in memories.items():
         context = f"memories[{memory_id}]"
         _required_text(memory, "narrative", context)
+        _optional_text(memory, "title", context, max_length=255)
+        _optional_text(memory, "approx_period_text", context, max_length=255)
+        _optional_text(memory, "place_text", context, max_length=500)
         if memory.get("source_id") not in sources:
             raise OnboardingDemoError(
                 f"{context}.source_id references an unknown source"
@@ -373,6 +444,12 @@ def _validate_document(document: dict[str, Any]) -> None:
                     f"{context}.people[{person_index}].person_id references "
                     "an unknown person"
                 )
+            _optional_text(
+                person,
+                "role",
+                f"{context}.people[{person_index}]",
+                max_length=50,
+            )
 
 
 def _person_birth_date(
@@ -418,6 +495,7 @@ class OnboardingDemoImporter:
     """Create the demo universe through the existing repositories."""
 
     def __init__(self, session: AsyncSession) -> None:
+        self._session = session
         self._persons = PersonRepository(session)
         self._sources = SourceRepository(session)
         self._relationships = RelationshipRepository(session)
@@ -426,7 +504,13 @@ class OnboardingDemoImporter:
 
     async def run(self, document: dict[str, Any]) -> ImportReport:
         _validate_document(document)
+        try:
+            return await self._write_document(document)
+        except Exception:
+            await self._session.rollback()
+            raise
 
+    async def _write_document(self, document: dict[str, Any]) -> ImportReport:
         report = ImportReport(
             created={
                 "persons": 0,
@@ -512,6 +596,7 @@ class OnboardingDemoImporter:
                     aliases=aliases,
                 ),
                 entity_id=person_id,
+                commit=False,
             )
             report.created["persons"] += 1
             report.created["person_aliases"] += len(aliases)
@@ -536,6 +621,7 @@ class OnboardingDemoImporter:
                     external_reference=f"{_PROVENANCE_PREFIX}/{symbolic_id}",
                 ),
                 entity_id=source_id,
+                commit=False,
             )
             report.created["sources"] += 1
 
@@ -570,6 +656,7 @@ class OnboardingDemoImporter:
                     ),
                 ),
                 entity_id=relationship_id,
+                commit=False,
             )
             report.created["relationships"] += 1
 
@@ -608,6 +695,7 @@ class OnboardingDemoImporter:
                     notes=_notes_with_provenance(fact.get("notes"), downgraded),
                 ),
                 entity_id=fact_id,
+                commit=False,
             )
             report.created["facts"] += 1
 
@@ -653,10 +741,12 @@ class OnboardingDemoImporter:
                     people=people,
                 ),
                 entity_id=memory_id,
+                commit=False,
             )
             report.created["memories"] += 1
             report.created["memory_people"] += len(people)
 
+        await self._session.commit()
         return report
 
     @staticmethod

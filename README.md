@@ -295,7 +295,9 @@ explicitly. It creates sources, persons and aliases, relationships, facts,
 memories and memory-person links through the existing repositories. Symbolic
 JSON ids are resolved to deterministic UUIDv5 values, so rerunning the same
 document skips rows that already exist instead of duplicating them. It is a
-create-only importer: existing rows are reported, not updated.
+create-only importer: existing rows are reported, not updated. The whole
+document is validated before any write, and all rows are committed in one
+transaction, so an invalid or failing import leaves no partial data behind.
 
 Trust and provenance behavior:
 

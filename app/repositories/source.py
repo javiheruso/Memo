@@ -9,7 +9,11 @@ class SourceRepository(SQLRepository[Source]):
     model = Source
 
     async def create(
-        self, data: SourceCreate, *, entity_id: uuid.UUID | None = None
+        self,
+        data: SourceCreate,
+        *,
+        entity_id: uuid.UUID | None = None,
+        commit: bool = True,
     ) -> Source:
         id_kwargs = {"id": entity_id} if entity_id is not None else {}
         return await self._create(
@@ -19,5 +23,6 @@ class SourceRepository(SQLRepository[Source]):
                 person_id=data.person_id,
                 description=data.description,
                 external_reference=data.external_reference,
-            )
+            ),
+            commit=commit,
         )

@@ -22,7 +22,11 @@ class PersonRepository(SQLRepository[Person]):
     load_options = (selectinload(Person.aliases),)
 
     async def create(
-        self, data: PersonCreate, *, entity_id: uuid.UUID | None = None
+        self,
+        data: PersonCreate,
+        *,
+        entity_id: uuid.UUID | None = None,
+        commit: bool = True,
     ) -> Person:
         display_name = data.display_name or " ".join(
             part for part in (data.first_name, data.last_name) if part
@@ -42,7 +46,8 @@ class PersonRepository(SQLRepository[Person]):
                     PersonAlias(alias=alias.alias, alias_type=alias.alias_type)
                     for alias in data.aliases
                 ],
-            )
+            ),
+            commit=commit,
         )
 
     async def set_primary_media(

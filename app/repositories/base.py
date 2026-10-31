@@ -38,11 +38,16 @@ class SQLRepository(Generic[ModelT]):
         result = await self._session.execute(stmt)
         return list(result.scalars())
 
-    async def _create(self, build: Callable[[], ModelT]) -> ModelT:
+    async def _create(
+        self, build: Callable[[], ModelT], *, commit: bool = True
+    ) -> ModelT:
         model = build()
         self._session.add(model)
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
+        else:
+            await self._session.flush()
         fresh = await self.get(model.id)
         if fresh is None:
-            raise RuntimeError(f"{self.model.__name__} disappeared after commit")
+            raise RuntimeError(f"{self.model.__name__} disappeared after write")
         return fresh
