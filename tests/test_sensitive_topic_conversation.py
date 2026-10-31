@@ -2,6 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import Intent, MemoryStatus, SensitivityLevel, SourceType
 from app.embeddings.deterministic import DeterministicEmbedder
+from app.embeddings.memory_text import memory_search_text
 from app.llm.base import Responder, Response
 from app.llm.deterministic import DeterministicResponder
 from app.policies.sensitive_topics import SPONTANEOUS_SUPPRESSION_REPLY
@@ -29,7 +30,21 @@ async def _seed_family_memories(session: AsyncSession):
         )
     )
     memories = MemoryRepository(session)
-    await memories.create(
+    embedder = DeterministicEmbedder()
+    store_embeddings = memories.supports_vector_search
+
+    async def _create_memory(data: MemoryCreate) -> None:
+        # PostgreSQL only ranks memories with a stored vector, while the SQLite
+        # fallback embeds on the fly. Store the same vector both backends would
+        # use so retrieval behavior is identical under either profile.
+        embedding = None
+        if store_embeddings:
+            embedding = await embedder.embed(
+                memory_search_text(title=data.title, narrative=data.narrative)
+            )
+        await memories.create(data, embedding=embedding)
+
+    await _create_memory(
         MemoryCreate(
             title="Una despedida",
             narrative="Elena recuerda el fallecimiento de Miguel cada primavera.",
@@ -39,7 +54,7 @@ async def _seed_family_memories(session: AsyncSession):
             people=[MemoryPersonCreate(person_id=elena.id, role="protagonista")],
         )
     )
-    await memories.create(
+    await _create_memory(
         MemoryCreate(
             title="El día exacto",
             narrative="Miguel falleció el 3 de marzo de 1998.",
