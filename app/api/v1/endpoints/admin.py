@@ -11,6 +11,7 @@ from app.models import (
     Claim,
     ClaimGroup,
     ClaimGroupContradiction,
+    ConversationProfile,
     Event,
     Fact,
     KnowledgeGap,
@@ -30,6 +31,7 @@ from app.repositories.knowledge_gap import KnowledgeGapRepository
 from app.repositories.media import MediaRepository
 from app.repositories.memory import MemoryRepository
 from app.repositories.person import PersonRepository
+from app.repositories.profile import ConversationProfileRepository
 from app.repositories.relationship import RelationshipRepository
 from app.repositories.source import SourceRepository
 from app.schemas.claim import (
@@ -48,6 +50,7 @@ from app.schemas.materialization import FactMaterializeRequest, MemoryMaterializ
 from app.schemas.media import MediaCreate, MediaRead
 from app.schemas.memory import MemoryBackfillRead, MemoryCreate, MemoryRead
 from app.schemas.person import PersonCreate, PersonPrimaryMediaUpdate, PersonRead
+from app.schemas.profile import ConversationProfileCreate, ConversationProfileRead
 from app.schemas.relationship import RelationshipCreate, RelationshipRead
 from app.schemas.seed import SeedSummaryRead
 from app.schemas.source import SourceCreate, SourceRead
@@ -97,6 +100,59 @@ async def list_sources(
     db: DbSession, limit: int = Query(default=100, ge=1, le=500)
 ) -> list[Source]:
     return await SourceRepository(db).list(limit=limit)
+
+
+@router.post("/profiles", response_model=ConversationProfileRead, status_code=201)
+async def create_profile(
+    db: DbSession, payload: ConversationProfileCreate
+) -> ConversationProfile:
+    """Create the conversational profile for a person.
+
+    The profile is the durable seam the conversation pipeline reads to decide
+    which topics must never be initiated. Only one profile may be active at a
+    time; activating a new one deactivates the previous profile in the same
+    transaction.
+    """
+    if await PersonRepository(db).get(payload.person_id) is None:
+        raise HTTPException(status_code=404, detail="Person not found")
+    if (
+        payload.source_id is not None
+        and await SourceRepository(db).get(payload.source_id) is None
+    ):
+        raise HTTPException(status_code=404, detail="Source not found")
+    profiles = ConversationProfileRepository(db)
+    if await profiles.get_by_person(payload.person_id) is not None:
+        raise HTTPException(
+            status_code=409, detail="A profile already exists for this person"
+        )
+    return await profiles.create(payload)
+
+
+@router.get("/profiles", response_model=list[ConversationProfileRead])
+async def list_profiles(
+    db: DbSession, limit: int = Query(default=100, ge=1, le=500)
+) -> list[ConversationProfile]:
+    return await ConversationProfileRepository(db).list(limit=limit)
+
+
+@router.get("/profiles/active", response_model=ConversationProfileRead)
+async def get_active_profile(db: DbSession) -> ConversationProfile:
+    profile = await ConversationProfileRepository(db).get_active()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="No active profile")
+    return profile
+
+
+@router.post(
+    "/profiles/{profile_id}/activate", response_model=ConversationProfileRead
+)
+async def activate_profile(
+    db: DbSession, profile_id: uuid.UUID
+) -> ConversationProfile:
+    profile = await ConversationProfileRepository(db).activate(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile
 
 
 @router.post("/persons", response_model=PersonRead, status_code=201)
