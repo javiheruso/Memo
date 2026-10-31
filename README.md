@@ -43,6 +43,7 @@ backend (Python / FastAPI / PostgreSQL), aligned with the project dossier.
 | `app/domain/` | Domain layer: enums for the Phase 1 status/type vocabulary |
 | `app/models/` | SQLAlchemy ORM models for the Phase 1 tables |
 | `app/services/` | Business logic: the conversation/query pipeline orchestrator |
+| `app/importers/` | Explicit, opt-in importer entry points for demo data; never loaded at application startup |
 | `app/claims/` | Claim ingestion seam: conservative deterministic extractor, grouper and contradiction detector, plus the provider registry |
 | `app/repositories/` | Async data access for sources, persons, relationships, facts, memories, conversations, knowledge gaps, claims |
 | `app/schemas/` | Pydantic request/response schemas for the admin and chat APIs |
@@ -277,6 +278,44 @@ cleared with `PATCH /persons/{id}/primary-media` (`{"media_id": "<uuid>"}` or
 `null` to clear); the media row must exist but needs no `media_people` link.
 Trust-model defaults are conservative: new facts default to `pending` and new
 memories to `candidate`; relationships default to `verified`.
+
+## Fictional onboarding-demo importer
+
+The onboarding demo JSON (`recursos/Memo_onboarding_demo.zip`) is local demo
+input and is not committed. Extract it somewhere outside the repository and run
+the explicit importer against the database configured by `MEMO_DATABASE_URL`
+(apply migrations first):
+
+```bash
+python -m app.importers.onboarding_demo /path/to/memo_familia_ficticia.json
+```
+
+The importer never runs at application startup and accepts the JSON path
+explicitly. It creates sources, persons and aliases, relationships, facts,
+memories and memory-person links through the existing repositories. Symbolic
+JSON ids are resolved to deterministic UUIDv5 values, so rerunning the same
+document skips rows that already exist instead of duplicating them. It is a
+create-only importer: existing rows are reported, not updated.
+
+Trust and provenance behavior:
+
+- The document must set `fictional=true` and `not_real_person=true`; anything
+  else is refused.
+- JSON `verified` facts and relationships are stored as `probable`. A
+  "verification" inside the fiction is not real-world verification.
+- Every imported fact note records the fictional-demo provenance and the
+  downgrade, and every source stores `memo-onboarding-demo/<symbolic_id>` in
+  `external_reference`.
+- Year-only birth dates are stored as `NULL` because the schema has no date
+  precision column; the report lists the affected persons and their declared
+  precision.
+- Sections without a safe relational model are skipped explicitly and counted
+  in the report: conversational profile (including consent-review items),
+  attributed testimonies/versions, unresolved questions, and media
+  placeholders without a file path. Other unsupported fields are reported too.
+
+The command prints a JSON report with created/existing counts, downgraded
+statuses, dropped dates and skipped sections.
 
 ## Minimal admin authentication
 

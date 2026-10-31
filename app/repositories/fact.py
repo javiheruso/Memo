@@ -11,9 +11,13 @@ from app.schemas.fact import FactCreate
 class FactRepository(SQLRepository[Fact]):
     model = Fact
 
-    async def create(self, data: FactCreate) -> Fact:
+    async def create(
+        self, data: FactCreate, *, entity_id: uuid.UUID | None = None
+    ) -> Fact:
+        id_kwargs = {"id": entity_id} if entity_id is not None else {}
         return await self._create(
             lambda: Fact(
+                **id_kwargs,
                 subject_person_id=data.subject_person_id,
                 fact_type=data.fact_type,
                 value_text=data.value_text,

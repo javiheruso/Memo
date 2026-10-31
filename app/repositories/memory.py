@@ -52,14 +52,20 @@ class MemoryRepository(SQLRepository[Memory]):
         ]
 
     async def create(
-        self, data: MemoryCreate, *, embedding: list[float] | None = None
+        self,
+        data: MemoryCreate,
+        *,
+        embedding: list[float] | None = None,
+        entity_id: uuid.UUID | None = None,
     ) -> Memory:
         if embedding is not None and not self.supports_vector_search:
             raise UnsupportedVectorSearch(
                 "pgvector embedding writes require a PostgreSQL dialect"
             )
+        id_kwargs = {"id": entity_id} if entity_id is not None else {}
         return await self._create(
             lambda: Memory(
+                **id_kwargs,
                 title=data.title,
                 narrative=data.narrative,
                 approx_start_date=data.approx_start_date,

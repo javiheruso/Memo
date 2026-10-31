@@ -21,12 +21,16 @@ class PersonRepository(SQLRepository[Person]):
     model = Person
     load_options = (selectinload(Person.aliases),)
 
-    async def create(self, data: PersonCreate) -> Person:
+    async def create(
+        self, data: PersonCreate, *, entity_id: uuid.UUID | None = None
+    ) -> Person:
         display_name = data.display_name or " ".join(
             part for part in (data.first_name, data.last_name) if part
         )
+        id_kwargs = {"id": entity_id} if entity_id is not None else {}
         return await self._create(
             lambda: Person(
+                **id_kwargs,
                 first_name=data.first_name,
                 last_name=data.last_name,
                 display_name=display_name,
