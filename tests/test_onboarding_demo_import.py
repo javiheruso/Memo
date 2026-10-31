@@ -4,6 +4,7 @@ from datetime import date
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.domain.enums import (
     FactStatus,
@@ -217,7 +218,11 @@ async def test_import_path_creates_entities_aliases_and_links(
         "memory_people": 3,
     }
 
-    persons = (await db_session.execute(select(Person))).scalars().all()
+    persons = (
+        (await db_session.execute(select(Person).options(selectinload(Person.aliases))))
+        .scalars()
+        .all()
+    )
     by_name = {person.first_name: person for person in persons}
     assert set(by_name) == {"Elena", "Miguel", "Carmen"}
     assert by_name["Elena"].aliases[0].alias == "Leni"
