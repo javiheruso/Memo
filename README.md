@@ -132,6 +132,24 @@ The `vector` extension must exist in `memo_test` before the profile runs: the
 test conftest creates the schema with SQLAlchemy directly, which does not
 enable extensions.
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`,
+and can also be started manually. It pins Python 3.12 (matching `Dockerfile`)
+and uses the same `pgvector/pgvector:pg16` image as Compose. The workflow has
+three independent jobs:
+
+| Job | What it validates |
+|-----|-------------------|
+| `sqlite` | The full suite on in-memory SQLite (`python -m pytest`) |
+| `postgres` | The full suite against PostgreSQL 16 with pgvector (`MEMO_TEST_DATABASE_URL`, including the `postgres` smoke tests) |
+| `migrations` | `alembic upgrade head` against a fresh PostgreSQL service, then confirms the head revision is current |
+
+To reproduce the database jobs locally, start the Compose service and run
+`make test-postgres`; run `make migrate` to exercise the migration command.
+The workflow uses only ephemeral, CI-local database credentials and does not
+require repository secrets.
+
 ### Responder selection
 
 The chat endpoint receives its responder from `app/llm/provider.py`, wired
