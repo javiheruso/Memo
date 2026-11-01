@@ -12,6 +12,7 @@ from app.models.knowledge_gap import KnowledgeGap, KnowledgeGapConversation
 from app.models.materialization import Materialization
 from app.models.media import Media, MediaPerson, MemoryMedia
 from app.models.memory import Memory, MemoryPerson
+from app.models.onboarding import OnboardingSession
 from app.models.person import Person, PersonAlias, Relationship
 from app.models.profile import (
     ConversationProfile,
@@ -40,6 +41,7 @@ __all__ = [
     "MemoryMedia",
     "MemoryPerson",
     "Message",
+    "OnboardingSession",
     "Person",
     "PersonAlias",
     "Relationship",
