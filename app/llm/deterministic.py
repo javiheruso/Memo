@@ -66,6 +66,8 @@ _MONTHS = (
 
 class DeterministicResponder(Responder):
     async def respond(self, context: AnswerContext) -> Response:
+        if context.sensitive_topic_requested is not None:
+            return self._sensitive_topic_response(context)
         if context.intent == Intent.general_chat:
             return Response(text=_GENERAL_REPLY)
         if context.intent == Intent.orientation_query:
@@ -79,6 +81,31 @@ class DeterministicResponder(Responder):
         if context.intent != Intent.person_query:
             return Response(text=_UNKNOWN_REPLY)
         return self._respond_person_query(context)
+
+    @staticmethod
+    def _sensitive_topic_response(context: AnswerContext) -> Response:
+        """Careful acknowledgement that never invents details.
+
+        The reply names the topic only because the person raised it, states
+        that Memo will not invent details, and offers a safer configured
+        subject when one exists. It never cites a memory or a fact, so an
+        explicit question cannot pull high-sensitivity details into the answer.
+        """
+        topic = context.sensitive_topic_requested
+        redirect = context.sensitive_redirect_topic
+        if redirect:
+            text = (
+                f"Entiendo que quieres hablar de {topic}. No quiero inventar "
+                "detalles, así que prefiero no extenderme. Si te parece, "
+                f"podemos hablar de {redirect}."
+            )
+        else:
+            text = (
+                f"Entiendo que quieres hablar de {topic}. No quiero inventar "
+                "detalles, así que prefiero no extenderme. ¿Te apetece hablar "
+                "de otra cosa?"
+            )
+        return Response(text=text)
 
     def _respond_person_query(self, context: AnswerContext) -> Response:
         if context.resolution == ResolutionKind.not_found:

@@ -10,8 +10,8 @@ from app.claims.deterministic import DeterministicClaimExtractor
 from app.claims.grouping import ClaimGrouper, DeterministicClaimGrouper
 from app.domain.enums import Intent
 from app.embeddings.base import Embedder
-from app.llm.base import Responder
-from app.models import KnowledgeGap, Person
+from app.llm.base import Responder, Response
+from app.models import ConversationProfile, KnowledgeGap, Person
 from app.repositories.conversation import (
     ConversationRepository,
     ResponseSourceRef,
@@ -22,6 +22,7 @@ from app.repositories.knowledge_gap import KnowledgeGapRepository
 from app.repositories.media import MediaRepository
 from app.repositories.memory import MemoryRepository
 from app.repositories.person import PersonRepository
+from app.repositories.profile import ConversationProfileRepository
 from app.repositories.relationship import RelationshipRepository
 from app.retrieval.context_builder import AnswerContext, ContextBuilder
 from app.retrieval.disambiguation import DisambiguationResolver
@@ -29,9 +30,32 @@ from app.retrieval.entity_resolver import EntityResolver, Resolution, Resolution
 from app.retrieval.intent_router import IntentRouter
 from app.retrieval.semantic_retriever import SemanticRetriever
 from app.retrieval.structured_retriever import StructuredRetriever
+from app.policies.sensitive_topics import (
+    SPONTANEOUS_SUPPRESSION_REPLY,
+    SensitiveTopic,
+    SensitiveTopicEvaluation,
+    answer_leaks_blocked_topic,
+    apply_to_context,
+    evaluate,
+)
 from app.services.claim_ingestion import ClaimIngestionService
 
 logger = logging.getLogger(__name__)
+
+
+def _topics_from_profile(
+    profile: ConversationProfile | None,
+) -> tuple[SensitiveTopic, ...]:
+    if profile is None:
+        return ()
+    return tuple(
+        SensitiveTopic(
+            topic=topic.topic,
+            handling=topic.handling,
+            triggers=tuple(topic.triggers or ()),
+        )
+        for topic in profile.sensitive_topics
+    )
 
 # Only conversational turns can contribute candidate claims. Retrieval intents
 # (person/memory/event/orientation queries) ask the system for information; the
@@ -90,6 +114,7 @@ class ConversationService:
         self._conversations = ConversationRepository(session)
         self._disambiguation = DisambiguationResolver(PersonRepository(session))
         self._gaps = KnowledgeGapRepository(session)
+        self._profiles = ConversationProfileRepository(session)
         self._claim_extractor = claim_extractor or DeterministicClaimExtractor()
         self._claim_ingestion = ClaimIngestionService(
             session,
@@ -103,6 +128,12 @@ class ConversationService:
         self, text: str, conversation_id: uuid.UUID | None = None
     ) -> ChatResult:
         route = self._router.route(text)
+        profile = await self._profiles.get_active()
+        sensitive_topics = _topics_from_profile(profile)
+        sensitive_evaluation = evaluate(text, sensitive_topics)
+        positive_topics = (
+            tuple(profile.positive_topics or ()) if profile is not None else ()
+        )
         conversation = await self._conversations.get_or_create(conversation_id)
 
         pending = await self._conversations.last_assistant_candidates(
@@ -112,7 +143,11 @@ class ConversationService:
             person = await self._disambiguation.resolve(text, pending)
             if person is not None:
                 return await self._disambiguation_turn(
-                    conversation.id, text, person
+                    conversation.id,
+                    text,
+                    person,
+                    sensitive_evaluation,
+                    positive_topics,
                 )
 
         user_message = await self._conversations.add_message(
@@ -142,7 +177,10 @@ class ConversationService:
         else:
             context = AnswerContext(intent=route.intent, term=route.term)
 
-        answer = await self._responder.respond(context)
+        context = apply_to_context(
+            context, sensitive_evaluation, positive_topics=positive_topics
+        )
+        answer = await self._respond(context, sensitive_evaluation, conversation.id)
         assistant_message = await self._conversations.add_message(
             conversation.id,
             speaker="assistant",
@@ -180,7 +218,12 @@ class ConversationService:
         )
 
     async def _disambiguation_turn(
-        self, conversation_id: uuid.UUID, text: str, person: Person
+        self,
+        conversation_id: uuid.UUID,
+        text: str,
+        person: Person,
+        sensitive_evaluation: SensitiveTopicEvaluation,
+        positive_topics: tuple[str, ...],
     ) -> ChatResult:
         """Answer a follow-up that selected one pending ambiguity candidate.
 
@@ -199,7 +242,10 @@ class ConversationService:
         context = self._context_builder.build_from_person_data(
             data, resolution, intent=Intent.person_query
         )
-        answer = await self._responder.respond(context)
+        context = apply_to_context(
+            context, sensitive_evaluation, positive_topics=positive_topics
+        )
+        answer = await self._respond(context, sensitive_evaluation, conversation_id)
         assistant_message = await self._conversations.add_message(
             conversation_id,
             speaker="assistant",
@@ -216,6 +262,30 @@ class ConversationService:
             answer=answer.text,
             sources=answer.sources,
         )
+
+    async def _respond(
+        self,
+        context: AnswerContext,
+        sensitive_evaluation: SensitiveTopicEvaluation,
+        conversation_id: uuid.UUID,
+    ) -> Response:
+        """Run the responder and enforce non-initiation on its output.
+
+        Context filtering already withholds blocked-topic items from a
+        spontaneous turn. This final guard handles a responder that ignores the
+        context or the prompt: if its text mentions a blocked topic anyway, the
+        answer is replaced with a safe generic reply and its sources are
+        dropped, so no trace of the topic reaches the person.
+        """
+        answer = await self._responder.respond(context)
+        if answer_leaks_blocked_topic(answer.text, sensitive_evaluation):
+            logger.warning(
+                "responder output in conversation %s mentioned a blocked "
+                "sensitive topic; replacing it with a safe reply",
+                conversation_id,
+            )
+            return Response(text=SPONTANEOUS_SUPPRESSION_REPLY)
+        return answer
 
     async def _ingest_claims(
         self, text: str, conversation_id: uuid.UUID, message_id: uuid.UUID

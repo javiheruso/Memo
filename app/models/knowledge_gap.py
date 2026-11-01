@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
 from app.domain.enums import KnowledgeGapStatus
 
 
@@ -15,8 +16,8 @@ class KnowledgeGap(Base):
     gap_type: Mapped[str] = mapped_column(String(50))
     canonical_reference: Mapped[str] = mapped_column(String(500))
     description: Mapped[str | None] = mapped_column(Text)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime())
     occurrence_count: Mapped[int] = mapped_column(Integer, default=0)
     distinct_sessions: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[KnowledgeGapStatus] = mapped_column(
@@ -31,10 +32,10 @@ class KnowledgeGap(Base):
     )
     resolved_fact_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("facts.id"))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
     )
 
     resolved_person: Mapped["Person | None"] = relationship(
@@ -56,7 +57,7 @@ class KnowledgeGapConversation(Base):
         ForeignKey("conversations.id"), primary_key=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
 
     gap: Mapped["KnowledgeGap"] = relationship(back_populates="sessions")

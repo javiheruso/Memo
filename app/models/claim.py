@@ -2,10 +2,11 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text, func
+from sqlalchemy import Enum, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
 from app.domain.enums import ClaimStatus
 
 if TYPE_CHECKING:
@@ -32,7 +33,7 @@ class Claim(Base):
     original_text: Mapped[str] = mapped_column(Text)
     conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversations.id"))
     message_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("messages.id"))
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime())
     status: Mapped[ClaimStatus] = mapped_column(
         Enum(
             ClaimStatus,
@@ -41,10 +42,10 @@ class Claim(Base):
         )
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
     )
 
     membership: Mapped["ClaimGroupMember | None"] = relationship(

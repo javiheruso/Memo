@@ -3,7 +3,6 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
-    DateTime,
     Enum,
     ForeignKey,
     Integer,
@@ -16,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
 from app.domain.enums import ClaimGroupStatus
 
 
@@ -42,8 +42,8 @@ class ClaimGroup(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     canonical_text: Mapped[str] = mapped_column(String(500), unique=True)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime())
     total_mentions: Mapped[int] = mapped_column(Integer, default=0)
     distinct_conversations: Mapped[int] = mapped_column(Integer, default=0)
     distinct_days: Mapped[int] = mapped_column(Integer, default=0)
@@ -60,13 +60,13 @@ class ClaimGroup(Base):
         server_default=ClaimGroupStatus.active.value,
         nullable=False,
     )
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     resolution_note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
     )
 
     members: Mapped[list["ClaimGroupMember"]] = relationship(
@@ -92,7 +92,7 @@ class ClaimGroupMember(Base):
         ForeignKey("claims.id"), primary_key=True, unique=True
     )
     added_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
 
     group: Mapped["ClaimGroup"] = relationship(back_populates="members")
@@ -127,14 +127,14 @@ class ClaimGroupContradiction(Base):
     fact_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("facts.id"), index=True)
     detector_name: Mapped[str] = mapped_column(String(50))
     matched_terms: Mapped[str | None] = mapped_column(Text)
-    first_detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    last_detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    first_detected_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    last_detected_at: Mapped[datetime] = mapped_column(UTCDateTime())
     detection_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
     )
 
     group: Mapped["ClaimGroup"] = relationship(back_populates="contradictions")
@@ -162,7 +162,7 @@ class ClaimGroupRememberedKey(Base):
         ForeignKey("claim_groups.id"), index=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
 
     group: Mapped["ClaimGroup"] = relationship()

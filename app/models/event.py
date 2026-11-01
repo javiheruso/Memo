@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text, func
+from sqlalchemy import Enum, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
 from app.domain.enums import EventStatus
 
 
@@ -14,8 +15,8 @@ class Event(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     title: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
-    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    start_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    end_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     status: Mapped[EventStatus] = mapped_column(
         Enum(
             EventStatus,
@@ -25,10 +26,10 @@ class Event(Base):
     )
     source_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sources.id"))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
     )
 
     source: Mapped["Source | None"] = relationship()

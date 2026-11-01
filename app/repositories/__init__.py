@@ -10,12 +10,14 @@ from app.repositories.knowledge_gap import KnowledgeGapRepository
 from app.repositories.media import MediaRepository
 from app.repositories.memory import MemoryRepository, UnsupportedVectorSearch
 from app.repositories.person import PersonRepository
+from app.repositories.profile import ConversationProfileRepository
 from app.repositories.relationship import RelationshipRepository
 from app.repositories.source import SourceRepository
 
 __all__ = [
     "ClaimGroupRepository",
     "ClaimRepository",
+    "ConversationProfileRepository",
     "ConversationRepository",
     "FactRepository",
     "KnowledgeGapRepository",
