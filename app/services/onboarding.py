@@ -7,6 +7,8 @@ repositories the admin API already uses, so trust and provenance rules are not
 bypassed.
 """
 
+from __future__ import annotations
+
 import uuid
 from datetime import UTC, datetime
 
