@@ -9,6 +9,7 @@ from app.models import (
     ConversationProfile,
     Fact,
     Memory,
+    OnboardingSession,
     Person,
     Relationship,
     Source,
@@ -210,6 +211,125 @@ async def test_activation_requires_explicit_consent(app_client: AsyncClient) -> 
     assert body["activated_at"] is not None
     assert body["subject_person_id"] is not None
     assert body["profile_id"] is not None
+
+
+async def test_editing_draft_after_consent_invalidates_consent(
+    app_client: AsyncClient,
+) -> None:
+    session_id = await _draft_session(app_client, _first_day_package())
+    consent = await app_client.post(
+        f"{ONBOARDING}/{session_id}/consent",
+        json={"confirmed_by": "Javi", "scope": "Activate profile"},
+    )
+    assert consent.status_code == 200
+    assert consent.json()["consent_confirmed"] is True
+
+    changed = _first_day_package()
+    changed["identity"]["preferred_name"] = "Elena"
+    saved = await app_client.put(
+        f"{ONBOARDING}/{session_id}/draft", json=changed
+    )
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["consent_confirmed"] is False
+    assert body["consent_confirmed_by"] is None
+    assert body["consent_confirmed_at"] is None
+    assert body["consent_scope"] is None
+
+    blocked = await app_client.post(f"{ONBOARDING}/{session_id}/activate")
+    assert blocked.status_code == 409
+    assert "consent" in blocked.json()["detail"].lower()
+
+    reconsent = await app_client.post(
+        f"{ONBOARDING}/{session_id}/consent",
+        json={"confirmed_by": "Javi", "scope": "Activate the revised profile"},
+    )
+    assert reconsent.status_code == 200
+    assert (
+        await app_client.post(f"{ONBOARDING}/{session_id}/activate")
+    ).status_code == 200
+
+
+async def test_activation_rejects_consent_for_a_different_payload(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    session_id = await _draft_session(app_client, _first_day_package())
+    await app_client.post(
+        f"{ONBOARDING}/{session_id}/consent",
+        json={"confirmed_by": "Javi", "scope": "Activate profile"},
+    )
+
+    row = await db_session.get(OnboardingSession, uuid.UUID(session_id))
+    assert row is not None
+    mutated = dict(row.payload)
+    mutated["identity"] = {**mutated["identity"], "preferred_name": "Cambiada"}
+    row.payload = mutated
+    await db_session.commit()
+
+    response = await app_client.post(f"{ONBOARDING}/{session_id}/activate")
+    assert response.status_code == 409
+    detail = response.json()["detail"].lower()
+    assert "consent" in detail
+    assert "draft" in detail
+    stored = (await app_client.get(f"{ONBOARDING}/{session_id}")).json()
+    assert stored["status"] == "draft"
+    assert stored["subject_person_id"] is None
+
+
+async def test_activation_rejects_duplicate_sensitive_topics(
+    app_client: AsyncClient,
+) -> None:
+    payload = _first_day_package()
+    payload["sensitive_topics"] = [
+        {
+            "topic": "Fallecimiento de Miguel",
+            "handling": "Do not initiate.",
+            "triggers": ["murió"],
+        },
+        {
+            "topic": "  fallecimiento de MIGUEL  ",
+            "handling": "Redirect gently.",
+            "triggers": ["funeral"],
+        },
+    ]
+    session_id = await _draft_session(app_client, payload)
+    await app_client.post(
+        f"{ONBOARDING}/{session_id}/consent",
+        json={"confirmed_by": "Javi", "scope": "Activate profile"},
+    )
+
+    response = await app_client.post(f"{ONBOARDING}/{session_id}/activate")
+    assert response.status_code == 422
+    problems = response.json()["detail"]
+    assert any(
+        "unique" in problem and "case-insensitive" in problem
+        for problem in problems
+    )
+    stored = (await app_client.get(f"{ONBOARDING}/{session_id}")).json()
+    assert stored["status"] == "draft"
+    assert stored["subject_person_id"] is None
+
+
+async def test_double_activation_materializes_the_package_once(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    session_id = await _draft_session(app_client, _first_day_package())
+    await app_client.post(
+        f"{ONBOARDING}/{session_id}/consent",
+        json={"confirmed_by": "Javi", "scope": "Activate profile"},
+    )
+
+    first = await app_client.post(f"{ONBOARDING}/{session_id}/activate")
+    assert first.status_code == 200
+    second = await app_client.post(f"{ONBOARDING}/{session_id}/activate")
+    assert second.status_code == 409
+
+    persons = (await db_session.execute(select(Person))).scalars().all()
+    profiles = (
+        await db_session.execute(select(ConversationProfile))
+    ).scalars().all()
+    assert len(persons) == 2
+    assert len(profiles) == 1
 
 
 async def test_activation_rejects_an_incomplete_package(

@@ -74,10 +74,11 @@ from app.services.materialization import (
 )
 from app.services.memory_embeddings import MemoryEmbeddingBackfillService
 from app.services.onboarding import (
+    OnboardingConsentMismatchError,
     OnboardingConsentRequiredError,
     OnboardingError,
-    OnboardingNotFoundError,
     OnboardingNotDraftError,
+    OnboardingNotFoundError,
     OnboardingService,
     OnboardingValidationError,
 )
@@ -110,7 +111,12 @@ def _onboarding_http_error(exc: OnboardingError) -> HTTPException:
     if isinstance(exc, OnboardingValidationError):
         return HTTPException(status_code=422, detail=exc.problems)
     if isinstance(
-        exc, (OnboardingNotDraftError, OnboardingConsentRequiredError)
+        exc,
+        (
+            OnboardingNotDraftError,
+            OnboardingConsentRequiredError,
+            OnboardingConsentMismatchError,
+        ),
     ):
         return HTTPException(status_code=409, detail=str(exc))
     return HTTPException(status_code=400, detail=str(exc))
@@ -415,7 +421,7 @@ async def list_claim_groups(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     needs_review: bool | None = Query(default=None),
-    status: ClaimGroupStatus | None = Query(default=None),
+    status: Annotated[ClaimGroupStatus | None, Query()] = None,
 ) -> list[ClaimGroup]:
     return await ClaimGroupRepository(db).list_recent(
         limit=limit, offset=offset, needs_review=needs_review, status=status
@@ -509,7 +515,7 @@ async def list_knowledge_gaps(
     db: DbSession,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    status: KnowledgeGapStatus | None = Query(default=None),
+    status: Annotated[KnowledgeGapStatus | None, Query()] = None,
 ) -> list[KnowledgeGap]:
     return await KnowledgeGapRepository(db).list_recent(
         limit=limit, offset=offset, status=status

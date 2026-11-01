@@ -100,10 +100,11 @@ from app.services.materialization import (
 )
 from app.services.memory_embeddings import MemoryEmbeddingBackfillService
 from app.services.onboarding import (
+    OnboardingConsentMismatchError,
     OnboardingConsentRequiredError,
     OnboardingError,
-    OnboardingNotFoundError,
     OnboardingNotDraftError,
+    OnboardingNotFoundError,
     OnboardingService,
     OnboardingValidationError,
 )
@@ -190,6 +191,11 @@ def _error_text(exc: Exception) -> str:
         return "Faltan datos para activar: " + "; ".join(exc.problems)
     if isinstance(exc, OnboardingConsentRequiredError):
         return "Registra el consentimiento explícito antes de activar el perfil."
+    if isinstance(exc, OnboardingConsentMismatchError):
+        return (
+            "El borrador cambió después del consentimiento. Revísalo y registra "
+            "el consentimiento de nuevo."
+        )
     if isinstance(exc, OnboardingNotDraftError):
         return "Este onboarding ya está activado y no se puede editar."
     if isinstance(exc, OnboardingNotFoundError):

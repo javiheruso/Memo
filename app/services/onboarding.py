@@ -9,6 +9,8 @@ bypassed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -48,6 +50,10 @@ class OnboardingNotDraftError(OnboardingError):
 
 class OnboardingConsentRequiredError(OnboardingError):
     """Activation was requested before the operator consent was recorded."""
+
+
+class OnboardingConsentMismatchError(OnboardingError):
+    """The recorded consent no longer matches the draft under review."""
 
 
 class OnboardingValidationError(OnboardingError):
@@ -92,8 +98,13 @@ class OnboardingService:
     async def save_draft(
         self, session_id: uuid.UUID, draft: OnboardingDraft
     ) -> OnboardingSession:
-        row = await self._require_draft(session_id)
+        row = await self._require_draft(session_id, for_update=True)
         row.payload = draft.model_dump(mode="json")
+        if (
+            row.consent_confirmed
+            and row.consent_payload_fingerprint != self.draft_fingerprint(draft)
+        ):
+            self._clear_consent(row)
         await self._session.commit()
         return await self._require(session_id)
 
@@ -101,29 +112,43 @@ class OnboardingService:
         self, session_id: uuid.UUID, *, confirmed_by: str, scope: str
     ) -> OnboardingSession:
         """Record explicit operator consent; never activates in the same call."""
-        row = await self._require_draft(session_id)
+        row = await self._require_draft(session_id, for_update=True)
         row.consent_confirmed = True
         row.consent_confirmed_by = confirmed_by
         row.consent_confirmed_at = datetime.now(UTC)
         row.consent_scope = scope
+        row.consent_payload_fingerprint = self.draft_fingerprint(self.draft_of(row))
         await self._session.commit()
         return await self._require(session_id)
 
     async def activate(self, session_id: uuid.UUID) -> OnboardingSession:
-        row = await self._require_draft(session_id)
+        row = await self._require_draft(session_id, for_update=True)
         if not row.consent_confirmed:
             raise OnboardingConsentRequiredError(
                 "Explicit operator consent must be recorded before activation"
             )
         draft = self.draft_of(row)
+        if row.consent_payload_fingerprint != self.draft_fingerprint(draft):
+            raise OnboardingConsentMismatchError(
+                "Recorded consent does not match the current draft; "
+                "review the draft and record consent again"
+            )
         problems = self.validation_problems(draft)
         if problems:
             raise OnboardingValidationError(problems)
 
+        activated_at = datetime.now(UTC)
         try:
+            claimed = await self._onboarding.claim_activation(
+                session_id, activated_at=activated_at
+            )
+            if not claimed:
+                raise OnboardingNotDraftError(
+                    "Activated onboarding sessions cannot be edited or reactivated"
+                )
             await self._materialize(row, draft)
             row.status = OnboardingStatus.activated
-            row.activated_at = datetime.now(UTC)
+            row.activated_at = activated_at
             await self._session.commit()
         except Exception:
             await self._session.rollback()
@@ -146,6 +171,11 @@ class OnboardingService:
             problems.append("at least one person in the circle is required")
         if not draft.sensitive_topics:
             problems.append("at least one sensitive topic is required")
+        normalized_topics = [
+            topic.topic.strip().casefold() for topic in draft.sensitive_topics
+        ]
+        if len(normalized_topics) != len(set(normalized_topics)):
+            problems.append("sensitive topics must be unique (case-insensitive)")
         for topic in draft.sensitive_topics:
             if not topic.handling:
                 problems.append(
@@ -307,6 +337,29 @@ class OnboardingService:
         row.profile_id = profile.id
 
     @staticmethod
+    def _clear_consent(row: OnboardingSession) -> None:
+        row.consent_confirmed = False
+        row.consent_confirmed_by = None
+        row.consent_confirmed_at = None
+        row.consent_scope = None
+        row.consent_payload_fingerprint = None
+
+    @classmethod
+    def draft_fingerprint(cls, draft: OnboardingDraft) -> str:
+        """Stable digest of the canonical draft payload.
+
+        ``sort_keys`` canonicalizes object key order while list order stays
+        meaningful, so any content change produces a different fingerprint.
+        """
+        canonical = json.dumps(
+            draft.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
     def _data_origin(row: OnboardingSession, draft: OnboardingDraft) -> str:
         reviewer = draft.reviewer.name
         if draft.reviewer.relationship:
@@ -318,14 +371,21 @@ class OnboardingService:
             f"Consent recorded by {row.consent_confirmed_by}: {row.consent_scope}"
         )
 
-    async def _require(self, session_id: uuid.UUID) -> OnboardingSession:
-        row = await self._onboarding.get(session_id)
+    async def _require(
+        self, session_id: uuid.UUID, *, for_update: bool = False
+    ) -> OnboardingSession:
+        if for_update:
+            row = await self._onboarding.get_for_update(session_id)
+        else:
+            row = await self._onboarding.get(session_id)
         if row is None:
             raise OnboardingNotFoundError("Onboarding session not found")
         return row
 
-    async def _require_draft(self, session_id: uuid.UUID) -> OnboardingSession:
-        row = await self._require(session_id)
+    async def _require_draft(
+        self, session_id: uuid.UUID, *, for_update: bool = False
+    ) -> OnboardingSession:
+        row = await self._require(session_id, for_update=for_update)
         if row.status is not OnboardingStatus.draft:
             raise OnboardingNotDraftError(
                 "Activated onboarding sessions cannot be edited or reactivated"

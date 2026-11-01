@@ -4,7 +4,8 @@ The session is the resumable staging area for the first-day package. It holds
 a JSON payload validated by the onboarding schemas; no authority-bearing row
 (person, fact, memory or profile) is written until activation. Consent is kept
 in explicit columns rather than inside the draft so activation can gate on it
-without parsing free-form content.
+without parsing free-form content. The consent fingerprint binds that consent
+to the exact canonical payload the operator reviewed.
 """
 
 import uuid
@@ -37,6 +38,7 @@ class OnboardingSession(Base):
     consent_confirmed_by: Mapped[str | None] = mapped_column(String(255))
     consent_confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     consent_scope: Mapped[str | None] = mapped_column(Text)
+    consent_payload_fingerprint: Mapped[str | None] = mapped_column(String(64))
     subject_person_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("persons.id")
     )

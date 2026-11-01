@@ -231,3 +231,81 @@ async def test_onboarding_consent_ui_gates_activation(app_client: AsyncClient) -
     stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()
     assert stored["status"] == "activated"
     assert stored["profile_id"] is not None
+
+
+async def test_onboarding_ui_edit_after_consent_requires_new_consent(
+    app_client: AsyncClient,
+) -> None:
+    created = await app_client.post(f"{API}/onboarding", json=_complete_package())
+    session_id = created.json()["id"]
+    consent = await app_client.post(
+        f"{UI}/onboarding/{session_id}/consent",
+        data={
+            "confirmed": "on",
+            "confirmed_by": "Javi",
+            "scope": "Activar perfil",
+        },
+        follow_redirects=True,
+    )
+    assert "Consentimiento explícito registrado" in consent.text
+
+    edited = await app_client.post(
+        f"{UI}/onboarding/{session_id}/identity",
+        data={
+            "first_name": "Elena",
+            "preferred_name": "Elena",
+            "reviewer_name": "Javi",
+            "reviewer_relationship": "hijo",
+        },
+        follow_redirects=True,
+    )
+    assert "Identidad y revisor guardados" in edited.text
+    stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()
+    assert stored["consent_confirmed"] is False
+    assert stored["status"] == "draft"
+
+    blocked = await app_client.post(
+        f"{UI}/onboarding/{session_id}/activate", follow_redirects=True
+    )
+    assert "Registra el consentimiento explícito" in blocked.text
+    stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()
+    assert stored["status"] == "draft"
+
+
+async def test_onboarding_ui_rejects_duplicate_sensitive_topics(
+    app_client: AsyncClient,
+) -> None:
+    package = _complete_package()
+    package["sensitive_topics"] = [
+        {
+            "topic": "Fallecimiento de Miguel",
+            "handling": "Do not initiate.",
+            "triggers": ["murió"],
+        },
+        {
+            "topic": "fallecimiento de miguel",
+            "handling": "Redirect gently.",
+            "triggers": ["funeral"],
+        },
+    ]
+    created = await app_client.post(f"{API}/onboarding", json=package)
+    session_id = created.json()["id"]
+    await app_client.post(
+        f"{UI}/onboarding/{session_id}/consent",
+        data={
+            "confirmed": "on",
+            "confirmed_by": "Javi",
+            "scope": "Activar perfil",
+        },
+        follow_redirects=True,
+    )
+
+    response = await app_client.post(
+        f"{UI}/onboarding/{session_id}/activate", follow_redirects=True
+    )
+    assert response.status_code == 200
+    assert "Faltan datos para activar" in response.text
+    assert "sensitive topics must be unique" in response.text
+    stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()
+    assert stored["status"] == "draft"
+    assert stored["subject_person_id"] is None

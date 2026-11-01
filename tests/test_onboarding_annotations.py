@@ -8,6 +8,7 @@ that guarantee for the Python 3.12 CI target.
 """
 
 import __future__
+
 from pathlib import Path
 
 from app.services.onboarding import OnboardingService

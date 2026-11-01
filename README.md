@@ -410,13 +410,18 @@ while the session is a draft: the payload lives in `onboarding_sessions`.
 
 Activation is a separate, consent-gated step. The operator must first record
 who confirms and the consent scope (the UI also requires an explicit checkbox).
-`POST /api/v1/admin/onboarding/{id}/activate` then refuses with `409` until
-consent exists, and with `422` listing missing package fields until the draft is
-complete. On success the service creates the person, sources, relationships,
-facts, memories and conversational profile through the existing repositories in
-one transaction; fact status and source provenance are preserved, and the
-profile is activated only after that explicit confirmation. If another profile
-was active, the existing activation rule deactivates it. Activated sessions are
+Consent is bound to a canonical fingerprint of the reviewed draft: saving any
+different payload invalidates it, and activation also refuses a stored
+fingerprint that no longer matches. `POST /api/v1/admin/onboarding/{id}/activate`
+then refuses with `409` until consent exists, and with `422` listing missing
+package fields (including case-insensitive duplicate sensitive topics) until the
+draft is complete. Concurrent or repeated activation is guarded by a row lock
+and an atomic draft-to-activated claim, so the package is materialized only
+once. On success the service creates the person, sources, relationships, facts,
+memories and conversational profile through the existing repositories in one
+transaction; fact status and source provenance are preserved, and the profile
+is activated only after that explicit confirmation. If another profile was
+active, the existing activation rule deactivates it. Activated sessions are
 terminal: drafts, consent and reactivation are rejected.
 
 The JSON admin API mirrors the UI under `/api/v1/admin/onboarding` (create,

@@ -1,8 +1,11 @@
+from datetime import UTC, datetime
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.domain.enums import OnboardingStatus
 from app.models import OnboardingSession
 from app.repositories.onboarding import OnboardingRepository
 from app.schemas.onboarding import OnboardingDraft
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def test_onboarding_repository_persists_draft_payload(
@@ -28,3 +31,18 @@ async def test_onboarding_repository_persists_draft_payload(
 
     listed = await repo.list_recent()
     assert [item.id for item in listed] == [row.id]
+
+
+async def test_claim_activation_is_a_one_way_compare_and_set(
+    db_session: AsyncSession,
+) -> None:
+    row = OnboardingSession(status=OnboardingStatus.draft, payload={})
+    db_session.add(row)
+    await db_session.commit()
+
+    repo = OnboardingRepository(db_session)
+    activated_at = datetime.now(UTC)
+
+    assert await repo.claim_activation(row.id, activated_at=activated_at) is True
+    await db_session.commit()
+    assert await repo.claim_activation(row.id, activated_at=activated_at) is False
