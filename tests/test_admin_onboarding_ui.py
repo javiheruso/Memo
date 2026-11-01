@@ -97,6 +97,36 @@ async def test_onboarding_entry_sections_are_saved_and_removed(
                 "triggers": "murió, funeral",
             },
         ),
+        (
+            "people",
+            {
+                "key": "miguel",
+                "first_name": "Miguel",
+                "relationship_type": "spouse_of",
+                "certainty": "probable",
+                "source_key": "javi",
+            },
+        ),
+        (
+            "facts",
+            {
+                "subject_key": "subject",
+                "fact_type": "hobby",
+                "value_text": "costura",
+                "status": "verified",
+                "source_key": "javi",
+            },
+        ),
+        (
+            "memories",
+            {
+                "title": "Tardes de costura",
+                "narrative": "Elena cosía con Miguel los domingos.",
+                "sensitivity_level": "low",
+                "source_key": "javi",
+                "people_keys": ["subject", "miguel"],
+            },
+        ),
     ):
         response = await app_client.post(
             f"{base}/{section}", data=data, follow_redirects=True
@@ -110,11 +140,14 @@ async def test_onboarding_entry_sections_are_saved_and_removed(
         "fallecimiento de Miguel"
     ]
     assert stored["sensitive_topics"][0]["triggers"] == ["murió", "funeral"]
+    assert [item["key"] for item in stored["people"]] == ["miguel"]
+    assert [item["fact_type"] for item in stored["facts"]] == ["hobby"]
+    assert stored["memories"][0]["people_keys"] == ["subject", "miguel"]
 
     removed = await app_client.post(
-        f"{base}/contributors/0/remove", follow_redirects=True
+        f"{base}/facts/0/remove", follow_redirects=True
     )
     assert removed.status_code == 200
     assert "Elemento eliminado del borrador" in removed.text
     stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()["payload"]
-    assert stored["contributors"] == []
+    assert stored["facts"] == []
