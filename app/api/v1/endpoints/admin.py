@@ -16,6 +16,7 @@ from app.models import (
     Fact,
     KnowledgeGap,
     Memory,
+    OnboardingSession,
     Person,
     Relationship,
     Source,
@@ -49,6 +50,10 @@ from app.schemas.knowledge_gap import KnowledgeGapRead, KnowledgeGapStatusUpdate
 from app.schemas.materialization import FactMaterializeRequest, MemoryMaterializeRequest
 from app.schemas.media import MediaCreate, MediaRead
 from app.schemas.memory import MemoryBackfillRead, MemoryCreate, MemoryRead
+from app.schemas.onboarding import (
+    OnboardingDraft,
+    OnboardingSessionRead,
+)
 from app.schemas.person import PersonCreate, PersonPrimaryMediaUpdate, PersonRead
 from app.schemas.profile import ConversationProfileCreate, ConversationProfileRead
 from app.schemas.relationship import RelationshipCreate, RelationshipRead
@@ -67,6 +72,12 @@ from app.services.materialization import (
     UnknownSourceRefError,
 )
 from app.services.memory_embeddings import MemoryEmbeddingBackfillService
+from app.services.onboarding import (
+    OnboardingError,
+    OnboardingNotFoundError,
+    OnboardingNotDraftError,
+    OnboardingService,
+)
 from app.services.seed import AlreadySeededError, seed_if_empty
 
 router = APIRouter(
@@ -88,6 +99,14 @@ def _claim_group_merge_http_error(exc: ClaimGroupMergeError) -> HTTPException:
     if isinstance(exc, UnknownClaimGroupMergeError):
         return HTTPException(status_code=404, detail=str(exc))
     return HTTPException(status_code=409, detail=str(exc))
+
+
+def _onboarding_http_error(exc: OnboardingError) -> HTTPException:
+    if isinstance(exc, OnboardingNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, OnboardingNotDraftError):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/sources", response_model=SourceRead, status_code=201)
@@ -153,6 +172,43 @@ async def activate_profile(
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     return profile
+
+
+@router.post(
+    "/onboarding", response_model=OnboardingSessionRead, status_code=201
+)
+async def create_onboarding(
+    db: DbSession, payload: OnboardingDraft | None = None
+) -> OnboardingSession:
+    """Start a resumable admin-led onboarding draft."""
+    return await OnboardingService(db).create(payload)
+
+
+@router.get("/onboarding", response_model=list[OnboardingSessionRead])
+async def list_onboarding(
+    db: DbSession, limit: int = Query(default=100, ge=1, le=500)
+) -> list[OnboardingSession]:
+    return await OnboardingService(db).list(limit=limit)
+
+
+@router.get("/onboarding/{session_id}", response_model=OnboardingSessionRead)
+async def get_onboarding(db: DbSession, session_id: uuid.UUID) -> OnboardingSession:
+    try:
+        return await OnboardingService(db).get(session_id)
+    except OnboardingError as exc:
+        raise _onboarding_http_error(exc) from exc
+
+
+@router.put(
+    "/onboarding/{session_id}/draft", response_model=OnboardingSessionRead
+)
+async def save_onboarding_draft(
+    db: DbSession, session_id: uuid.UUID, payload: OnboardingDraft
+) -> OnboardingSession:
+    try:
+        return await OnboardingService(db).save_draft(session_id, payload)
+    except OnboardingError as exc:
+        raise _onboarding_http_error(exc) from exc
 
 
 @router.post("/persons", response_model=PersonRead, status_code=201)
