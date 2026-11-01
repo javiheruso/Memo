@@ -51,6 +51,7 @@ from app.schemas.materialization import FactMaterializeRequest, MemoryMaterializ
 from app.schemas.media import MediaCreate, MediaRead
 from app.schemas.memory import MemoryBackfillRead, MemoryCreate, MemoryRead
 from app.schemas.onboarding import (
+    OnboardingConsentRequest,
     OnboardingDraft,
     OnboardingSessionRead,
 )
@@ -73,10 +74,12 @@ from app.services.materialization import (
 )
 from app.services.memory_embeddings import MemoryEmbeddingBackfillService
 from app.services.onboarding import (
+    OnboardingConsentRequiredError,
     OnboardingError,
     OnboardingNotFoundError,
     OnboardingNotDraftError,
     OnboardingService,
+    OnboardingValidationError,
 )
 from app.services.seed import AlreadySeededError, seed_if_empty
 
@@ -104,7 +107,11 @@ def _claim_group_merge_http_error(exc: ClaimGroupMergeError) -> HTTPException:
 def _onboarding_http_error(exc: OnboardingError) -> HTTPException:
     if isinstance(exc, OnboardingNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, OnboardingNotDraftError):
+    if isinstance(exc, OnboardingValidationError):
+        return HTTPException(status_code=422, detail=exc.problems)
+    if isinstance(
+        exc, (OnboardingNotDraftError, OnboardingConsentRequiredError)
+    ):
         return HTTPException(status_code=409, detail=str(exc))
     return HTTPException(status_code=400, detail=str(exc))
 
@@ -207,6 +214,41 @@ async def save_onboarding_draft(
 ) -> OnboardingSession:
     try:
         return await OnboardingService(db).save_draft(session_id, payload)
+    except OnboardingError as exc:
+        raise _onboarding_http_error(exc) from exc
+
+
+@router.post(
+    "/onboarding/{session_id}/consent", response_model=OnboardingSessionRead
+)
+async def record_onboarding_consent(
+    db: DbSession, session_id: uuid.UUID, payload: OnboardingConsentRequest
+) -> OnboardingSession:
+    """Record operator consent. Activation is always a separate request."""
+    try:
+        return await OnboardingService(db).record_consent(
+            session_id,
+            confirmed_by=payload.confirmed_by,
+            scope=payload.scope,
+        )
+    except OnboardingError as exc:
+        raise _onboarding_http_error(exc) from exc
+
+
+@router.post(
+    "/onboarding/{session_id}/activate", response_model=OnboardingSessionRead
+)
+async def activate_onboarding(
+    db: DbSession, session_id: uuid.UUID, embedder: EmbedderDep
+) -> OnboardingSession:
+    """Materialize the first-day package after explicit consent.
+
+    The created conversational profile is activated in the same transaction
+    only when the operator has already recorded consent and the draft passes
+    activation validation.
+    """
+    try:
+        return await OnboardingService(db, embedder=embedder).activate(session_id)
     except OnboardingError as exc:
         raise _onboarding_http_error(exc) from exc
 
