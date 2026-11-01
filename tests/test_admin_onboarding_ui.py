@@ -151,3 +151,74 @@ async def test_onboarding_entry_sections_are_saved_and_removed(
     assert "Elemento eliminado del borrador" in removed.text
     stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()["payload"]
     assert stored["facts"] == []
+
+
+def _complete_package() -> dict:
+    return {
+        "identity": {"first_name": "Elena", "preferred_name": "Elenita"},
+        "reviewer": {"name": "Javi", "relationship": "hijo"},
+        "contributors": [{"name": "Javi", "relationship": "hijo"}],
+        "sources": [
+            {"key": "family", "source_type": "family_member", "description": "Javi"}
+        ],
+        "sensitive_topics": [
+            {
+                "topic": "fallecimiento de Miguel",
+                "handling": "Do not initiate.",
+                "triggers": ["murió"],
+            }
+        ],
+        "facts": [
+            {
+                "fact_type": "hobby",
+                "value_text": "costura",
+                "status": "verified",
+                "source_key": "family",
+            }
+        ],
+        "preferences": {"positive_topics": ["costura"]},
+    }
+
+
+async def test_onboarding_consent_ui_gates_activation(app_client: AsyncClient) -> None:
+    created = await app_client.post(f"{API}/onboarding", json=_complete_package())
+    session_id = created.json()["id"]
+
+    page = await app_client.get(f"{UI}/onboarding/{session_id}")
+    assert page.status_code == 200
+    assert "Registrar consentimiento" in page.text
+    assert "Registra primero el consentimiento explícito" in page.text
+
+    missing_confirm = await app_client.post(
+        f"{UI}/onboarding/{session_id}/consent",
+        data={"confirmed_by": "Javi", "scope": "Activar perfil"},
+        follow_redirects=True,
+    )
+    assert "Marca la confirmación explícita" in missing_confirm.text
+    stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()
+    assert stored["consent_confirmed"] is False
+    assert stored["status"] == "draft"
+
+    consent = await app_client.post(
+        f"{UI}/onboarding/{session_id}/consent",
+        data={
+            "confirmed": "on",
+            "confirmed_by": "Javi",
+            "scope": "Activar perfil",
+        },
+        follow_redirects=True,
+    )
+    assert "Consentimiento explícito registrado" in consent.text
+    assert "Activar perfil conversacional" in consent.text
+    stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()
+    assert stored["consent_confirmed"] is True
+    assert stored["status"] == "draft"
+
+    activated = await app_client.post(
+        f"{UI}/onboarding/{session_id}/activate", follow_redirects=True
+    )
+    assert activated.status_code == 200
+    assert "Perfil conversacional activado" in activated.text
+    stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()
+    assert stored["status"] == "activated"
+    assert stored["profile_id"] is not None

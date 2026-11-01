@@ -360,4 +360,46 @@
     <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Guardar borrador</button>
   </form>
 </fieldset>
+
+<fieldset>
+  <legend>9. Consentimiento explícito</legend>
+  {% if row.consent_confirmed %}
+  <p>
+    Consentimiento registrado por <strong>{{ row.consent_confirmed_by }}</strong>
+    {% if row.consent_confirmed_at %}el {{ row.consent_confirmed_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}.
+  </p>
+  <p class="muted">{{ row.consent_scope }}</p>
+  {% elif row.status.value == "draft" %}
+  <p class="muted">
+    El perfil conversacional no se activa automáticamente. Registra quién
+    confirma y para qué alcance antes de activarlo.
+  </p>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/consent">
+    <label><input type="checkbox" name="confirmed" required> Confirmo que la familia autoriza preparar y activar el perfil conversacional.</label>
+    <label>Confirmado por</label>
+    <input name="confirmed_by" value="{{ draft.reviewer.name }}" required>
+    <label>Alcance del consentimiento</label>
+    <textarea name="scope" rows="2" required>Activar el perfil conversacional con los datos revisados en este onboarding.</textarea>
+    <button type="submit">Registrar consentimiento</button>
+  </form>
+  {% endif %}
+</fieldset>
+
+<fieldset>
+  <legend>10. Activación del perfil</legend>
+  {% if row.status.value == "activated" %}
+  <p>El perfil ya está activo. No se puede editar ni volver a activar desde este flujo.</p>
+  {% elif row.consent_confirmed %}
+  <p class="muted">
+    Al activar se crearán la persona, las fuentes, los hechos, los recuerdos y
+    el perfil conversacional con los datos revisados. El perfil anterior, si
+    existía, quedará inactivo.
+  </p>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/activate">
+    <button type="submit">Activar perfil conversacional</button>
+  </form>
+  {% else %}
+  <p class="muted">Registra primero el consentimiento explícito.</p>
+  {% endif %}
+</fieldset>
 {% endblock %}

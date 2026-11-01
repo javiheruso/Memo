@@ -729,6 +729,49 @@ async def onboarding_remove_entry(
     )
 
 
+@router.post("/onboarding/{session_id}/consent")
+async def onboarding_consent(
+    request: Request, db: DbSession, session_id: uuid.UUID
+) -> RedirectResponse:
+    form = await request.form()
+    if not _checked(form, "confirmed"):
+        return _back(
+            f"/admin/onboarding/{session_id}",
+            error="Marca la confirmación explícita antes de registrar el consentimiento.",
+        )
+    confirmed_by = _text(form, "confirmed_by")
+    scope = _text(form, "scope")
+    if confirmed_by is None or scope is None:
+        return _back(
+            f"/admin/onboarding/{session_id}",
+            error="Indica quién confirma y el alcance del consentimiento.",
+        )
+    try:
+        await OnboardingService(db).record_consent(
+            session_id, confirmed_by=confirmed_by, scope=scope
+        )
+    except OnboardingError as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Consentimiento explícito registrado.",
+    )
+
+
+@router.post("/onboarding/{session_id}/activate")
+async def onboarding_activate(
+    db: DbSession, session_id: uuid.UUID, embedder: EmbedderDep
+) -> RedirectResponse:
+    try:
+        await OnboardingService(db, embedder=embedder).activate(session_id)
+    except OnboardingError as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Perfil conversacional activado.",
+    )
+
+
 # --------------------------------------------------------------------------
 # Claim-group review queue
 # --------------------------------------------------------------------------
