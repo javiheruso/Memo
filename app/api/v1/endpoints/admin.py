@@ -16,6 +16,7 @@ from app.models import (
     Fact,
     KnowledgeGap,
     Memory,
+    OnboardingSession,
     Person,
     Relationship,
     Source,
@@ -49,6 +50,11 @@ from app.schemas.knowledge_gap import KnowledgeGapRead, KnowledgeGapStatusUpdate
 from app.schemas.materialization import FactMaterializeRequest, MemoryMaterializeRequest
 from app.schemas.media import MediaCreate, MediaRead
 from app.schemas.memory import MemoryBackfillRead, MemoryCreate, MemoryRead
+from app.schemas.onboarding import (
+    OnboardingConsentRequest,
+    OnboardingDraft,
+    OnboardingSessionRead,
+)
 from app.schemas.person import PersonCreate, PersonPrimaryMediaUpdate, PersonRead
 from app.schemas.profile import ConversationProfileCreate, ConversationProfileRead
 from app.schemas.relationship import RelationshipCreate, RelationshipRead
@@ -67,6 +73,15 @@ from app.services.materialization import (
     UnknownSourceRefError,
 )
 from app.services.memory_embeddings import MemoryEmbeddingBackfillService
+from app.services.onboarding import (
+    OnboardingConsentMismatchError,
+    OnboardingConsentRequiredError,
+    OnboardingError,
+    OnboardingNotDraftError,
+    OnboardingNotFoundError,
+    OnboardingService,
+    OnboardingValidationError,
+)
 from app.services.seed import AlreadySeededError, seed_if_empty
 
 router = APIRouter(
@@ -88,6 +103,23 @@ def _claim_group_merge_http_error(exc: ClaimGroupMergeError) -> HTTPException:
     if isinstance(exc, UnknownClaimGroupMergeError):
         return HTTPException(status_code=404, detail=str(exc))
     return HTTPException(status_code=409, detail=str(exc))
+
+
+def _onboarding_http_error(exc: OnboardingError) -> HTTPException:
+    if isinstance(exc, OnboardingNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, OnboardingValidationError):
+        return HTTPException(status_code=422, detail=exc.problems)
+    if isinstance(
+        exc,
+        (
+            OnboardingNotDraftError,
+            OnboardingConsentRequiredError,
+            OnboardingConsentMismatchError,
+        ),
+    ):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/sources", response_model=SourceRead, status_code=201)
@@ -153,6 +185,93 @@ async def activate_profile(
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     return profile
+
+
+@router.post(
+    "/onboarding", response_model=OnboardingSessionRead, status_code=201
+)
+async def create_onboarding(
+    db: DbSession, payload: OnboardingDraft | None = None
+) -> OnboardingSession:
+    """Start a resumable admin-led onboarding draft."""
+    return await OnboardingService(db).create(payload)
+
+
+@router.get("/onboarding", response_model=list[OnboardingSessionRead])
+async def list_onboarding(
+    db: DbSession, limit: int = Query(default=100, ge=1, le=500)
+) -> list[OnboardingSession]:
+    service = OnboardingService(db)
+    try:
+        rows = await service.list(limit=limit)
+        # Validate every persisted payload explicitly. The response model would
+        # otherwise raise an uncaught ResponseValidationError (500) when a
+        # legacy/invalid row is returned.
+        for row in rows:
+            service.draft_of(row)
+        return rows
+    except OnboardingError as exc:
+        raise _onboarding_http_error(exc) from exc
+
+
+@router.get("/onboarding/{session_id}", response_model=OnboardingSessionRead)
+async def get_onboarding(db: DbSession, session_id: uuid.UUID) -> OnboardingSession:
+    service = OnboardingService(db)
+    try:
+        row = await service.get(session_id)
+        # Surface a controlled 422 before FastAPI's response validation would
+        # turn a legacy invalid payload into a 500.
+        service.draft_of(row)
+        return row
+    except OnboardingError as exc:
+        raise _onboarding_http_error(exc) from exc
+
+
+@router.put(
+    "/onboarding/{session_id}/draft", response_model=OnboardingSessionRead
+)
+async def save_onboarding_draft(
+    db: DbSession, session_id: uuid.UUID, payload: OnboardingDraft
+) -> OnboardingSession:
+    try:
+        return await OnboardingService(db).save_draft(session_id, payload)
+    except OnboardingError as exc:
+        raise _onboarding_http_error(exc) from exc
+
+
+@router.post(
+    "/onboarding/{session_id}/consent", response_model=OnboardingSessionRead
+)
+async def record_onboarding_consent(
+    db: DbSession, session_id: uuid.UUID, payload: OnboardingConsentRequest
+) -> OnboardingSession:
+    """Record operator consent. Activation is always a separate request."""
+    try:
+        return await OnboardingService(db).record_consent(
+            session_id,
+            confirmed_by=payload.confirmed_by,
+            scope=payload.scope,
+        )
+    except OnboardingError as exc:
+        raise _onboarding_http_error(exc) from exc
+
+
+@router.post(
+    "/onboarding/{session_id}/activate", response_model=OnboardingSessionRead
+)
+async def activate_onboarding(
+    db: DbSession, session_id: uuid.UUID, embedder: EmbedderDep
+) -> OnboardingSession:
+    """Materialize the first-day package after explicit consent.
+
+    The created conversational profile is activated in the same transaction
+    only when the operator has already recorded consent and the draft passes
+    activation validation.
+    """
+    try:
+        return await OnboardingService(db, embedder=embedder).activate(session_id)
+    except OnboardingError as exc:
+        raise _onboarding_http_error(exc) from exc
 
 
 @router.post("/persons", response_model=PersonRead, status_code=201)
@@ -317,7 +436,7 @@ async def list_claim_groups(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     needs_review: bool | None = Query(default=None),
-    status: ClaimGroupStatus | None = Query(default=None),
+    status: Annotated[ClaimGroupStatus | None, Query()] = None,
 ) -> list[ClaimGroup]:
     return await ClaimGroupRepository(db).list_recent(
         limit=limit, offset=offset, needs_review=needs_review, status=status
@@ -411,7 +530,7 @@ async def list_knowledge_gaps(
     db: DbSession,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    status: KnowledgeGapStatus | None = Query(default=None),
+    status: Annotated[KnowledgeGapStatus | None, Query()] = None,
 ) -> list[KnowledgeGap]:
     return await KnowledgeGapRepository(db).list_recent(
         limit=limit, offset=offset, status=status

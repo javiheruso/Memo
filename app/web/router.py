@@ -33,6 +33,8 @@ from app.domain.enums import (
     KnowledgeGapStatus,
     MediaType,
     MemoryStatus,
+    RelationshipStatus,
+    RelationshipType,
     SensitivityLevel,
     SourceType,
 )
@@ -54,7 +56,18 @@ from app.schemas.materialization import (
 )
 from app.schemas.media import MediaCreate
 from app.schemas.memory import MemoryCreate
+from app.schemas.onboarding import (
+    OnboardingContributor,
+    OnboardingFact,
+    OnboardingIdentity,
+    OnboardingMemory,
+    OnboardingPerson,
+    OnboardingPreferences,
+    OnboardingReviewer,
+    OnboardingSource,
+)
 from app.schemas.person import PersonCreate
+from app.schemas.profile import SensitiveTopicCreate
 from app.schemas.source import SourceCreate
 from app.security import (
     SESSION_COOKIE_NAME,
@@ -84,6 +97,16 @@ from app.services.materialization import (
     UnknownSourceRefError,
 )
 from app.services.memory_embeddings import MemoryEmbeddingBackfillService
+from app.services.onboarding import (
+    OnboardingConsentMismatchError,
+    OnboardingConsentRequiredError,
+    OnboardingDraftInvalidError,
+    OnboardingError,
+    OnboardingNotDraftError,
+    OnboardingNotFoundError,
+    OnboardingService,
+    OnboardingValidationError,
+)
 from app.services.seed import AlreadySeededError, seed_if_empty
 
 router = APIRouter(
@@ -163,6 +186,21 @@ def _error_text(exc: Exception) -> str:
         )
     if isinstance(exc, UnsupportedVectorSearch):
         return "Esta acción requiere una base de datos PostgreSQL (pgvector)."
+    if isinstance(exc, OnboardingDraftInvalidError):
+        return "El borrador no es válido: " + "; ".join(exc.problems)
+    if isinstance(exc, OnboardingValidationError):
+        return "Faltan datos para activar: " + "; ".join(exc.problems)
+    if isinstance(exc, OnboardingConsentRequiredError):
+        return "Registra el consentimiento explícito antes de activar el perfil."
+    if isinstance(exc, OnboardingConsentMismatchError):
+        return (
+            "El borrador cambió después del consentimiento. Revísalo y registra "
+            "el consentimiento de nuevo."
+        )
+    if isinstance(exc, OnboardingNotDraftError):
+        return "Este onboarding ya está activado y no se puede editar."
+    if isinstance(exc, OnboardingNotFoundError):
+        return "Onboarding no encontrado."
     return str(exc)
 
 
@@ -285,6 +323,93 @@ def _gap_status_update(form) -> KnowledgeGapStatusUpdate:
     )
 
 
+def _csv(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _form_list(form, key: str) -> list[str]:
+    return [
+        str(value).strip()
+        for value in form.getlist(key)
+        if str(value).strip()
+    ]
+
+
+async def _onboarding_row(db: AsyncSession, session_id: uuid.UUID):
+    try:
+        return await OnboardingService(db).get(session_id)
+    except OnboardingNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Onboarding no encontrado") from exc
+
+
+ONBOARDING_ENTRY_SECTIONS = {
+    "contributors",
+    "sources",
+    "sensitive_topics",
+    "people",
+    "facts",
+    "memories",
+}
+
+
+def _onboarding_entry(section: str, form):
+    if section == "contributors":
+        return OnboardingContributor(
+            name=_text(form, "name") or "",
+            relationship=_text(form, "relationship"),
+            permission_note=_text(form, "permission_note"),
+        )
+    if section == "sources":
+        return OnboardingSource(
+            key=_text(form, "key") or "",
+            source_type=_text(form, "source_type") or SourceType.family_member.value,
+            description=_text(form, "description"),
+        )
+    if section == "sensitive_topics":
+        return SensitiveTopicCreate(
+            topic=_text(form, "topic") or "",
+            handling=_text(form, "handling"),
+            consent_review_required=_checked(form, "consent_review_required"),
+            triggers=_csv(_text(form, "triggers")),
+        )
+    if section == "people":
+        return OnboardingPerson(
+            key=_text(form, "key") or "",
+            first_name=_text(form, "first_name") or "",
+            last_name=_text(form, "last_name"),
+            relationship_type=(
+                _text(form, "relationship_type") or RelationshipType.other.value
+            ),
+            certainty=(
+                _text(form, "certainty") or RelationshipStatus.probable.value
+            ),
+            source_key=_text(form, "source_key"),
+            notes=_text(form, "notes"),
+        )
+    if section == "facts":
+        return OnboardingFact(
+            subject_key=_text(form, "subject_key") or "subject",
+            fact_type=_text(form, "fact_type") or "",
+            value_text=_text(form, "value_text"),
+            status=_text(form, "status") or FactStatus.probable.value,
+            source_key=_text(form, "source_key") or "",
+            notes=_text(form, "notes"),
+        )
+    if section == "memories":
+        return OnboardingMemory(
+            title=_text(form, "title"),
+            narrative=_text(form, "narrative") or "",
+            sensitivity_level=(
+                _text(form, "sensitivity_level") or SensitivityLevel.low.value
+            ),
+            source_key=_text(form, "source_key") or "",
+            people_keys=_form_list(form, "people_keys"),
+        )
+    raise ValueError(f"Unknown onboarding section {section}")
+
+
 async def _count(db: AsyncSession, model, *conditions) -> int:
     stmt = select(func.count()).select_from(model)
     if conditions:
@@ -401,6 +526,234 @@ async def seed_example(request: Request, db: DbSession) -> RedirectResponse:
             f"{created.relationships} relaciones, {created.facts} hechos, "
             f"{created.memories} recuerdos y {created.media} {media_label}."
         ),
+    )
+
+
+# --------------------------------------------------------------------------
+# Admin/family-led onboarding
+# --------------------------------------------------------------------------
+
+
+@router.get("/onboarding", response_class=HTMLResponse)
+async def onboarding_list_page(request: Request, db: DbSession) -> HTMLResponse:
+    service = OnboardingService(db)
+    items = []
+    invalid: list[str] = []
+    for row in await service.list(limit=200):
+        try:
+            draft = service.draft_of(row)
+        except OnboardingDraftInvalidError as exc:
+            invalid.append(f"{row.id}: {'; '.join(exc.problems)}")
+            continue
+        items.append(
+            {
+                "row": row,
+                "draft": draft,
+                "progress": service.progress(row, draft),
+            }
+        )
+    extra: dict = {}
+    if invalid:
+        extra["error"] = (
+            "Hay borradores guardados con datos inválidos: " + "; ".join(invalid)
+        )
+    return templates.TemplateResponse(
+        request, "onboarding_list.html", _ctx(request, items=items, **extra)
+    )
+
+
+@router.post("/onboarding")
+async def onboarding_create(request: Request, db: DbSession) -> RedirectResponse:
+    row = await OnboardingService(db).create()
+    return _back(
+        f"/admin/onboarding/{row.id}",
+        message="Se ha creado un borrador de onboarding.",
+    )
+
+
+@router.get("/onboarding/{session_id}", response_class=HTMLResponse)
+async def onboarding_detail(
+    request: Request, db: DbSession, session_id: uuid.UUID
+) -> HTMLResponse:
+    service = OnboardingService(db)
+    row = await _onboarding_row(db, session_id)
+    try:
+        draft = service.draft_of(row)
+    except OnboardingDraftInvalidError as exc:
+        return _back("/admin/onboarding", error=_error_text(exc))
+    return templates.TemplateResponse(
+        request,
+        "onboarding_detail.html",
+        _ctx(
+            request,
+            row=row,
+            draft=draft,
+            progress=service.progress(row, draft),
+            subject_label=(
+                draft.identity.preferred_name
+                or draft.identity.first_name
+                or "Sin identificar"
+            ),
+            source_options=[source.key for source in draft.sources],
+            person_options=[
+                {"key": "subject", "label": draft.identity.first_name or "La persona"}
+            ]
+            + [
+                {"key": person.key, "label": person.first_name}
+                for person in draft.people
+            ],
+            source_type_options=SourceType,
+            relationship_type_options=RelationshipType,
+            relationship_status_options=RelationshipStatus,
+            fact_status_options=FactStatus,
+            memory_status_options=MemoryStatus,
+            sensitivity_options=SensitivityLevel,
+        ),
+    )
+
+
+@router.post("/onboarding/{session_id}/identity")
+async def onboarding_identity(
+    request: Request, db: DbSession, session_id: uuid.UUID
+) -> RedirectResponse:
+    form = await request.form()
+    service = OnboardingService(db)
+    row = await _onboarding_row(db, session_id)
+    try:
+        draft = service.draft_of(row)
+        draft.identity = OnboardingIdentity(
+            first_name=_text(form, "first_name") or "",
+            last_name=_text(form, "last_name"),
+            preferred_name=_text(form, "preferred_name"),
+            language=_text(form, "language"),
+        )
+        draft.reviewer = OnboardingReviewer(
+            name=_text(form, "reviewer_name") or "",
+            relationship=_text(form, "reviewer_relationship"),
+        )
+        await service.save_draft(session_id, draft)
+    except (ValidationError, OnboardingError) as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Identidad y revisor guardados.",
+    )
+
+
+@router.post("/onboarding/{session_id}/preferences")
+async def onboarding_preferences(
+    request: Request, db: DbSession, session_id: uuid.UUID
+) -> RedirectResponse:
+    form = await request.form()
+    service = OnboardingService(db)
+    row = await _onboarding_row(db, session_id)
+    try:
+        draft = service.draft_of(row)
+        draft.preferences = OnboardingPreferences(
+            positive_topics=_csv(_text(form, "positive_topics")),
+            never_do=_csv(_text(form, "never_do")),
+            conversational_style=_text(form, "conversational_style"),
+        )
+        await service.save_draft(session_id, draft)
+    except (ValidationError, OnboardingError) as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Preferencias guardadas.",
+    )
+
+
+@router.post("/onboarding/{session_id}/entries/{section}")
+async def onboarding_add_entry(
+    request: Request, db: DbSession, session_id: uuid.UUID, section: str
+) -> RedirectResponse:
+    if section not in ONBOARDING_ENTRY_SECTIONS:
+        raise HTTPException(status_code=404, detail="Sección de onboarding no válida")
+    form = await request.form()
+    service = OnboardingService(db)
+    row = await _onboarding_row(db, session_id)
+    try:
+        draft = service.draft_of(row)
+        getattr(draft, section).append(_onboarding_entry(section, form))
+        await service.save_draft(session_id, draft)
+    except (ValidationError, OnboardingError) as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Elemento añadido al borrador.",
+    )
+
+
+@router.post("/onboarding/{session_id}/entries/{section}/{index}/remove")
+async def onboarding_remove_entry(
+    request: Request,
+    db: DbSession,
+    session_id: uuid.UUID,
+    section: str,
+    index: int,
+) -> RedirectResponse:
+    if section not in ONBOARDING_ENTRY_SECTIONS:
+        raise HTTPException(status_code=404, detail="Sección de onboarding no válida")
+    service = OnboardingService(db)
+    row = await _onboarding_row(db, session_id)
+    try:
+        draft = service.draft_of(row)
+        items = getattr(draft, section)
+        if index < 0 or index >= len(items):
+            return _back(
+                f"/admin/onboarding/{session_id}",
+                error="El elemento ya no existe en el borrador.",
+            )
+        items.pop(index)
+        await service.save_draft(session_id, draft)
+    except (ValidationError, OnboardingError) as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Elemento eliminado del borrador.",
+    )
+
+
+@router.post("/onboarding/{session_id}/consent")
+async def onboarding_consent(
+    request: Request, db: DbSession, session_id: uuid.UUID
+) -> RedirectResponse:
+    form = await request.form()
+    if not _checked(form, "confirmed"):
+        return _back(
+            f"/admin/onboarding/{session_id}",
+            error="Marca la confirmación explícita antes de registrar el consentimiento.",
+        )
+    confirmed_by = _text(form, "confirmed_by")
+    scope = _text(form, "scope")
+    if confirmed_by is None or scope is None:
+        return _back(
+            f"/admin/onboarding/{session_id}",
+            error="Indica quién confirma y el alcance del consentimiento.",
+        )
+    try:
+        await OnboardingService(db).record_consent(
+            session_id, confirmed_by=confirmed_by, scope=scope
+        )
+    except OnboardingError as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Consentimiento explícito registrado.",
+    )
+
+
+@router.post("/onboarding/{session_id}/activate")
+async def onboarding_activate(
+    db: DbSession, session_id: uuid.UUID, embedder: EmbedderDep
+) -> RedirectResponse:
+    try:
+        await OnboardingService(db, embedder=embedder).activate(session_id)
+    except OnboardingError as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Perfil conversacional activado.",
     )
 
 

@@ -371,6 +371,7 @@ the JSON admin API, so the existing guardrails are preserved. When
 | Page | Path | Purpose |
 |------|------|---------|
 | Dashboard | `/admin` | Counts and navigation |
+| Onboarding | `/admin/onboarding`, `/admin/onboarding/{id}` | Resumable first-day package, progress checklist, consent and activation |
 | Claim-group queue | `/admin/claim-groups`, `/admin/claim-groups/{id}` | Review, resolve/ignore, merge duplicates, materialize to fact/memory |
 | Knowledge-gap queue | `/admin/knowledge-gaps`, `/admin/knowledge-gaps/{id}` | Review, resolve/ignore, materialize to fact/memory |
 | Entities | `/admin/sources`, `/admin/persons`, `/admin/media`, `/admin/facts`, `/admin/memories` | Minimal create + list; the persons page also sets/clears each person's primary media |
@@ -388,6 +389,51 @@ and rebuilds the API's pydantic schemas, so the trust defaults (`pending` facts,
 `candidate` memories), materialization guards (unknown/ignored/duplicate sources)
 and append-only provenance behave identically to the JSON API. Failures flash an
 error message on the target page; nothing is silently swallowed.
+
+### Admin-led onboarding workflow
+
+Onboarding is administered by a family reviewer through the protected admin UI
+(`/admin/onboarding`); there is no public or self-service signup. A draft is
+resumable and holds the minimum first-day package:
+
+- identity, preferred name and language;
+- the family reviewer and the permitted contributors;
+- initial sensitive topics with explicit handling and optional triggers;
+- provenance sources plus a small circle of people, facts and memories, each
+  with its own status/certainty and source;
+- conversation preferences such as positive topics and "never do" rules.
+
+Every section has its own save action, so the draft can stop and resume without
+losing completed work. The page shows a per-step progress checklist and the
+session status (`draft` or `activated`). Nothing authority-bearing is written
+while the session is a draft: the payload lives in `onboarding_sessions`.
+
+Activation is a separate, consent-gated step. The operator must first record
+who confirms and the consent scope (the UI also requires an explicit checkbox).
+Consent is bound to a canonical fingerprint of the reviewed draft: saving any
+different payload invalidates it, and activation also refuses a stored
+fingerprint that no longer matches. `POST /api/v1/admin/onboarding/{id}/activate`
+then refuses with `409` until consent exists, and with `422` listing missing
+package fields (including case-insensitive duplicate sensitive topics) until the
+draft is complete. Concurrent or repeated activation is guarded by a row lock
+and an atomic draft-to-activated claim, so the package is materialized only
+once. On success the service creates the person, sources, relationships, facts,
+memories and conversational profile through the existing repositories in one
+transaction; fact status and source provenance are preserved, and the profile
+is activated only after that explicit confirmation. If another profile was
+active, the existing activation rule deactivates it. Activated sessions are
+terminal: drafts, consent and reactivation are rejected.
+
+The JSON admin API mirrors the UI under `/api/v1/admin/onboarding` (create,
+list, read, replace draft, record consent, activate). Tests cover draft/resume,
+consent gating, materialized provenance and the resulting active-profile
+sensitive-topic behavior.
+
+Deferred for this slice: public authentication and accounts, full RBAC or
+fine-grained contributor permissions, voice/media capture inside onboarding,
+legal consent documents and workflow, and general consent revocation. The
+contributor and reviewer records are workflow metadata for the protected admin
+surface, not an authorization system.
 
 ## Public chat page
 
@@ -534,9 +580,10 @@ The policy is enforced in the conversation path, not in a UI flag:
   unchanged and are never relaxed for an explicit sensitive-topic question.
 
 The importer treats the demo profile as fictional data, not verified
-real-world information. Deferred for this slice: onboarding UI, consent
-revocation, roles/auth for profile management, media, and broader profile
-feature sets.
+real-world information. The admin-led onboarding workflow above creates real
+(non-fictional) profiles with explicit consent and provenance. Deferred for
+this slice: consent revocation, roles/auth for profile management, media, and
+broader profile feature sets.
 
 ### Memory queries and the semantic retrieval seam
 

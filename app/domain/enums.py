@@ -68,6 +68,18 @@ class RelationshipType(str, Enum):
     other = "other"
 
 
+class OnboardingStatus(str, Enum):
+    """Lifecycle of an admin-led onboarding draft.
+
+    ``draft`` is resumable and mutable. ``activated`` is terminal: the
+    workflow has created the real person, facts, memories and conversational
+    profile, and further draft edits are refused.
+    """
+
+    draft = "draft"
+    activated = "activated"
+
+
 class SourceType(str, Enum):
     family_member = "family_member"
     user = "user"

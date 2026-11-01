@@ -1,0 +1,413 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Onboarding{% endblock %}
+{% block content %}
+<h1>Onboarding: {{ subject_label }}</h1>
+<p>
+  <span class="badge">{{ row.status.value }}</span>
+  <span class="muted">Progreso: {{ progress.done }} / {{ progress.total }}</span>
+</p>
+
+<fieldset>
+  <legend>Progreso del paquete</legend>
+  <ul>
+    <li>{{ "✅" if progress.steps.identity else "⬜" }} Identidad y nombre preferido</li>
+    <li>{{ "✅" if progress.steps.reviewer else "⬜" }} Revisor familiar</li>
+    <li>{{ "✅" if progress.steps.contributors else "⬜" }} Contribuyentes permitidos</li>
+    <li>{{ "✅" if progress.steps.sensitive_topics else "⬜" }} Temas sensibles con manejo</li>
+    <li>{{ "✅" if progress.steps.sources else "⬜" }} Fuentes y procedencia</li>
+    <li>{{ "✅" if progress.steps.people else "⬜" }} Personas del círculo</li>
+    <li>{{ "✅" if progress.steps.content else "⬜" }} Hechos y recuerdos iniciales</li>
+    <li>{{ "✅" if progress.steps.preferences else "⬜" }} Preferencias de conversación</li>
+    <li>{{ "✅" if progress.steps.consent else "⬜" }} Consentimiento explícito</li>
+    <li>{{ "✅" if progress.steps.activated else "⬜" }} Perfil activo</li>
+  </ul>
+  {% if progress.blockers %}
+  <p class="muted">Bloqueos pendientes:</p>
+  <ul>
+    {% for problem in progress.blockers %}
+    <li>{{ problem }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</fieldset>
+
+{% if row.status.value == "activated" %}
+<fieldset>
+  <legend>Resultado</legend>
+  <p>El perfil conversacional está activo. Persona: <span class="mono">{{ row.subject_person_id }}</span></p>
+  <p>Perfil: <span class="mono">{{ row.profile_id }}</span></p>
+</fieldset>
+{% endif %}
+
+<fieldset>
+  <legend>1. Identidad y revisor</legend>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/identity">
+    <div class="grid">
+      <div>
+        <label>Nombre</label>
+        <input name="first_name" value="{{ draft.identity.first_name }}" required>
+        <label>Apellido</label>
+        <input name="last_name" value="{{ draft.identity.last_name or '' }}">
+        <label>Nombre preferido</label>
+        <input name="preferred_name" value="{{ draft.identity.preferred_name or '' }}">
+        <label>Idioma</label>
+        <input name="language" value="{{ draft.identity.language or '' }}">
+      </div>
+      <div>
+        <label>Revisor familiar</label>
+        <input name="reviewer_name" value="{{ draft.reviewer.name }}" required>
+        <label>Relación con la persona</label>
+        <input name="reviewer_relationship" value="{{ draft.reviewer.relationship or '' }}">
+        <p class="muted">El revisor es quien administra este onboarding y confirma el consentimiento.</p>
+      </div>
+    </div>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Guardar borrador</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>2. Contribuyentes permitidos</legend>
+  <table>
+    <thead><tr><th>Nombre</th><th>Relación</th><th>Permiso</th><th></th></tr></thead>
+    <tbody>
+      {% for item in draft.contributors %}
+      <tr>
+        <td>{{ item.name }}</td>
+        <td>{{ item.relationship or "—" }}</td>
+        <td>{{ item.permission_note or "—" }}</td>
+        <td>
+          <form method="post" action="/admin/onboarding/{{ row.id }}/entries/contributors/{{ loop.index0 }}/remove">
+            <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Quitar</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">Aún no hay contribuyentes.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/entries/contributors">
+    <div class="grid">
+      <div>
+        <label>Nombre</label>
+        <input name="name" required>
+        <label>Relación con la persona</label>
+        <input name="relationship">
+      </div>
+      <div>
+        <label>Permiso concedido</label>
+        <input name="permission_note" placeholder="Aportar datos, revisar contenido...">
+      </div>
+    </div>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Añadir contribuyente</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>3. Temas sensibles y manejo</legend>
+  <table>
+    <thead><tr><th>Tema</th><th>Manejo</th><th>Disparadores</th><th>Revisión</th><th></th></tr></thead>
+    <tbody>
+      {% for topic in draft.sensitive_topics %}
+      <tr>
+        <td>{{ topic.topic }}</td>
+        <td>{{ topic.handling or "—" }}</td>
+        <td>{{ topic.triggers | join(", ") or "—" }}</td>
+        <td>{{ "sí" if topic.consent_review_required else "no" }}</td>
+        <td>
+          <form method="post" action="/admin/onboarding/{{ row.id }}/entries/sensitive_topics/{{ loop.index0 }}/remove">
+            <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Quitar</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted">Aún no hay temas sensibles.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/entries/sensitive_topics">
+    <label>Tema</label>
+    <input name="topic" required>
+    <label>Manejo indicado por la familia</label>
+    <textarea name="handling" rows="2" required></textarea>
+    <label>Disparadores (separados por comas)</label>
+    <input name="triggers">
+    <label><input type="checkbox" name="consent_review_required"> Requiere revisión de consentimiento</label>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Añadir tema sensible</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>4. Fuentes y procedencia</legend>
+  <table>
+    <thead><tr><th>Clave</th><th>Tipo</th><th>Descripción</th><th></th></tr></thead>
+    <tbody>
+      {% for item in draft.sources %}
+      <tr>
+        <td>{{ item.key }}</td>
+        <td>{{ item.source_type.value }}</td>
+        <td>{{ item.description or "—" }}</td>
+        <td>
+          <form method="post" action="/admin/onboarding/{{ row.id }}/entries/sources/{{ loop.index0 }}/remove">
+            <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Quitar</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">Aún no hay fuentes.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/entries/sources">
+    <div class="grid">
+      <div>
+        <label>Clave local</label>
+        <input name="key" placeholder="javi" required>
+        <label>Tipo de fuente</label>
+        <select name="source_type">
+          {% for item in source_type_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Descripción</label>
+        <input name="description" placeholder="Javi, hijo">
+      </div>
+    </div>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Añadir fuente</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>5. Personas del círculo</legend>
+  <table>
+    <thead><tr><th>Clave</th><th>Nombre</th><th>Relación</th><th>Certeza</th><th>Fuente</th><th></th></tr></thead>
+    <tbody>
+      {% for item in draft.people %}
+      <tr>
+        <td>{{ item.key }}</td>
+        <td>{{ item.first_name }} {{ item.last_name or "" }}</td>
+        <td>{{ item.relationship_type.value }}</td>
+        <td>{{ item.certainty.value }}</td>
+        <td>{{ item.source_key or "—" }}</td>
+        <td>
+          <form method="post" action="/admin/onboarding/{{ row.id }}/entries/people/{{ loop.index0 }}/remove">
+            <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Quitar</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">Aún no hay personas adicionales.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/entries/people">
+    <div class="grid">
+      <div>
+        <label>Clave local</label>
+        <input name="key" placeholder="miguel" required>
+        <label>Nombre</label>
+        <input name="first_name" required>
+        <label>Apellido</label>
+        <input name="last_name">
+        <label>Notas</label>
+        <textarea name="notes" rows="2"></textarea>
+      </div>
+      <div>
+        <label>Relación con la persona</label>
+        <select name="relationship_type">
+          {% for item in relationship_type_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Certeza</label>
+        <select name="certainty">
+          {% for item in relationship_status_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Fuente</label>
+        <select name="source_key">
+          <option value="">— ninguna —</option>
+          {% for key in source_options %}
+          <option value="{{ key }}">{{ key }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Añadir persona</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>6. Hechos iniciales</legend>
+  <table>
+    <thead><tr><th>Persona</th><th>Tipo</th><th>Valor</th><th>Estado</th><th>Fuente</th><th></th></tr></thead>
+    <tbody>
+      {% for item in draft.facts %}
+      <tr>
+        <td>{{ item.subject_key }}</td>
+        <td>{{ item.fact_type }}</td>
+        <td>{{ item.value_text or "—" }}</td>
+        <td>{{ item.status.value }}</td>
+        <td>{{ item.source_key }}</td>
+        <td>
+          <form method="post" action="/admin/onboarding/{{ row.id }}/entries/facts/{{ loop.index0 }}/remove">
+            <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Quitar</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">Aún no hay hechos.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/entries/facts">
+    <div class="grid">
+      <div>
+        <label>Persona</label>
+        <select name="subject_key">
+          {% for option in person_options %}
+          <option value="{{ option.key }}">{{ option.label }}</option>
+          {% endfor %}
+        </select>
+        <label>Tipo de hecho</label>
+        <input name="fact_type" placeholder="hobby" required>
+        <label>Valor</label>
+        <input name="value_text" required>
+        <label>Notas</label>
+        <textarea name="notes" rows="2"></textarea>
+      </div>
+      <div>
+        <label>Estado / certeza</label>
+        <select name="status">
+          {% for item in fact_status_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+        <label>Fuente</label>
+        <select name="source_key" required>
+          <option value="">— seleccionar —</option>
+          {% for key in source_options %}
+          <option value="{{ key }}">{{ key }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Añadir hecho</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>7. Recuerdos iniciales</legend>
+  <table>
+    <thead><tr><th>Título</th><th>Narración</th><th>Sensibilidad</th><th>Fuente</th><th>Personas</th><th></th></tr></thead>
+    <tbody>
+      {% for item in draft.memories %}
+      <tr>
+        <td>{{ item.title or "—" }}</td>
+        <td>{{ item.narrative[:120] }}{% if item.narrative | length > 120 %}…{% endif %}</td>
+        <td>{{ item.sensitivity_level.value }}</td>
+        <td>{{ item.source_key }}</td>
+        <td>{{ item.people_keys | join(", ") or "—" }}</td>
+        <td>
+          <form method="post" action="/admin/onboarding/{{ row.id }}/entries/memories/{{ loop.index0 }}/remove">
+            <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Quitar</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">Aún no hay recuerdos.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/entries/memories">
+    <div class="grid">
+      <div>
+        <label>Título</label>
+        <input name="title">
+        <label>Narración</label>
+        <textarea name="narrative" rows="3" required></textarea>
+        <label>Sensibilidad</label>
+        <select name="sensitivity_level">
+          {% for item in sensitivity_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Fuente</label>
+        <select name="source_key" required>
+          <option value="">— seleccionar —</option>
+          {% for key in source_options %}
+          <option value="{{ key }}">{{ key }}</option>
+          {% endfor %}
+        </select>
+        <label>Personas mencionadas</label>
+        <select name="people_keys" multiple size="4">
+          {% for option in person_options %}
+          <option value="{{ option.key }}">{{ option.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Añadir recuerdo</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>8. Preferencias de conversación</legend>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/preferences">
+    <label>Temas positivos (separados por comas)</label>
+    <input name="positive_topics" value="{{ draft.preferences.positive_topics | join(', ') }}">
+    <label>Qué no hacer nunca (separado por comas)</label>
+    <input name="never_do" value="{{ draft.preferences.never_do | join(', ') }}">
+    <label>Estilo conversacional</label>
+    <textarea name="conversational_style" rows="3">{{ draft.preferences.conversational_style or '' }}</textarea>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Guardar borrador</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>9. Consentimiento explícito</legend>
+  {% if row.consent_confirmed %}
+  <p>
+    Consentimiento registrado por <strong>{{ row.consent_confirmed_by }}</strong>
+    {% if row.consent_confirmed_at %}el {{ row.consent_confirmed_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}.
+  </p>
+  <p class="muted">{{ row.consent_scope }}</p>
+  {% elif row.status.value == "draft" %}
+  <p class="muted">
+    El perfil conversacional no se activa automáticamente. Registra quién
+    confirma y para qué alcance antes de activarlo.
+  </p>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/consent">
+    <label><input type="checkbox" name="confirmed" required> Confirmo que la familia autoriza preparar y activar el perfil conversacional.</label>
+    <label>Confirmado por</label>
+    <input name="confirmed_by" value="{{ draft.reviewer.name }}" required>
+    <label>Alcance del consentimiento</label>
+    <textarea name="scope" rows="2" required>Activar el perfil conversacional con los datos revisados en este onboarding.</textarea>
+    <button type="submit">Registrar consentimiento</button>
+  </form>
+  {% endif %}
+</fieldset>
+
+<fieldset>
+  <legend>10. Activación del perfil</legend>
+  {% if row.status.value == "activated" %}
+  <p>El perfil ya está activo. No se puede editar ni volver a activar desde este flujo.</p>
+  {% elif row.consent_confirmed %}
+  <p class="muted">
+    Al activar se crearán la persona, las fuentes, los hechos, los recuerdos y
+    el perfil conversacional con los datos revisados. El perfil anterior, si
+    existía, quedará inactivo.
+  </p>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/activate">
+    <button type="submit">Activar perfil conversacional</button>
+  </form>
+  {% else %}
+  <p class="muted">Registra primero el consentimiento explícito.</p>
+  {% endif %}
+</fieldset>
+{% endblock %}

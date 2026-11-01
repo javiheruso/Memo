@@ -31,6 +31,10 @@ class PersonRepository(SQLRepository[Person]):
         display_name = data.display_name or " ".join(
             part for part in (data.first_name, data.last_name) if part
         )
+        # first_name and last_name are each capped at 255 by the create schema,
+        # so the composed display name can exceed the 255-char column. Keep the
+        # derived value within the column instead of failing at flush time.
+        display_name = display_name[:255]
         id_kwargs = {"id": entity_id} if entity_id is not None else {}
         return await self._create(
             lambda: Person(
