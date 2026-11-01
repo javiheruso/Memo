@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Onboarding{% endblock %}
+{% block content %}
+<h1>Onboarding: {{ subject_label }}</h1>
+<p>
+  <span class="badge">{{ row.status.value }}</span>
+  <span class="muted">Progreso: {{ progress.done }} / {{ progress.total }}</span>
+</p>
+
+<fieldset>
+  <legend>Progreso del paquete</legend>
+  <ul>
+    <li>{{ "✅" if progress.steps.identity else "⬜" }} Identidad y nombre preferido</li>
+    <li>{{ "✅" if progress.steps.reviewer else "⬜" }} Revisor familiar</li>
+    <li>{{ "✅" if progress.steps.contributors else "⬜" }} Contribuyentes permitidos</li>
+    <li>{{ "✅" if progress.steps.sensitive_topics else "⬜" }} Temas sensibles con manejo</li>
+    <li>{{ "✅" if progress.steps.sources else "⬜" }} Fuentes y procedencia</li>
+    <li>{{ "✅" if progress.steps.people else "⬜" }} Personas del círculo</li>
+    <li>{{ "✅" if progress.steps.content else "⬜" }} Hechos y recuerdos iniciales</li>
+    <li>{{ "✅" if progress.steps.preferences else "⬜" }} Preferencias de conversación</li>
+    <li>{{ "✅" if progress.steps.consent else "⬜" }} Consentimiento explícito</li>
+    <li>{{ "✅" if progress.steps.activated else "⬜" }} Perfil activo</li>
+  </ul>
+</fieldset>
+
+{% if row.status.value == "activated" %}
+<fieldset>
+  <legend>Resultado</legend>
+  <p>El perfil conversacional está activo. Persona: <span class="mono">{{ row.subject_person_id }}</span></p>
+  <p>Perfil: <span class="mono">{{ row.profile_id }}</span></p>
+</fieldset>
+{% endif %}
+
+<fieldset>
+  <legend>1. Identidad y revisor</legend>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/identity">
+    <div class="grid">
+      <div>
+        <label>Nombre</label>
+        <input name="first_name" value="{{ draft.identity.first_name }}" required>
+        <label>Apellido</label>
+        <input name="last_name" value="{{ draft.identity.last_name or '' }}">
+        <label>Nombre preferido</label>
+        <input name="preferred_name" value="{{ draft.identity.preferred_name or '' }}">
+        <label>Idioma</label>
+        <input name="language" value="{{ draft.identity.language or '' }}">
+      </div>
+      <div>
+        <label>Revisor familiar</label>
+        <input name="reviewer_name" value="{{ draft.reviewer.name }}" required>
+        <label>Relación con la persona</label>
+        <input name="reviewer_relationship" value="{{ draft.reviewer.relationship or '' }}">
+        <p class="muted">El revisor es quien administra este onboarding y confirma el consentimiento.</p>
+      </div>
+    </div>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Guardar borrador</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>8. Preferencias de conversación</legend>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/preferences">
+    <label>Temas positivos (separados por comas)</label>
+    <input name="positive_topics" value="{{ draft.preferences.positive_topics | join(', ') }}">
+    <label>Qué no hacer nunca (separado por comas)</label>
+    <input name="never_do" value="{{ draft.preferences.never_do | join(', ') }}">
+    <label>Estilo conversacional</label>
+    <textarea name="conversational_style" rows="3">{{ draft.preferences.conversational_style or '' }}</textarea>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Guardar borrador</button>
+  </form>
+</fieldset>
+{% endblock %}

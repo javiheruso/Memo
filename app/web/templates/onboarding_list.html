@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Onboarding{% endblock %}
+{% block content %}
+<h1>Onboarding familiar</h1>
+<p class="muted">
+  Prepara el paquete mínimo del primer día con un revisor de la familia. El
+  borrador se puede guardar y retomar en cualquier momento; el perfil
+  conversacional solo se activa después de registrar el consentimiento explícito.
+</p>
+
+<form method="post" action="/admin/onboarding">
+  <button type="submit">Iniciar onboarding</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Persona</th>
+      <th>Estado</th>
+      <th>Progreso</th>
+      <th>Creado</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in items %}
+    <tr>
+      <td>{{ item.draft.identity.preferred_name or item.draft.identity.first_name or "Sin identificar" }}</td>
+      <td><span class="badge">{{ item.row.status.value }}</span></td>
+      <td>{{ item.progress.done }} / {{ item.progress.total }}</td>
+      <td>{{ item.row.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      <td><a href="/admin/onboarding/{{ item.row.id }}">Abrir</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">Aún no hay procesos de onboarding.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

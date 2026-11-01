@@ -33,6 +33,9 @@ from app.domain.enums import (
     KnowledgeGapStatus,
     MediaType,
     MemoryStatus,
+    OnboardingStatus,
+    RelationshipStatus,
+    RelationshipType,
     SensitivityLevel,
     SourceType,
 )
@@ -54,7 +57,19 @@ from app.schemas.materialization import (
 )
 from app.schemas.media import MediaCreate
 from app.schemas.memory import MemoryCreate
+from app.schemas.onboarding import (
+    OnboardingContributor,
+    OnboardingDraft,
+    OnboardingFact,
+    OnboardingIdentity,
+    OnboardingMemory,
+    OnboardingPerson,
+    OnboardingPreferences,
+    OnboardingReviewer,
+    OnboardingSource,
+)
 from app.schemas.person import PersonCreate
+from app.schemas.profile import SensitiveTopicCreate
 from app.schemas.source import SourceCreate
 from app.security import (
     SESSION_COOKIE_NAME,
@@ -84,6 +99,14 @@ from app.services.materialization import (
     UnknownSourceRefError,
 )
 from app.services.memory_embeddings import MemoryEmbeddingBackfillService
+from app.services.onboarding import (
+    OnboardingConsentRequiredError,
+    OnboardingError,
+    OnboardingNotFoundError,
+    OnboardingNotDraftError,
+    OnboardingService,
+    OnboardingValidationError,
+)
 from app.services.seed import AlreadySeededError, seed_if_empty
 
 router = APIRouter(
@@ -163,6 +186,14 @@ def _error_text(exc: Exception) -> str:
         )
     if isinstance(exc, UnsupportedVectorSearch):
         return "Esta acción requiere una base de datos PostgreSQL (pgvector)."
+    if isinstance(exc, OnboardingValidationError):
+        return "Faltan datos para activar: " + "; ".join(exc.problems)
+    if isinstance(exc, OnboardingConsentRequiredError):
+        return "Registra el consentimiento explícito antes de activar el perfil."
+    if isinstance(exc, OnboardingNotDraftError):
+        return "Este onboarding ya está activado y no se puede editar."
+    if isinstance(exc, OnboardingNotFoundError):
+        return "Onboarding no encontrado."
     return str(exc)
 
 
@@ -285,6 +316,63 @@ def _gap_status_update(form) -> KnowledgeGapStatusUpdate:
     )
 
 
+def _csv(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _form_list(form, key: str) -> list[str]:
+    return [
+        str(value).strip()
+        for value in form.getlist(key)
+        if str(value).strip()
+    ]
+
+
+def _onboarding_progress(row, draft: OnboardingDraft) -> dict:
+    completed = {
+        "identity": bool(draft.identity.first_name),
+        "reviewer": bool(draft.reviewer.name),
+        "contributors": bool(draft.contributors),
+        "sensitive_topics": bool(draft.sensitive_topics)
+        and all(topic.handling for topic in draft.sensitive_topics),
+        "sources": bool(draft.sources),
+        "people": bool(draft.people),
+        "content": bool(draft.facts or draft.memories),
+        "preferences": bool(
+            draft.preferences.positive_topics
+            or draft.preferences.never_do
+            or draft.preferences.conversational_style
+        ),
+        "consent": row.consent_confirmed,
+        "activated": row.status is OnboardingStatus.activated,
+    }
+    required = (
+        "identity",
+        "reviewer",
+        "contributors",
+        "sensitive_topics",
+        "sources",
+        "people",
+        "content",
+        "preferences",
+        "consent",
+    )
+    return {
+        "steps": completed,
+        "done": sum(1 for key in required if completed[key]),
+        "total": len(required),
+    }
+
+
+async def _onboarding_row(db: AsyncSession, session_id: uuid.UUID):
+    try:
+        return await OnboardingService(db).get(session_id)
+    except OnboardingNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Onboarding no encontrado") from exc
+
+
 async def _count(db: AsyncSession, model, *conditions) -> int:
     stmt = select(func.count()).select_from(model)
     if conditions:
@@ -401,6 +489,126 @@ async def seed_example(request: Request, db: DbSession) -> RedirectResponse:
             f"{created.relationships} relaciones, {created.facts} hechos, "
             f"{created.memories} recuerdos y {created.media} {media_label}."
         ),
+    )
+
+
+# --------------------------------------------------------------------------
+# Admin/family-led onboarding
+# --------------------------------------------------------------------------
+
+
+@router.get("/onboarding", response_class=HTMLResponse)
+async def onboarding_list_page(request: Request, db: DbSession) -> HTMLResponse:
+    service = OnboardingService(db)
+    items = []
+    for row in await service.list(limit=200):
+        draft = service.draft_of(row)
+        items.append(
+            {
+                "row": row,
+                "draft": draft,
+                "progress": _onboarding_progress(row, draft),
+            }
+        )
+    return templates.TemplateResponse(
+        request, "onboarding_list.html", _ctx(request, items=items)
+    )
+
+
+@router.post("/onboarding")
+async def onboarding_create(request: Request, db: DbSession) -> RedirectResponse:
+    row = await OnboardingService(db).create()
+    return _back(
+        f"/admin/onboarding/{row.id}",
+        message="Se ha creado un borrador de onboarding.",
+    )
+
+
+@router.get("/onboarding/{session_id}", response_class=HTMLResponse)
+async def onboarding_detail(
+    request: Request, db: DbSession, session_id: uuid.UUID
+) -> HTMLResponse:
+    row = await _onboarding_row(db, session_id)
+    draft = OnboardingService(db).draft_of(row)
+    return templates.TemplateResponse(
+        request,
+        "onboarding_detail.html",
+        _ctx(
+            request,
+            row=row,
+            draft=draft,
+            progress=_onboarding_progress(row, draft),
+            subject_label=(
+                draft.identity.preferred_name
+                or draft.identity.first_name
+                or "Sin identificar"
+            ),
+            source_options=[source.key for source in draft.sources],
+            person_options=[
+                {"key": "subject", "label": draft.identity.first_name or "La persona"}
+            ]
+            + [
+                {"key": person.key, "label": person.first_name}
+                for person in draft.people
+            ],
+            source_type_options=SourceType,
+            relationship_type_options=RelationshipType,
+            relationship_status_options=RelationshipStatus,
+            fact_status_options=FactStatus,
+            memory_status_options=MemoryStatus,
+            sensitivity_options=SensitivityLevel,
+        ),
+    )
+
+
+@router.post("/onboarding/{session_id}/identity")
+async def onboarding_identity(
+    request: Request, db: DbSession, session_id: uuid.UUID
+) -> RedirectResponse:
+    form = await request.form()
+    service = OnboardingService(db)
+    row = await _onboarding_row(db, session_id)
+    draft = service.draft_of(row)
+    try:
+        draft.identity = OnboardingIdentity(
+            first_name=_text(form, "first_name") or "",
+            last_name=_text(form, "last_name"),
+            preferred_name=_text(form, "preferred_name"),
+            language=_text(form, "language"),
+        )
+        draft.reviewer = OnboardingReviewer(
+            name=_text(form, "reviewer_name") or "",
+            relationship=_text(form, "reviewer_relationship"),
+        )
+        await service.save_draft(session_id, draft)
+    except (ValidationError, OnboardingError) as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Identidad y revisor guardados.",
+    )
+
+
+@router.post("/onboarding/{session_id}/preferences")
+async def onboarding_preferences(
+    request: Request, db: DbSession, session_id: uuid.UUID
+) -> RedirectResponse:
+    form = await request.form()
+    service = OnboardingService(db)
+    row = await _onboarding_row(db, session_id)
+    draft = service.draft_of(row)
+    try:
+        draft.preferences = OnboardingPreferences(
+            positive_topics=_csv(_text(form, "positive_topics")),
+            never_do=_csv(_text(form, "never_do")),
+            conversational_style=_text(form, "conversational_style"),
+        )
+        await service.save_draft(session_id, draft)
+    except (ValidationError, OnboardingError) as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Preferencias guardadas.",
     )
 
 
