@@ -99,10 +99,11 @@ class ConversationService:
         claim_contradiction_detector: ContradictionDetector | None = None,
     ) -> None:
         self._router = IntentRouter()
-        self._resolver = EntityResolver(PersonRepository(session))
+        self._people = PersonRepository(session)
+        self._resolver = EntityResolver(self._people)
         self._memory_repo = MemoryRepository(session)
         self._structured_retriever = StructuredRetriever(
-            person_repo=PersonRepository(session),
+            person_repo=self._people,
             relationship_repo=RelationshipRepository(session),
             fact_repo=FactRepository(session),
             memory_repo=self._memory_repo,
@@ -154,6 +155,26 @@ class ConversationService:
                     positive_topics,
                 )
 
+        # Elliptical follow-ups ("¿Y de comer?", "¿Y dónde vivió?") keep the
+        # subject of the immediately previous resolved fact answer. The
+        # repository refuses to carry a subject across any other intent or an
+        # ambiguous answer, so this never guesses after unrelated turns or
+        # multiple candidate persons.
+        follow_up_resolution: Resolution | None = None
+        if route.intent in (Intent.general_chat, Intent.event_query):
+            follow_up_route = self._router.route_fact_follow_up(text)
+            if follow_up_route is not None:
+                subject_id = await self._conversations.last_fact_subject(
+                    conversation.id
+                )
+                if subject_id is not None:
+                    subject = await self._people.get(subject_id)
+                    if subject is not None:
+                        follow_up_resolution = Resolution.from_people(
+                            subject.display_name, [subject]
+                        )
+                        route = follow_up_route
+
         user_message = await self._conversations.add_message(
             conversation.id, speaker="user", text=text, intent=route.intent.value
         )
@@ -171,8 +192,10 @@ class ConversationService:
             Intent.person_query,
             Intent.event_query,
             Intent.fact_query,
-        ) and route.term:
-            resolution = await self._resolver.resolve(route.term)
+        ) and (route.term or follow_up_resolution):
+            resolution = follow_up_resolution or await self._resolver.resolve(
+                route.term
+            )
             if resolution.kind == ResolutionKind.resolved:
                 if route.intent == Intent.fact_query:
                     data = await self._structured_retriever.retrieve_facts(

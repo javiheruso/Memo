@@ -66,6 +66,11 @@ _FACT_QUESTION = re.compile(
     r"what|which|where|how)\b|[?¿]",
     re.IGNORECASE,
 )
+# An elliptical follow-up carries the topic but not the subject: "¿Y de
+# comer?", "¿Y dónde vivió?". The continuation marker is required so a bare
+# question about the assistant ("¿Qué música te gusta?") is never attached to
+# the previous fact subject.
+_FACT_FOLLOW_UP = re.compile(r"^\s*[¿]?\s*(?:y|and)\b", re.IGNORECASE)
 _NAME_PHRASE = rf"{_NAME}(?:\s+{_NAME})*"
 _FACT_SUBJECT_PREPOSITION = re.compile(
     rf"\b(?i:a|de|para|sobre)\s+(?P<name>{_NAME_PHRASE})"
@@ -155,3 +160,26 @@ class IntentRouter:
                 return RouteResult(intent=Intent.orientation_query)
 
         return RouteResult(intent=Intent.general_chat)
+
+    def route_fact_follow_up(self, text: str) -> RouteResult | None:
+        """Classify an elliptical fact follow-up, without choosing a subject.
+
+        A follow-up must start with an explicit continuation marker ("¿Y ...?")
+        and name a fact topic while omitting the subject. The caller is
+        responsible for supplying the immediately previous resolved subject;
+        this method never guesses one. An explicit subject in the text is
+        handled by :meth:`route` and wins over any carried context.
+        """
+        normalized = text.strip()
+        if not normalized:
+            return None
+        if not _FACT_FOLLOW_UP.search(normalized):
+            return None
+        if not _FACT_QUESTION.search(normalized):
+            return None
+        if _extract_fact_subject(normalized) is not None:
+            return None
+        topic = classify_fact_question(normalized)
+        if topic is None:
+            return None
+        return RouteResult(intent=Intent.fact_query, term=None, fact_topic=topic)

@@ -484,6 +484,17 @@ me contó la propia persona") when one exists. A question with no matching fact
 gets an honest "no stored data about that" answer instead of a dump of unrelated
 facts.
 
+Elliptical follow-ups such as "¿Y de comer?" or "¿Y dónde vivió?" reuse the
+subject of the immediately previous resolved fact answer. Continuity is
+deliberately narrow and deterministic: the follow-up must start with an explicit
+continuation marker ("¿Y ...?") and name a fact family without an explicit
+subject; the previous assistant turn must itself be a resolved `fact_query` with
+exactly one `subject` person source. A new conversation, an unrelated turn, an
+ambiguous fact answer with `candidate` sources, or an explicit subject in the
+follow-up all reset the carried context, so the router never guesses a person.
+Status and provenance rendering are the same as a fresh question because the
+follow-up runs through the same scoped fact retriever and responder.
+
 The active sensitive-topic policy runs before and after this path unchanged:
 blocked-topic facts are withheld from the context, an explicit sensitive
 question keeps the cautious no-invention redirect, and the output guard still
