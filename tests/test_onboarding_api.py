@@ -1,5 +1,6 @@
 import uuid
 
+import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,11 @@ from app.models import (
     Person,
     Relationship,
     Source,
+)
+from app.schemas.onboarding import OnboardingSource
+from app.services.onboarding import (
+    OnboardingDraftInvalidError,
+    OnboardingService,
 )
 
 API = "/api/v1/admin"
@@ -96,6 +102,34 @@ async def test_onboarding_draft_rejects_duplicate_local_keys(
         },
     )
     assert response.status_code == 422
+
+
+async def test_save_draft_revalidates_in_place_mutations_before_persisting(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """A parsed draft can be mutated past pydantic; the save path must recheck.
+
+    This is the service-level guard behind the UI form flow, which appends
+    entries directly to the already-validated draft lists.
+    """
+    created = await app_client.post(ONBOARDING)
+    session_id = uuid.UUID(created.json()["id"])
+
+    service = OnboardingService(db_session)
+    row = await service.get(session_id)
+    draft = service.draft_of(row)
+    draft.sources.append(
+        OnboardingSource(key="family", source_type="family_member")
+    )
+    draft.sources.append(OnboardingSource(key="family", source_type="document"))
+
+    with pytest.raises(OnboardingDraftInvalidError) as excinfo:
+        await service.save_draft(session_id, draft)
+    assert any("sources keys must be unique" in item for item in excinfo.value.problems)
+
+    stored = (await app_client.get(f"{ONBOARDING}/{session_id}")).json()
+    assert stored["payload"]["sources"] == []
+    assert (await app_client.get(ONBOARDING)).status_code == 200
 
 
 async def test_onboarding_unknown_session_is_404(app_client: AsyncClient) -> None:

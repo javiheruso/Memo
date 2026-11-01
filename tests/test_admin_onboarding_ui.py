@@ -309,3 +309,153 @@ async def test_onboarding_ui_rejects_duplicate_sensitive_topics(
     stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()
     assert stored["status"] == "draft"
     assert stored["subject_person_id"] is None
+
+
+async def _assert_onboarding_reads_are_healthy(
+    app_client: AsyncClient, session_id: str
+) -> None:
+    listing = f"{UI}/onboarding"
+    detail = f"{UI}/onboarding/{session_id}"
+    api_list = f"{API}/onboarding"
+    api_detail = f"{API}/onboarding/{session_id}"
+    # These reads used to raise an uncaught ValidationError (HTTP 500) once an
+    # invalid entry had been persisted from the UI.
+    assert (await app_client.get(listing)).status_code == 200
+    assert (await app_client.get(detail)).status_code == 200
+    assert (await app_client.get(api_list)).status_code == 200
+    assert (await app_client.get(api_detail)).status_code == 200
+
+
+async def test_onboarding_ui_rejects_duplicate_source_keys_before_persisting(
+    app_client: AsyncClient,
+) -> None:
+    session_id = await _new_session(app_client)
+    base = f"{UI}/onboarding/{session_id}/entries/sources"
+    first = await app_client.post(
+        base,
+        data={"key": "family", "source_type": "family_member"},
+        follow_redirects=True,
+    )
+    assert "Elemento añadido al borrador" in first.text
+
+    duplicate = await app_client.post(
+        base,
+        data={"key": "family", "source_type": "document"},
+        follow_redirects=True,
+    )
+    assert duplicate.status_code == 200
+    assert "El borrador no es válido" in duplicate.text
+    assert "sources keys must be unique" in duplicate.text
+
+    stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()
+    assert [source["key"] for source in stored["payload"]["sources"]] == ["family"]
+    await _assert_onboarding_reads_are_healthy(app_client, session_id)
+
+
+async def test_onboarding_ui_rejects_reserved_local_keys_before_persisting(
+    app_client: AsyncClient,
+) -> None:
+    session_id = await _new_session(app_client)
+    response = await app_client.post(
+        f"{UI}/onboarding/{session_id}/entries/sources",
+        data={"key": "subject", "source_type": "family_member"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert "El borrador no es válido" in response.text
+    assert "reserved key" in response.text
+    assert "subject" in response.text
+
+    stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()
+    assert stored["payload"]["sources"] == []
+    await _assert_onboarding_reads_are_healthy(app_client, session_id)
+
+
+async def test_onboarding_progress_flags_duplicate_sensitive_topics(
+    app_client: AsyncClient,
+) -> None:
+    package = _complete_package()
+    package["sensitive_topics"] = [
+        {
+            "topic": "Fallecimiento de Miguel",
+            "handling": "Do not initiate.",
+            "triggers": ["murió"],
+        },
+        {
+            "topic": "fallecimiento de miguel",
+            "handling": "Redirect gently.",
+            "triggers": ["funeral"],
+        },
+    ]
+    created = await app_client.post(f"{API}/onboarding", json=package)
+    session_id = created.json()["id"]
+    await app_client.post(
+        f"{UI}/onboarding/{session_id}/consent",
+        data={
+            "confirmed": "on",
+            "confirmed_by": "Javi",
+            "scope": "Activar perfil",
+        },
+        follow_redirects=True,
+    )
+
+    page = await app_client.get(f"{UI}/onboarding/{session_id}")
+    assert page.status_code == 200
+    assert "8 / 9" in page.text
+    assert "9 / 9" not in page.text
+    assert "sensitive topics must be unique" in page.text
+
+
+async def test_onboarding_progress_flags_invalid_references(
+    app_client: AsyncClient,
+) -> None:
+    package = _complete_package()
+    package["memories"] = [
+        {
+            "title": "Recuerdo dudoso",
+            "narrative": "Un recuerdo con referencias inexistentes.",
+            "source_key": "ghost-source",
+            "people_keys": ["ghost-person"],
+        }
+    ]
+    created = await app_client.post(f"{API}/onboarding", json=package)
+    session_id = created.json()["id"]
+    await app_client.post(
+        f"{UI}/onboarding/{session_id}/consent",
+        data={
+            "confirmed": "on",
+            "confirmed_by": "Javi",
+            "scope": "Activar perfil",
+        },
+        follow_redirects=True,
+    )
+
+    page = await app_client.get(f"{UI}/onboarding/{session_id}")
+    assert page.status_code == 200
+    assert "8 / 9" in page.text
+    assert "9 / 9" not in page.text
+    assert "Bloqueos pendientes" in page.text
+    assert "unknown source" in page.text
+    assert "ghost-source" in page.text
+    assert "unknown person" in page.text
+    assert "ghost-person" in page.text
+
+
+async def test_onboarding_progress_reaches_full_when_activation_would_succeed(
+    app_client: AsyncClient,
+) -> None:
+    created = await app_client.post(f"{API}/onboarding", json=_complete_package())
+    session_id = created.json()["id"]
+    await app_client.post(
+        f"{UI}/onboarding/{session_id}/consent",
+        data={
+            "confirmed": "on",
+            "confirmed_by": "Javi",
+            "scope": "Activar perfil",
+        },
+        follow_redirects=True,
+    )
+
+    page = await app_client.get(f"{UI}/onboarding/{session_id}")
+    assert page.status_code == 200
+    assert "9 / 9" in page.text

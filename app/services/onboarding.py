@@ -14,6 +14,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import MemoryStatus, OnboardingStatus
@@ -64,6 +65,32 @@ class OnboardingValidationError(OnboardingError):
         super().__init__("; ".join(problems))
 
 
+class OnboardingDraftInvalidError(OnboardingValidationError):
+    """The draft is structurally invalid and must not be persisted."""
+
+
+PROGRESS_STEPS: tuple[str, ...] = (
+    "identity",
+    "reviewer",
+    "contributors",
+    "sensitive_topics",
+    "sources",
+    "people",
+    "content",
+    "preferences",
+)
+
+
+def _pydantic_problems(exc: ValidationError) -> list[str]:
+    """Render every pydantic error as a stable, human-readable problem."""
+    problems = []
+    for error in exc.errors():
+        loc = ".".join(str(part) for part in error.get("loc", ()))
+        message = str(error.get("msg", "invalid input"))
+        problems.append(f"{loc}: {message}" if loc else message)
+    return problems or ["draft payload is invalid"]
+
+
 class OnboardingService:
     def __init__(
         self, session: AsyncSession, *, embedder: Embedder | None = None
@@ -81,9 +108,10 @@ class OnboardingService:
     async def create(
         self, draft: OnboardingDraft | None = None
     ) -> OnboardingSession:
+        validated = self._validated_for_persistence(draft or OnboardingDraft())
         row = OnboardingSession(
             status=OnboardingStatus.draft,
-            payload=(draft or OnboardingDraft()).model_dump(mode="json"),
+            payload=validated.model_dump(mode="json"),
         )
         self._session.add(row)
         await self._session.commit()
@@ -98,11 +126,17 @@ class OnboardingService:
     async def save_draft(
         self, session_id: uuid.UUID, draft: OnboardingDraft
     ) -> OnboardingSession:
+        # Revalidate before touching the row: UI forms mutate the lists of an
+        # already-parsed draft in place, which bypasses pydantic validation and
+        # could otherwise persist duplicate/reserved keys that break every
+        # later read.
+        validated = self._validated_for_persistence(draft)
         row = await self._require_draft(session_id, for_update=True)
-        row.payload = draft.model_dump(mode="json")
+        row.payload = validated.model_dump(mode="json")
         if (
             row.consent_confirmed
-            and row.consent_payload_fingerprint != self.draft_fingerprint(draft)
+            and row.consent_payload_fingerprint
+            != self.draft_fingerprint(validated)
         ):
             self._clear_consent(row)
         await self._session.commit()
@@ -158,37 +192,68 @@ class OnboardingService:
     def draft_of(self, row: OnboardingSession) -> OnboardingDraft:
         return OnboardingDraft.model_validate(row.payload or {})
 
-    def validation_problems(self, draft: OnboardingDraft) -> list[str]:
-        """Return every reason the draft is not yet activatable."""
-        problems: list[str] = []
+    @staticmethod
+    def _validated_for_persistence(draft: OnboardingDraft) -> OnboardingDraft:
+        """Return a freshly validated copy before any write.
+
+        ``save_draft`` receives an already-typed model, so passing it around is
+        not enough: in-place list mutations (the UI appends entries directly)
+        skip pydantic validation. Re-parsing the dumped payload restores the
+        invariant that only structurally valid drafts reach the database.
+        """
+        try:
+            return OnboardingDraft.model_validate(draft.model_dump(mode="json"))
+        except ValidationError as exc:
+            raise OnboardingDraftInvalidError(_pydantic_problems(exc)) from exc
+
+    def validation_problems_by_step(
+        self, draft: OnboardingDraft
+    ) -> dict[str, list[str]]:
+        """Group every activation blocker under its progress step.
+
+        The progress checklist and ``validation_problems`` share this mapping,
+        so the UI can never count a step as complete while activation still
+        rejects the same draft.
+        """
+        issues: dict[str, list[str]] = {step: [] for step in PROGRESS_STEPS}
         if not draft.identity.first_name:
-            problems.append("identity.first_name is required")
+            issues["identity"].append("identity.first_name is required")
         if not draft.reviewer.name:
-            problems.append("reviewer.name is required")
+            issues["reviewer"].append("reviewer.name is required")
         if not draft.contributors:
-            problems.append("at least one permitted contributor is required")
+            issues["contributors"].append(
+                "at least one permitted contributor is required"
+            )
+        if not draft.sources:
+            issues["sources"].append("at least one source is required")
         if not draft.people:
-            problems.append("at least one person in the circle is required")
+            issues["people"].append("at least one person in the circle is required")
         if not draft.sensitive_topics:
-            problems.append("at least one sensitive topic is required")
+            issues["sensitive_topics"].append(
+                "at least one sensitive topic is required"
+            )
         normalized_topics = [
             topic.topic.strip().casefold() for topic in draft.sensitive_topics
         ]
         if len(normalized_topics) != len(set(normalized_topics)):
-            problems.append("sensitive topics must be unique (case-insensitive)")
+            issues["sensitive_topics"].append(
+                "sensitive topics must be unique (case-insensitive)"
+            )
         for topic in draft.sensitive_topics:
             if not topic.handling:
-                problems.append(
+                issues["sensitive_topics"].append(
                     f"sensitive topic '{topic.topic}' needs handling guidance"
                 )
         if not (draft.facts or draft.memories):
-            problems.append("at least one fact or memory is required")
+            issues["content"].append("at least one fact or memory is required")
         if not (
             draft.preferences.positive_topics
             or draft.preferences.never_do
             or draft.preferences.conversational_style
         ):
-            problems.append("at least one conversation preference is required")
+            issues["preferences"].append(
+                "at least one conversation preference is required"
+            )
 
         source_keys = {source.key for source in draft.sources}
         person_keys = {person.key for person in draft.people}
@@ -197,39 +262,75 @@ class OnboardingService:
                 person.source_key is not None
                 and person.source_key not in source_keys
             ):
-                problems.append(
+                issues["people"].append(
                     f"person '{person.first_name}' references unknown source "
                     f"'{person.source_key}'"
                 )
         for fact in draft.facts:
             if fact.source_key not in source_keys:
-                problems.append(
+                issues["content"].append(
                     f"fact '{fact.fact_type}' references unknown source "
                     f"'{fact.source_key}'"
                 )
             if fact.subject_key != "subject" and fact.subject_key not in person_keys:
-                problems.append(
+                issues["content"].append(
                     f"fact '{fact.fact_type}' references unknown person "
                     f"'{fact.subject_key}'"
                 )
         for memory in draft.memories:
+            label = memory.title or memory.narrative[:30]
             if memory.source_key not in source_keys:
-                problems.append(
-                    f"memory '{memory.title or memory.narrative[:30]}' references "
-                    f"unknown source '{memory.source_key}'"
+                issues["content"].append(
+                    f"memory '{label}' references unknown source "
+                    f"'{memory.source_key}'"
                 )
             if len(memory.people_keys) != len(set(memory.people_keys)):
-                problems.append(
-                    f"memory '{memory.title or memory.narrative[:30]}' repeats "
-                    "a person key"
+                issues["content"].append(
+                    f"memory '{label}' repeats a person key"
                 )
             for key in memory.people_keys:
                 if key != "subject" and key not in person_keys:
-                    problems.append(
-                        f"memory '{memory.title or memory.narrative[:30]}' "
-                        f"references unknown person '{key}'"
+                    issues["content"].append(
+                        f"memory '{label}' references unknown person '{key}'"
                     )
-        return problems
+        return issues
+
+    def validation_problems(self, draft: OnboardingDraft) -> list[str]:
+        """Return every reason the draft is not yet activatable."""
+        issues = self.validation_problems_by_step(draft)
+        return [
+            problem for step in PROGRESS_STEPS for problem in issues[step]
+        ]
+
+    def progress(
+        self, row: OnboardingSession, draft: OnboardingDraft
+    ) -> dict:
+        """Shared completion state for the list and detail checklists."""
+        issues = self.validation_problems_by_step(draft)
+        consent_matches = bool(
+            row.consent_confirmed
+            and row.consent_payload_fingerprint is not None
+            and row.consent_payload_fingerprint
+            == self.draft_fingerprint(draft)
+        )
+        steps = {step: not problems for step, problems in issues.items()}
+        steps["consent"] = consent_matches
+        steps["activated"] = row.status is OnboardingStatus.activated
+        required = (*PROGRESS_STEPS, "consent")
+        blockers = [
+            problem for step in PROGRESS_STEPS for problem in issues[step]
+        ]
+        if not row.consent_confirmed:
+            blockers.append("explicit operator consent is required")
+        elif not consent_matches:
+            blockers.append("recorded consent does not match the current draft")
+        return {
+            "steps": steps,
+            "done": sum(1 for step in required if steps[step]),
+            "total": len(required),
+            "blockers": blockers,
+            "ready": not blockers,
+        }
 
     async def _materialize(
         self, row: OnboardingSession, draft: OnboardingDraft

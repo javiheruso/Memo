@@ -33,7 +33,6 @@ from app.domain.enums import (
     KnowledgeGapStatus,
     MediaType,
     MemoryStatus,
-    OnboardingStatus,
     RelationshipStatus,
     RelationshipType,
     SensitivityLevel,
@@ -59,7 +58,6 @@ from app.schemas.media import MediaCreate
 from app.schemas.memory import MemoryCreate
 from app.schemas.onboarding import (
     OnboardingContributor,
-    OnboardingDraft,
     OnboardingFact,
     OnboardingIdentity,
     OnboardingMemory,
@@ -102,6 +100,7 @@ from app.services.memory_embeddings import MemoryEmbeddingBackfillService
 from app.services.onboarding import (
     OnboardingConsentMismatchError,
     OnboardingConsentRequiredError,
+    OnboardingDraftInvalidError,
     OnboardingError,
     OnboardingNotDraftError,
     OnboardingNotFoundError,
@@ -187,6 +186,8 @@ def _error_text(exc: Exception) -> str:
         )
     if isinstance(exc, UnsupportedVectorSearch):
         return "Esta acción requiere una base de datos PostgreSQL (pgvector)."
+    if isinstance(exc, OnboardingDraftInvalidError):
+        return "El borrador no es válido: " + "; ".join(exc.problems)
     if isinstance(exc, OnboardingValidationError):
         return "Faltan datos para activar: " + "; ".join(exc.problems)
     if isinstance(exc, OnboardingConsentRequiredError):
@@ -334,42 +335,6 @@ def _form_list(form, key: str) -> list[str]:
         for value in form.getlist(key)
         if str(value).strip()
     ]
-
-
-def _onboarding_progress(row, draft: OnboardingDraft) -> dict:
-    completed = {
-        "identity": bool(draft.identity.first_name),
-        "reviewer": bool(draft.reviewer.name),
-        "contributors": bool(draft.contributors),
-        "sensitive_topics": bool(draft.sensitive_topics)
-        and all(topic.handling for topic in draft.sensitive_topics),
-        "sources": bool(draft.sources),
-        "people": bool(draft.people),
-        "content": bool(draft.facts or draft.memories),
-        "preferences": bool(
-            draft.preferences.positive_topics
-            or draft.preferences.never_do
-            or draft.preferences.conversational_style
-        ),
-        "consent": row.consent_confirmed,
-        "activated": row.status is OnboardingStatus.activated,
-    }
-    required = (
-        "identity",
-        "reviewer",
-        "contributors",
-        "sensitive_topics",
-        "sources",
-        "people",
-        "content",
-        "preferences",
-        "consent",
-    )
-    return {
-        "steps": completed,
-        "done": sum(1 for key in required if completed[key]),
-        "total": len(required),
-    }
 
 
 async def _onboarding_row(db: AsyncSession, session_id: uuid.UUID):
@@ -579,7 +544,7 @@ async def onboarding_list_page(request: Request, db: DbSession) -> HTMLResponse:
             {
                 "row": row,
                 "draft": draft,
-                "progress": _onboarding_progress(row, draft),
+                "progress": service.progress(row, draft),
             }
         )
     return templates.TemplateResponse(
@@ -600,8 +565,9 @@ async def onboarding_create(request: Request, db: DbSession) -> RedirectResponse
 async def onboarding_detail(
     request: Request, db: DbSession, session_id: uuid.UUID
 ) -> HTMLResponse:
+    service = OnboardingService(db)
     row = await _onboarding_row(db, session_id)
-    draft = OnboardingService(db).draft_of(row)
+    draft = service.draft_of(row)
     return templates.TemplateResponse(
         request,
         "onboarding_detail.html",
@@ -609,7 +575,7 @@ async def onboarding_detail(
             request,
             row=row,
             draft=draft,
-            progress=_onboarding_progress(row, draft),
+            progress=service.progress(row, draft),
             subject_label=(
                 draft.identity.preferred_name
                 or draft.identity.first_name

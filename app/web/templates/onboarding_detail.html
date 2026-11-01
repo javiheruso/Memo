@@ -21,6 +21,14 @@
     <li>{{ "✅" if progress.steps.consent else "⬜" }} Consentimiento explícito</li>
     <li>{{ "✅" if progress.steps.activated else "⬜" }} Perfil activo</li>
   </ul>
+  {% if progress.blockers %}
+  <p class="muted">Bloqueos pendientes:</p>
+  <ul>
+    {% for problem in progress.blockers %}
+    <li>{{ problem }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
 </fieldset>
 
 {% if row.status.value == "activated" %}
