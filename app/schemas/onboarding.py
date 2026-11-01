@@ -28,10 +28,13 @@ class OnboardingModel(BaseModel):
 
 
 class OnboardingIdentity(OnboardingModel):
-    first_name: str = ""
-    last_name: str | None = None
-    preferred_name: str | None = None
-    language: str | None = "es-ES"
+    # Limits mirror the target PersonCreate/ConversationProfileCreate schemas.
+    # A draft may be incomplete, but it must never carry a value that the
+    # activation materialization step would reject with a validation error.
+    first_name: str = Field(default="", max_length=255)
+    last_name: str | None = Field(default=None, max_length=255)
+    preferred_name: str | None = Field(default=None, max_length=255)
+    language: str | None = Field(default="es-ES", max_length=50)
 
 
 class OnboardingReviewer(OnboardingModel):
@@ -54,7 +57,7 @@ class OnboardingSource(OnboardingModel):
 class OnboardingPerson(OnboardingModel):
     key: str = Field(min_length=1, max_length=50)
     first_name: str = Field(min_length=1, max_length=255)
-    last_name: str | None = None
+    last_name: str | None = Field(default=None, max_length=255)
     relationship_type: RelationshipType = RelationshipType.other
     certainty: RelationshipStatus = RelationshipStatus.probable
     source_key: str | None = None

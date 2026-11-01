@@ -180,7 +180,17 @@ class OnboardingService:
                 raise OnboardingNotDraftError(
                     "Activated onboarding sessions cannot be edited or reactivated"
                 )
-            await self._materialize(row, draft)
+            try:
+                await self._materialize(row, draft)
+            except ValidationError as exc:
+                # The draft is revalidated before activation, so a target
+                # schema rejection here means the onboarding schema and the
+                # materialization schema drifted apart. Report it as a
+                # controlled draft problem instead of letting pydantic's
+                # ValidationError escape as a 500, while the outer handler
+                # still rolls the whole transaction (including the activation
+                # claim) back.
+                raise OnboardingValidationError(_pydantic_problems(exc)) from exc
             row.status = OnboardingStatus.activated
             row.activated_at = activated_at
             await self._session.commit()
@@ -190,7 +200,17 @@ class OnboardingService:
         return await self._require(session_id)
 
     def draft_of(self, row: OnboardingSession) -> OnboardingDraft:
-        return OnboardingDraft.model_validate(row.payload or {})
+        """Parse a persisted payload, reporting legacy invalid rows cleanly.
+
+        Rows written before a schema tightening (or by direct DB edits) may no
+        longer validate. Raising ``OnboardingDraftInvalidError`` lets every
+        caller surface a controlled validation response instead of an uncaught
+        ``ValidationError``/500 during reads or activation.
+        """
+        try:
+            return OnboardingDraft.model_validate(row.payload or {})
+        except ValidationError as exc:
+            raise OnboardingDraftInvalidError(_pydantic_problems(exc)) from exc
 
     @staticmethod
     def _validated_for_persistence(draft: OnboardingDraft) -> OnboardingDraft:

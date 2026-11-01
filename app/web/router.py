@@ -538,8 +538,13 @@ async def seed_example(request: Request, db: DbSession) -> RedirectResponse:
 async def onboarding_list_page(request: Request, db: DbSession) -> HTMLResponse:
     service = OnboardingService(db)
     items = []
+    invalid: list[str] = []
     for row in await service.list(limit=200):
-        draft = service.draft_of(row)
+        try:
+            draft = service.draft_of(row)
+        except OnboardingDraftInvalidError as exc:
+            invalid.append(f"{row.id}: {'; '.join(exc.problems)}")
+            continue
         items.append(
             {
                 "row": row,
@@ -547,8 +552,13 @@ async def onboarding_list_page(request: Request, db: DbSession) -> HTMLResponse:
                 "progress": service.progress(row, draft),
             }
         )
+    extra: dict = {}
+    if invalid:
+        extra["error"] = (
+            "Hay borradores guardados con datos inválidos: " + "; ".join(invalid)
+        )
     return templates.TemplateResponse(
-        request, "onboarding_list.html", _ctx(request, items=items)
+        request, "onboarding_list.html", _ctx(request, items=items, **extra)
     )
 
 
@@ -567,7 +577,10 @@ async def onboarding_detail(
 ) -> HTMLResponse:
     service = OnboardingService(db)
     row = await _onboarding_row(db, session_id)
-    draft = service.draft_of(row)
+    try:
+        draft = service.draft_of(row)
+    except OnboardingDraftInvalidError as exc:
+        return _back("/admin/onboarding", error=_error_text(exc))
     return templates.TemplateResponse(
         request,
         "onboarding_detail.html",
@@ -606,8 +619,8 @@ async def onboarding_identity(
     form = await request.form()
     service = OnboardingService(db)
     row = await _onboarding_row(db, session_id)
-    draft = service.draft_of(row)
     try:
+        draft = service.draft_of(row)
         draft.identity = OnboardingIdentity(
             first_name=_text(form, "first_name") or "",
             last_name=_text(form, "last_name"),
@@ -634,8 +647,8 @@ async def onboarding_preferences(
     form = await request.form()
     service = OnboardingService(db)
     row = await _onboarding_row(db, session_id)
-    draft = service.draft_of(row)
     try:
+        draft = service.draft_of(row)
         draft.preferences = OnboardingPreferences(
             positive_topics=_csv(_text(form, "positive_topics")),
             never_do=_csv(_text(form, "never_do")),
@@ -659,8 +672,8 @@ async def onboarding_add_entry(
     form = await request.form()
     service = OnboardingService(db)
     row = await _onboarding_row(db, session_id)
-    draft = service.draft_of(row)
     try:
+        draft = service.draft_of(row)
         getattr(draft, section).append(_onboarding_entry(section, form))
         await service.save_draft(session_id, draft)
     except (ValidationError, OnboardingError) as exc:
@@ -683,15 +696,15 @@ async def onboarding_remove_entry(
         raise HTTPException(status_code=404, detail="Sección de onboarding no válida")
     service = OnboardingService(db)
     row = await _onboarding_row(db, session_id)
-    draft = service.draft_of(row)
-    items = getattr(draft, section)
-    if index < 0 or index >= len(items):
-        return _back(
-            f"/admin/onboarding/{session_id}",
-            error="El elemento ya no existe en el borrador.",
-        )
-    items.pop(index)
     try:
+        draft = service.draft_of(row)
+        items = getattr(draft, section)
+        if index < 0 or index >= len(items):
+            return _back(
+                f"/admin/onboarding/{session_id}",
+                error="El elemento ya no existe en el borrador.",
+            )
+        items.pop(index)
         await service.save_draft(session_id, draft)
     except (ValidationError, OnboardingError) as exc:
         return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))

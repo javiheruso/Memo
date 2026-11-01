@@ -201,13 +201,28 @@ async def create_onboarding(
 async def list_onboarding(
     db: DbSession, limit: int = Query(default=100, ge=1, le=500)
 ) -> list[OnboardingSession]:
-    return await OnboardingService(db).list(limit=limit)
+    service = OnboardingService(db)
+    try:
+        rows = await service.list(limit=limit)
+        # Validate every persisted payload explicitly. The response model would
+        # otherwise raise an uncaught ResponseValidationError (500) when a
+        # legacy/invalid row is returned.
+        for row in rows:
+            service.draft_of(row)
+        return rows
+    except OnboardingError as exc:
+        raise _onboarding_http_error(exc) from exc
 
 
 @router.get("/onboarding/{session_id}", response_model=OnboardingSessionRead)
 async def get_onboarding(db: DbSession, session_id: uuid.UUID) -> OnboardingSession:
+    service = OnboardingService(db)
     try:
-        return await OnboardingService(db).get(session_id)
+        row = await service.get(session_id)
+        # Surface a controlled 422 before FastAPI's response validation would
+        # turn a legacy invalid payload into a 500.
+        service.draft_of(row)
+        return row
     except OnboardingError as exc:
         raise _onboarding_http_error(exc) from exc
 
