@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.domain.enums import Intent
 from app.models import Conversation, Message, ResponseSource
 from app.repositories.base import SQLRepository
 
@@ -113,6 +114,45 @@ class ConversationRepository(SQLRepository[Conversation]):
             )
         ).scalars()
         return [row.source_entity_id for row in rows]
+
+    async def last_fact_subject(self, conversation_id: uuid.UUID) -> uuid.UUID | None:
+        """Return the subject of the immediately previous fact answer.
+
+        Follow-up continuity is deliberately narrow: the most recent assistant
+        turn must be a resolved ``fact_query`` answer with exactly one
+        ``subject`` person source. An ambiguous answer (``candidate`` rows) or
+        any other intent returns ``None``, so a subject is never carried across
+        unrelated turns or an unresolved ambiguity.
+        """
+        latest = (
+            await self._session.execute(
+                select(Message)
+                .where(
+                    Message.conversation_id == conversation_id,
+                    Message.speaker == "assistant",
+                )
+                .order_by(Message.created_at.desc(), Message.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if latest is None or latest.intent != Intent.fact_query.value:
+            return None
+        rows = list(
+            (
+                await self._session.execute(
+                    select(ResponseSource).where(
+                        ResponseSource.message_id == latest.id,
+                        ResponseSource.source_entity_type == "person",
+                    )
+                )
+            ).scalars()
+        )
+        if any(row.usage_type == "candidate" for row in rows):
+            return None
+        subjects = {row.source_entity_id for row in rows if row.usage_type == "subject"}
+        if len(subjects) != 1:
+            return None
+        return next(iter(subjects))
 
     async def list_messages(self, conversation_id: uuid.UUID) -> list[Message]:
         stmt = (

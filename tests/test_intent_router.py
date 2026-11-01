@@ -176,3 +176,31 @@ def test_general_chat_with_hoy_is_not_orientation():
         IntentRouter().route("Hoy hace buen día para pasear").intent
         == Intent.general_chat
     )
+
+
+def test_routes_elliptical_food_follow_up_without_subject():
+    result = IntentRouter().route_fact_follow_up("¿Y de comer?")
+    assert result is not None
+    assert result.intent == Intent.fact_query
+    assert result.term is None
+    assert result.fact_topic == FactTopic.food
+
+
+def test_routes_elliptical_place_follow_up_without_subject():
+    result = IntentRouter().route_fact_follow_up("¿Y dónde vivió?")
+    assert result is not None
+    assert result.intent == Intent.fact_query
+    assert result.term is None
+    assert result.fact_topic == FactTopic.place
+
+
+def test_follow_up_requires_continuation_marker():
+    assert IntentRouter().route_fact_follow_up("¿Qué música le gusta?") is None
+
+
+def test_follow_up_with_explicit_subject_is_not_elliptical():
+    assert IntentRouter().route_fact_follow_up("¿Y dónde vivió Miguel?") is None
+
+
+def test_follow_up_without_fact_topic_returns_none():
+    assert IntentRouter().route_fact_follow_up("¿Y tú?") is None

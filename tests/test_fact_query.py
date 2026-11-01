@@ -86,6 +86,14 @@ PREFERENCE_DOCUMENT = {
             "source_id": "src_carmen",
         },
         {
+            "id": "fact_residence",
+            "subject_person_id": "elena",
+            "fact_type": "residencia",
+            "value_text": "Santa Pola",
+            "status": "verified",
+            "source_id": "src_elena",
+        },
+        {
             "id": "fact_parentesco",
             "subject_person_id": "elena",
             "fact_type": "parentesco",
@@ -295,3 +303,177 @@ async def test_leaky_fact_responder_cannot_bypass_blocked_topic(
     assert result.answer == SPONTANEOUS_SUPPRESSION_REPLY
     assert "murió" not in result.answer
     assert result.sources == []
+
+
+async def test_food_follow_up_keeps_previous_subject(db_session: AsyncSession) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("¿Qué le gusta a Elena?")
+    follow = await service.handle_user_message(
+        "¿Y de comer?", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.fact_query
+    assert "Arroz al horno" in follow.answer
+    assert "Coser" not in follow.answer
+    assert "probable, sin confirmar" in follow.answer
+    assert "según un familiar" in follow.answer
+    food = await _fact(db_session, "Arroz al horno")
+    assert food.id in {
+        source.entity_id for source in follow.sources if source.entity_type == "fact"
+    }
+
+
+async def test_place_follow_up_keeps_previous_subject(db_session: AsyncSession) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("¿Qué le gusta a Elena?")
+    follow = await service.handle_user_message(
+        "¿Y dónde vivió?", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.fact_query
+    assert "Santa Pola" in follow.answer
+    assert "probable, sin confirmar" in follow.answer
+    assert "según lo que me contó la propia persona" in follow.answer
+    assert "Arroz al horno" not in follow.answer
+
+
+async def test_follow_up_without_matching_data_is_honest(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("¿Qué le gusta a Elena?")
+    follow = await service.handle_user_message(
+        "¿Y qué música le gusta?", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.fact_query
+    assert follow.answer == "No tengo guardado ningún dato sobre eso de Elena Martínez."
+    assert all(source.entity_type != "fact" for source in follow.sources)
+
+
+async def test_follow_up_in_new_conversation_does_not_carry_subject(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("¿Qué le gusta a Elena?")
+    follow = await service.handle_user_message("¿Y de comer?")
+
+    assert follow.conversation_id != first.conversation_id
+    assert follow.intent == Intent.general_chat
+    assert "Arroz al horno" not in follow.answer
+
+
+async def test_follow_up_after_unrelated_turn_does_not_carry_subject(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("¿Qué le gusta a Elena?")
+    unrelated = await service.handle_user_message(
+        "Hoy hace buen día para pasear", conversation_id=first.conversation_id
+    )
+    assert unrelated.intent == Intent.general_chat
+
+    follow = await service.handle_user_message(
+        "¿Y de comer?", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.general_chat
+    assert "Arroz al horno" not in follow.answer
+
+
+async def test_follow_up_after_ambiguous_fact_query_does_not_guess(
+    db_session: AsyncSession, seed
+) -> None:
+    service = _service(db_session)
+
+    first = await service.handle_user_message("¿Qué aficiones tiene Paco?")
+    assert first.ambiguity is not None
+
+    follow = await service.handle_user_message(
+        "¿Y de comer?", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.general_chat
+    assert follow.ambiguity is None
+    assert "Baker" not in follow.answer
+
+
+async def test_explicit_subject_in_follow_up_overrides_carried_subject(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("¿Qué le gusta a Elena?")
+    follow = await service.handle_user_message(
+        "¿Y dónde vivió Miguel?", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.fact_query
+    assert "Santa Pola" not in follow.answer
+    assert follow.answer == "No tengo guardado ningún dato sobre eso de Miguel Soler."
+
+
+async def test_follow_up_keeps_blocked_topic_fact_withheld(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("¿Qué datos tienes de Elena?")
+    assert "Coser" in first.answer
+
+    follow = await service.handle_user_message(
+        "¿Y qué más datos tienes?", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.fact_query
+    assert "Coser" in follow.answer
+    assert "Santa Pola" in follow.answer
+    assert "1998" not in follow.answer
+    assert "murió" not in follow.answer
+    death = await _fact(db_session, "Miguel murió en 1998")
+    assert death.id not in {
+        source.entity_id for source in follow.sources if source.entity_type == "fact"
+    }
+
+
+async def test_sensitive_follow_up_does_not_bypass_careful_redirect(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("¿Qué le gusta a Elena?")
+    follow = await service.handle_user_message(
+        "¿Y sobre la muerte?", conversation_id=first.conversation_id
+    )
+
+    assert "No quiero inventar detalles" in follow.answer
+    assert "1998" not in follow.answer
+    assert follow.sources == []
+
+
+async def test_follow_up_with_event_marker_stays_a_fact_query(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("¿Qué le gusta a Elena?")
+    follow = await service.handle_user_message(
+        "¿Y cuándo nació?", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.fact_query
+    assert "Santa Pola" in follow.answer
