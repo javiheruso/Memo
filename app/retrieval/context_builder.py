@@ -36,6 +36,9 @@ class FactItem:
     text: str
     status: str
     epistemic: EpistemicKind
+    fact_type: str | None = None
+    source_id: uuid.UUID | None = None
+    source_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,15 +149,7 @@ class ContextBuilder:
             else:
                 probable_relations.append(item)
 
-        facts = [
-            FactItem(
-                entity_id=fact.id,
-                text=self._fact_text(fact),
-                status=fact.status.value,
-                epistemic=epistemic_kind_for_fact(fact.status),
-            )
-            for fact in data.facts
-        ]
+        facts = [self._fact_item(fact) for fact in data.facts]
 
         safe_memories, filtered_memories = filter_sensitive_memories(data.memories)
         policies: list[str] = []
@@ -257,6 +252,19 @@ class ContextBuilder:
             relationship_type=relationship_type,
             status=relationship.status,
             epistemic=epistemic_kind_for_relationship(relationship.status),
+        )
+
+    @classmethod
+    def _fact_item(cls, fact: Fact) -> FactItem:
+        source = fact.source
+        return FactItem(
+            entity_id=fact.id,
+            text=cls._fact_text(fact),
+            status=fact.status.value,
+            epistemic=epistemic_kind_for_fact(fact.status),
+            fact_type=fact.fact_type,
+            source_id=fact.source_id,
+            source_type=source.source_type.value if source is not None else None,
         )
 
     @staticmethod

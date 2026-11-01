@@ -5,13 +5,24 @@ from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.claims.base import ClaimExtractor
-from app.claims.contradiction import ContradictionDetector, DeterministicContradictionDetector
+from app.claims.contradiction import (
+    ContradictionDetector,
+    DeterministicContradictionDetector,
+)
 from app.claims.deterministic import DeterministicClaimExtractor
 from app.claims.grouping import ClaimGrouper, DeterministicClaimGrouper
 from app.domain.enums import Intent
 from app.embeddings.base import Embedder
 from app.llm.base import Responder, Response
 from app.models import ConversationProfile, KnowledgeGap, Person
+from app.policies.sensitive_topics import (
+    SPONTANEOUS_SUPPRESSION_REPLY,
+    SensitiveTopic,
+    SensitiveTopicEvaluation,
+    answer_leaks_blocked_topic,
+    apply_to_context,
+    evaluate,
+)
 from app.repositories.conversation import (
     ConversationRepository,
     ResponseSourceRef,
@@ -27,17 +38,10 @@ from app.repositories.relationship import RelationshipRepository
 from app.retrieval.context_builder import AnswerContext, ContextBuilder
 from app.retrieval.disambiguation import DisambiguationResolver
 from app.retrieval.entity_resolver import EntityResolver, Resolution, ResolutionKind
+from app.retrieval.fact_topics import FactTopic
 from app.retrieval.intent_router import IntentRouter
 from app.retrieval.semantic_retriever import SemanticRetriever
 from app.retrieval.structured_retriever import StructuredRetriever
-from app.policies.sensitive_topics import (
-    SPONTANEOUS_SUPPRESSION_REPLY,
-    SensitiveTopic,
-    SensitiveTopicEvaluation,
-    answer_leaks_blocked_topic,
-    apply_to_context,
-    evaluate,
-)
 from app.services.claim_ingestion import ClaimIngestionService
 
 logger = logging.getLogger(__name__)
@@ -163,10 +167,22 @@ class ConversationService:
             context = self._context_builder.build_from_semantic_memories(
                 semantic, term=route.term
             )
-        elif route.intent in (Intent.person_query, Intent.event_query) and route.term:
+        elif route.intent in (
+            Intent.person_query,
+            Intent.event_query,
+            Intent.fact_query,
+        ) and route.term:
             resolution = await self._resolver.resolve(route.term)
             if resolution.kind == ResolutionKind.resolved:
-                data = await self._structured_retriever.retrieve(resolution.person.id)
+                if route.intent == Intent.fact_query:
+                    data = await self._structured_retriever.retrieve_facts(
+                        resolution.person.id,
+                        topic=route.fact_topic or FactTopic.general,
+                    )
+                else:
+                    data = await self._structured_retriever.retrieve(
+                        resolution.person.id
+                    )
                 context = self._context_builder.build_from_person_data(
                     data, resolution, intent=route.intent
                 )

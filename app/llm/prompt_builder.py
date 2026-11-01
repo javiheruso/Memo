@@ -22,6 +22,8 @@ Rules:
 - Only reference entity ids listed under "Allowed source ids" in CONTEXT.
 - Present probable or uncertain data as uncertain. Never present a memory or a probable item as a verified fact.
 - Never present a planned or confirmed event as already completed.
+- For a fact_query, answer from the Facts list only. Do not substitute a relation, memory, event, or media item for a missing fact. If no fact matches, say there is no stored data about that.
+- When a fact lists a stored source type, you may mention it as provenance. Never invent a source.
 - Base any mention of today's date or time ONLY on the code-provided clock in CONTEXT, never on your own knowledge.
 - If several people are listed as candidates, ask which one the user means; never pick one yourself.
 - If there is no stored data about the person, say you do not have details stored and never invent any.
@@ -84,7 +86,14 @@ def build_prompt(context: AnswerContext) -> BuiltPrompt:
     if context.facts:
         lines.append("- Facts (epistemic kind in parentheses):")
         for item in context.facts:
-            lines.append(f"  - id {item.entity_id} | {item.text} ({item.epistemic.value})")
+            fact_type = f"type {item.fact_type} | " if item.fact_type else ""
+            provenance = (
+                f" | source {item.source_type}" if item.source_type else ""
+            )
+            lines.append(
+                f"  - id {item.entity_id} | {fact_type}{item.text} "
+                f"({item.epistemic.value}){provenance}"
+            )
 
     if context.memories:
         lines.append("- Memories (memory, never present as a verified fact):")
@@ -167,6 +176,8 @@ def allowed_sources(context: AnswerContext) -> dict[tuple[str, str], str]:
         allowed[("relationship", str(item.entity_id))] = item.epistemic.value
     for item in context.facts:
         allowed[("fact", str(item.entity_id))] = item.epistemic.value
+        if item.source_id is not None:
+            allowed[("source", str(item.source_id))] = "provenance"
     for item in context.memories:
         allowed[("memory", str(item.entity_id))] = "memory"
     for item in context.events:

@@ -140,6 +140,33 @@ def test_allowed_sources_derive_usage_from_context() -> None:
     }
 
 
+def test_fact_query_prompt_carries_status_type_and_provenance() -> None:
+    fact = FactItem(
+        entity_id=uuid.uuid4(),
+        text="Coser",
+        status="probable",
+        epistemic=EpistemicKind.probable_fact,
+        fact_type="aficion",
+        source_id=uuid.uuid4(),
+        source_type="family_member",
+    )
+    context = AnswerContext(
+        intent=Intent.fact_query,
+        term="Elena",
+        resolution=ResolutionKind.resolved,
+        person=_person("Elena"),
+        facts=[fact],
+    )
+    prompt = build_prompt(context)
+
+    assert "type aficion" in prompt.user
+    assert "probable_fact" in prompt.user
+    assert "source family_member" in prompt.user
+    assert "answer from the Facts list only" in prompt.system
+    assert allowed_sources(context)[("fact", str(fact.entity_id))] == "probable_fact"
+    assert allowed_sources(context)[("source", str(fact.source_id))] == "provenance"
+
+
 def test_ambiguous_person_lists_candidates_and_never_a_subject() -> None:
     a, b = _person("Francisco Navarro"), _person("Paco García")
     context = AnswerContext(

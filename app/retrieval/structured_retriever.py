@@ -8,6 +8,7 @@ from app.repositories.media import MediaRepository
 from app.repositories.memory import MemoryRepository
 from app.repositories.person import PersonRepository
 from app.repositories.relationship import RelationshipRepository
+from app.retrieval.fact_topics import FactTopic, fact_matches_topic
 
 
 @dataclass(frozen=True)
@@ -68,4 +69,32 @@ class StructuredRetriever:
             memories=memories,
             events=events,
             media=media,
+        )
+
+    async def retrieve_facts(
+        self, person_id: uuid.UUID, *, topic: FactTopic
+    ) -> PersonData:
+        """Fetch only the facts relevant to one question family.
+
+        A fact query must not dump every stored fact about the person. The
+        person row is required for the answer's subject, but relations,
+        memories, events and media are deliberately left empty so the fact
+        responder cannot drift into another tier of the hint ladder.
+        """
+        person = await self._person_repo.get(person_id)
+        if person is None:
+            raise ValueError(f"Unknown person id: {person_id}")
+        facts = await self._fact_repo.for_subject_person(person_id)
+        relevant = [
+            fact
+            for fact in facts
+            if fact_matches_topic(fact.fact_type, topic=topic)
+        ]
+        return PersonData(
+            person=person,
+            relationships=[],
+            facts=relevant,
+            memories=[],
+            events=[],
+            media=[],
         )

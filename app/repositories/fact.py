@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 
 from app.domain.enums import FactStatus
 from app.models import Fact
@@ -42,6 +43,7 @@ class FactRepository(SQLRepository[Fact]):
         stmt = (
             select(Fact)
             .where(Fact.subject_person_id == person_id)
+            .options(joinedload(Fact.source))
             .order_by(Fact.created_at)
         )
         result = await self._session.execute(stmt)
