@@ -140,6 +140,8 @@ class OnboardingService:
             problems.append("reviewer.name is required")
         if not draft.contributors:
             problems.append("at least one permitted contributor is required")
+        if not draft.people:
+            problems.append("at least one person in the circle is required")
         if not draft.sensitive_topics:
             problems.append("at least one sensitive topic is required")
         for topic in draft.sensitive_topics:
@@ -149,6 +151,12 @@ class OnboardingService:
                 )
         if not (draft.facts or draft.memories):
             problems.append("at least one fact or memory is required")
+        if not (
+            draft.preferences.positive_topics
+            or draft.preferences.never_do
+            or draft.preferences.conversational_style
+        ):
+            problems.append("at least one conversation preference is required")
 
         source_keys = {source.key for source in draft.sources}
         person_keys = {person.key for person in draft.people}
@@ -177,6 +185,11 @@ class OnboardingService:
                 problems.append(
                     f"memory '{memory.title or memory.narrative[:30]}' references "
                     f"unknown source '{memory.source_key}'"
+                )
+            if len(memory.people_keys) != len(set(memory.people_keys)):
+                problems.append(
+                    f"memory '{memory.title or memory.narrative[:30]}' repeats "
+                    "a person key"
                 )
             for key in memory.people_keys:
                 if key != "subject" and key not in person_keys:

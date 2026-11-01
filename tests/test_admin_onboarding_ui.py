@@ -161,6 +161,15 @@ def _complete_package() -> dict:
         "sources": [
             {"key": "family", "source_type": "family_member", "description": "Javi"}
         ],
+        "people": [
+            {
+                "key": "miguel",
+                "first_name": "Miguel",
+                "relationship_type": "spouse_of",
+                "certainty": "probable",
+                "source_key": "family",
+            }
+        ],
         "sensitive_topics": [
             {
                 "topic": "fallecimiento de Miguel",
