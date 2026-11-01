@@ -373,6 +373,72 @@ async def _onboarding_row(db: AsyncSession, session_id: uuid.UUID):
         raise HTTPException(status_code=404, detail="Onboarding no encontrado") from exc
 
 
+ONBOARDING_ENTRY_SECTIONS = {
+    "contributors",
+    "sources",
+    "sensitive_topics",
+    "people",
+    "facts",
+    "memories",
+}
+
+
+def _onboarding_entry(section: str, form):
+    if section == "contributors":
+        return OnboardingContributor(
+            name=_text(form, "name") or "",
+            relationship=_text(form, "relationship"),
+            permission_note=_text(form, "permission_note"),
+        )
+    if section == "sources":
+        return OnboardingSource(
+            key=_text(form, "key") or "",
+            source_type=_text(form, "source_type") or SourceType.family_member.value,
+            description=_text(form, "description"),
+        )
+    if section == "sensitive_topics":
+        return SensitiveTopicCreate(
+            topic=_text(form, "topic") or "",
+            handling=_text(form, "handling"),
+            consent_review_required=_checked(form, "consent_review_required"),
+            triggers=_csv(_text(form, "triggers")),
+        )
+    if section == "people":
+        return OnboardingPerson(
+            key=_text(form, "key") or "",
+            first_name=_text(form, "first_name") or "",
+            last_name=_text(form, "last_name"),
+            relationship_type=(
+                _text(form, "relationship_type") or RelationshipType.other.value
+            ),
+            certainty=(
+                _text(form, "certainty") or RelationshipStatus.probable.value
+            ),
+            source_key=_text(form, "source_key"),
+            notes=_text(form, "notes"),
+        )
+    if section == "facts":
+        return OnboardingFact(
+            subject_key=_text(form, "subject_key") or "subject",
+            fact_type=_text(form, "fact_type") or "",
+            value_text=_text(form, "value_text"),
+            status=_text(form, "status") or FactStatus.probable.value,
+            source_key=_text(form, "source_key") or "",
+            notes=_text(form, "notes"),
+        )
+    if section == "memories":
+        return OnboardingMemory(
+            title=_text(form, "title"),
+            narrative=_text(form, "narrative") or "",
+            sensitivity_level=(
+                _text(form, "sensitivity_level") or SensitivityLevel.low.value
+            ),
+            source_key=_text(form, "source_key") or "",
+            people_keys=_form_list(form, "people_keys"),
+        )
+    raise ValueError(f"Unknown onboarding section {section}")
+
+
 async def _count(db: AsyncSession, model, *conditions) -> int:
     stmt = select(func.count()).select_from(model)
     if conditions:
@@ -609,6 +675,57 @@ async def onboarding_preferences(
     return _back(
         f"/admin/onboarding/{session_id}",
         message="Preferencias guardadas.",
+    )
+
+
+@router.post("/onboarding/{session_id}/entries/{section}")
+async def onboarding_add_entry(
+    request: Request, db: DbSession, session_id: uuid.UUID, section: str
+) -> RedirectResponse:
+    if section not in ONBOARDING_ENTRY_SECTIONS:
+        raise HTTPException(status_code=404, detail="Sección de onboarding no válida")
+    form = await request.form()
+    service = OnboardingService(db)
+    row = await _onboarding_row(db, session_id)
+    draft = service.draft_of(row)
+    try:
+        getattr(draft, section).append(_onboarding_entry(section, form))
+        await service.save_draft(session_id, draft)
+    except (ValidationError, OnboardingError) as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Elemento añadido al borrador.",
+    )
+
+
+@router.post("/onboarding/{session_id}/entries/{section}/{index}/remove")
+async def onboarding_remove_entry(
+    request: Request,
+    db: DbSession,
+    session_id: uuid.UUID,
+    section: str,
+    index: int,
+) -> RedirectResponse:
+    if section not in ONBOARDING_ENTRY_SECTIONS:
+        raise HTTPException(status_code=404, detail="Sección de onboarding no válida")
+    service = OnboardingService(db)
+    row = await _onboarding_row(db, session_id)
+    draft = service.draft_of(row)
+    items = getattr(draft, section)
+    if index < 0 or index >= len(items):
+        return _back(
+            f"/admin/onboarding/{session_id}",
+            error="El elemento ya no existe en el borrador.",
+        )
+    items.pop(index)
+    try:
+        await service.save_draft(session_id, draft)
+    except (ValidationError, OnboardingError) as exc:
+        return _back(f"/admin/onboarding/{session_id}", error=_error_text(exc))
+    return _back(
+        f"/admin/onboarding/{session_id}",
+        message="Elemento eliminado del borrador.",
     )
 
 

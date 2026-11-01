@@ -58,6 +58,120 @@
 </fieldset>
 
 <fieldset>
+  <legend>2. Contribuyentes permitidos</legend>
+  <table>
+    <thead><tr><th>Nombre</th><th>Relación</th><th>Permiso</th><th></th></tr></thead>
+    <tbody>
+      {% for item in draft.contributors %}
+      <tr>
+        <td>{{ item.name }}</td>
+        <td>{{ item.relationship or "—" }}</td>
+        <td>{{ item.permission_note or "—" }}</td>
+        <td>
+          <form method="post" action="/admin/onboarding/{{ row.id }}/entries/contributors/{{ loop.index0 }}/remove">
+            <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Quitar</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">Aún no hay contribuyentes.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/entries/contributors">
+    <div class="grid">
+      <div>
+        <label>Nombre</label>
+        <input name="name" required>
+        <label>Relación con la persona</label>
+        <input name="relationship">
+      </div>
+      <div>
+        <label>Permiso concedido</label>
+        <input name="permission_note" placeholder="Aportar datos, revisar contenido...">
+      </div>
+    </div>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Añadir contribuyente</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>3. Temas sensibles y manejo</legend>
+  <table>
+    <thead><tr><th>Tema</th><th>Manejo</th><th>Disparadores</th><th>Revisión</th><th></th></tr></thead>
+    <tbody>
+      {% for topic in draft.sensitive_topics %}
+      <tr>
+        <td>{{ topic.topic }}</td>
+        <td>{{ topic.handling or "—" }}</td>
+        <td>{{ topic.triggers | join(", ") or "—" }}</td>
+        <td>{{ "sí" if topic.consent_review_required else "no" }}</td>
+        <td>
+          <form method="post" action="/admin/onboarding/{{ row.id }}/entries/sensitive_topics/{{ loop.index0 }}/remove">
+            <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Quitar</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted">Aún no hay temas sensibles.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/entries/sensitive_topics">
+    <label>Tema</label>
+    <input name="topic" required>
+    <label>Manejo indicado por la familia</label>
+    <textarea name="handling" rows="2" required></textarea>
+    <label>Disparadores (separados por comas)</label>
+    <input name="triggers">
+    <label><input type="checkbox" name="consent_review_required"> Requiere revisión de consentimiento</label>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Añadir tema sensible</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>4. Fuentes y procedencia</legend>
+  <table>
+    <thead><tr><th>Clave</th><th>Tipo</th><th>Descripción</th><th></th></tr></thead>
+    <tbody>
+      {% for item in draft.sources %}
+      <tr>
+        <td>{{ item.key }}</td>
+        <td>{{ item.source_type.value }}</td>
+        <td>{{ item.description or "—" }}</td>
+        <td>
+          <form method="post" action="/admin/onboarding/{{ row.id }}/entries/sources/{{ loop.index0 }}/remove">
+            <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Quitar</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">Aún no hay fuentes.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/admin/onboarding/{{ row.id }}/entries/sources">
+    <div class="grid">
+      <div>
+        <label>Clave local</label>
+        <input name="key" placeholder="javi" required>
+        <label>Tipo de fuente</label>
+        <select name="source_type">
+          {% for item in source_type_options %}
+          <option value="{{ item.value }}">{{ item.value }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Descripción</label>
+        <input name="description" placeholder="Javi, hijo">
+      </div>
+    </div>
+    <button type="submit" {% if row.status.value != "draft" %}disabled{% endif %}>Añadir fuente</button>
+  </form>
+</fieldset>
+
+<fieldset>
   <legend>8. Preferencias de conversación</legend>
   <form method="post" action="/admin/onboarding/{{ row.id }}/preferences">
     <label>Temas positivos (separados por comas)</label>

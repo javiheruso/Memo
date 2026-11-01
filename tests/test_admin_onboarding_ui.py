@@ -68,3 +68,53 @@ async def test_onboarding_identity_and_preferences_are_resumable(
 async def test_onboarding_unknown_session_is_404(app_client: AsyncClient) -> None:
     response = await app_client.get(f"{UI}/onboarding/{uuid.uuid4()}")
     assert response.status_code == 404
+
+
+async def test_onboarding_entry_sections_are_saved_and_removed(
+    app_client: AsyncClient,
+) -> None:
+    session_id = await _new_session(app_client)
+    await app_client.post(
+        f"{UI}/onboarding/{session_id}/identity",
+        data={"first_name": "Elena", "reviewer_name": "Javi"},
+    )
+    base = f"{UI}/onboarding/{session_id}/entries"
+
+    for section, data in (
+        (
+            "contributors",
+            {"name": "Javi", "relationship": "hijo", "permission_note": "Aportar datos"},
+        ),
+        (
+            "sources",
+            {"key": "javi", "source_type": "family_member", "description": "Javi, hijo"},
+        ),
+        (
+            "sensitive_topics",
+            {
+                "topic": "fallecimiento de Miguel",
+                "handling": "No iniciar; redirigir con suavidad.",
+                "triggers": "murió, funeral",
+            },
+        ),
+    ):
+        response = await app_client.post(
+            f"{base}/{section}", data=data, follow_redirects=True
+        )
+        assert response.status_code == 200
+        assert "Elemento añadido al borrador" in response.text
+
+    stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()["payload"]
+    assert [item["key"] for item in stored["sources"]] == ["javi"]
+    assert [item["topic"] for item in stored["sensitive_topics"]] == [
+        "fallecimiento de Miguel"
+    ]
+    assert stored["sensitive_topics"][0]["triggers"] == ["murió", "funeral"]
+
+    removed = await app_client.post(
+        f"{base}/contributors/0/remove", follow_redirects=True
+    )
+    assert removed.status_code == 200
+    assert "Elemento eliminado del borrador" in removed.text
+    stored = (await app_client.get(f"{API}/onboarding/{session_id}")).json()["payload"]
+    assert stored["contributors"] == []
