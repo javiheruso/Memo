@@ -41,6 +41,30 @@ async def test_known_person_flow(app_client: AsyncClient, seed: SeedUniverse):
     assert any(s["entity_type"] == "relationship" for s in sources)
 
 
+async def test_fact_query_returns_relevant_fact_with_provenance(
+    app_client: AsyncClient, seed: SeedUniverse
+):
+    response = await app_client.post(
+        API, json={"message": "¿Qué aficiones tiene Antonio?"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["intent"] == "fact_query"
+    assert "Fishing" in body["answer"]
+    assert "Guardamar de la Safor" not in body["answer"]
+    fact_sources = [
+        source for source in body["sources"] if source["entity_type"] == "fact"
+    ]
+    assert len(fact_sources) == 1
+    assert fact_sources[0]["usage_type"] == "verified_fact"
+    assert any(
+        source["entity_type"] == "source"
+        and source["usage_type"] == "provenance"
+        for source in body["sources"]
+    )
+
+
 async def test_ambiguous_person_is_not_collapsed(
     app_client: AsyncClient, seed: SeedUniverse
 ):

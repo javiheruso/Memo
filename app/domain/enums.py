@@ -118,6 +118,7 @@ class Intent(str, Enum):
     general_chat = "general_chat"
     person_query = "person_query"
     memory_query = "memory_query"
+    fact_query = "fact_query"
     event_query = "event_query"
     orientation_query = "orientation_query"
     unknown = "unknown"

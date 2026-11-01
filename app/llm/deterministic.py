@@ -15,7 +15,13 @@ presented as already completed.
 
 from datetime import UTC, datetime
 
-from app.domain.enums import EpistemicKind, EventStatus, Intent, RelationshipType
+from app.domain.enums import (
+    EpistemicKind,
+    EventStatus,
+    Intent,
+    RelationshipType,
+    SourceType,
+)
 from app.llm.base import Responder, Response
 from app.repositories.conversation import ResponseSourceRef
 from app.retrieval.context_builder import AnswerContext
@@ -38,6 +44,18 @@ _RELATION_LABELS: dict[RelationshipType, str] = {
 _GENERAL_REPLY = "Estoy aquí para conversar. Cuéntame de qué te apetece hablar."
 _UNKNOWN_REPLY = "No he entendido bien lo que has dicho. ¿Puedes repetirlo?"
 _EVENT_ASK_WHOSE = "¿De quién quieres saber sus eventos?"
+_FACT_ASK_WHOSE = "¿De quién quieres saber ese dato?"
+
+_SOURCE_LABELS: dict[str, str] = {
+    SourceType.user.value: "lo que me contó la propia persona",
+    SourceType.family_member.value: "un familiar",
+    SourceType.conversation.value: "una conversación registrada",
+    SourceType.document.value: "un documento",
+    SourceType.photo.value: "una fotografía",
+    SourceType.calendar.value: "un calendario",
+    SourceType.system.value: "datos de ejemplo",
+    SourceType.other.value: "otra fuente",
+}
 
 _WEEKDAYS = (
     "lunes",
@@ -76,6 +94,8 @@ class DeterministicResponder(Responder):
             return self._respond_event_query(context)
         if context.intent == Intent.memory_query:
             return self._respond_memory_query(context)
+        if context.intent == Intent.fact_query:
+            return self._respond_fact_query(context)
         if context.intent == Intent.unknown:
             return Response(text=_UNKNOWN_REPLY)
         if context.intent != Intent.person_query:
@@ -199,6 +219,85 @@ class DeterministicResponder(Responder):
             text=f"Tengo guardado a {display}, pero todavía no tengo detalles.",
             sources=[ResponseSourceRef("person", context.person.id, "subject")],
         )
+
+    def _respond_fact_query(self, context: AnswerContext) -> Response:
+        """Answer a scoped fact/preference question from stored facts only.
+
+        The retriever already narrowed the facts to the question family. This
+        method keeps status and provenance explicit: verified items may be
+        stated as confirmed, probable ones are always labelled as uncertain,
+        and each item names its stored source when one exists. No relation,
+        memory or other tier is consulted, so a fact question cannot drift into
+        a different hint tier.
+        """
+        if context.resolution == ResolutionKind.not_found:
+            return Response(text=f"No tengo guardado quién era {context.term}.")
+
+        if context.resolution == ResolutionKind.ambiguous:
+            return self._ambiguous_response(context)
+
+        if context.person is None or context.term is None:
+            return Response(text=_FACT_ASK_WHOSE)
+
+        display = context.person.display_name
+        if not context.facts:
+            return Response(
+                text=f"No tengo guardado ningún dato sobre eso de {display}.",
+                sources=[
+                    ResponseSourceRef("person", context.person.id, "subject")
+                ],
+            )
+
+        verified_facts = [
+            item
+            for item in context.facts
+            if item.epistemic == EpistemicKind.verified_fact
+        ]
+        probable_facts = [
+            item
+            for item in context.facts
+            if item.epistemic == EpistemicKind.probable_fact
+        ]
+
+        segments: list[str] = []
+        if verified_facts:
+            segments.append(
+                "tengo como confirmado "
+                + self._render_fact_list(verified_facts)
+            )
+        if probable_facts:
+            segments.append(
+                "tengo como probable, sin confirmar, "
+                + self._render_fact_list(probable_facts)
+            )
+
+        return Response(
+            text=f"Sobre {display}: {' '.join(segments)}",
+            sources=self._fact_query_sources(
+                context, [*verified_facts, *probable_facts]
+            ),
+        )
+
+    @staticmethod
+    def _render_fact_list(facts) -> str:
+        return "; ".join(
+            f"'{item.text}'{_source_suffix(item.source_type)}" for item in facts
+        )
+
+    @staticmethod
+    def _fact_query_sources(context: AnswerContext, facts) -> list[ResponseSourceRef]:
+        sources = [ResponseSourceRef("person", context.person.id, "subject")]
+        seen_sources: set = set()
+        for item in facts:
+            sources.append(
+                ResponseSourceRef("fact", item.entity_id, item.epistemic.value)
+            )
+            if item.source_id is not None and item.source_id not in seen_sources:
+                seen_sources.add(item.source_id)
+                sources.append(
+                    ResponseSourceRef("source", item.source_id, "provenance")
+                )
+        return sources
 
     @staticmethod
     def _facts_response(context, display, verified_facts, probable_facts) -> Response:
@@ -337,6 +436,11 @@ class DeterministicResponder(Responder):
         if event.status == EventStatus.planned:
             return f"está planificado '{event.title}' para el {when}"
         return f"está confirmado '{event.title}' para el {when}"
+
+
+def _source_suffix(source_type: str | None) -> str:
+    label = _SOURCE_LABELS.get(source_type or "")
+    return f" (según {label})" if label else ""
 
 
 def _as_utc(value: datetime) -> datetime:

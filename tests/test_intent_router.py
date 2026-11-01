@@ -1,4 +1,5 @@
 from app.domain.enums import Intent
+from app.retrieval.fact_topics import FactTopic
 from app.retrieval.intent_router import IntentRouter
 
 
@@ -54,6 +55,38 @@ def test_routes_event_question_without_person_keeps_no_term():
     result = IntentRouter().route("¿Cuándo hay eventos?")
     assert result.intent == Intent.event_query
     assert result.term is None
+
+
+def test_routes_preference_question_as_fact_query():
+    result = IntentRouter().route("¿Qué le gusta a Elena?")
+    assert result.intent == Intent.fact_query
+    assert result.term == "Elena"
+    assert result.fact_topic == FactTopic.preference
+
+
+def test_routes_specific_hobby_question_as_fact_query():
+    result = IntentRouter().route("¿Qué aficiones tiene Elena?")
+    assert result.intent == Intent.fact_query
+    assert result.term == "Elena"
+    assert result.fact_topic == FactTopic.hobby
+
+
+def test_fact_question_wins_over_event_marker_for_birth_question():
+    result = IntentRouter().route("¿Cuándo nació Elena?")
+    assert result.intent == Intent.fact_query
+    assert result.term == "Elena"
+    assert result.fact_topic == FactTopic.place
+
+
+def test_routes_english_preference_question_as_fact_query():
+    result = IntentRouter().route("What does Elena like?")
+    assert result.intent == Intent.fact_query
+    assert result.term == "Elena"
+    assert result.fact_topic == FactTopic.preference
+
+
+def test_declarative_preference_statement_is_not_a_fact_query():
+    assert IntentRouter().route("Me gusta Elena").intent == Intent.general_chat
 
 
 def test_routes_general_chat_by_default():

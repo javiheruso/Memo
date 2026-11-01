@@ -455,13 +455,41 @@ tier.
 
 `orientation_query` catches day/date/time phrasings ("¿Qué día es hoy?", "¿Qué
 hora es?", "What's the date?"). The router precedence is `person_query` >
-`memory_query` > `event_query` > `orientation_query`, and the orientation
-patterns are end-anchored so "¿Qué día viene María?" stays an event query. The
-answer is built from a code-provided clock carried in `AnswerContext.now`
-(UTC): the deterministic responder renders the weekday, date and time from it,
-and the prompt builder hands that same trusted clock to the LLM path, so a
-date/time statement is grounded in the application's clock, never the model's
-own knowledge.
+`memory_query` > `fact_query` > `event_query` > `orientation_query`, and the
+orientation patterns are end-anchored so "¿Qué día viene María?" stays an
+event query. The answer is built from a code-provided clock carried in
+`AnswerContext.now` (UTC): the deterministic responder renders the weekday,
+date and time from it, and the prompt builder hands that same trusted clock to
+the LLM path, so a date/time statement is grounded in the application's clock,
+never the model's own knowledge.
+
+### Fact and preference queries
+
+`fact_query` answers scoped questions about stored facts and preferences
+("¿Qué le gusta a Elena?", "¿Qué aficiones tiene Elena?", "¿Cuál es la comida
+favorita de Elena?", "¿Qué datos tienes de Elena?"). The router extracts a
+proper-name subject and classifies the question into one small family
+(`preference`, `food`, `place`, `occupation`, `belief`, `family`, `general`,
+and related families) in `app/retrieval/fact_topics.py`. Retrieval resolves the
+person with the existing resolver and then filters facts by `fact_type`, so a
+food question cannot surface a hobby fact and a preference question cannot
+surface a relationship fact. It deliberately does not fall through to
+relations, memories, events or media.
+
+Every fact item carries its status, `fact_type`, source id and source type into
+the responder and the LLM prompt. Verified facts may be stated as confirmed;
+probable facts are always labelled as probable and not confirmed, and the
+deterministic reply names the stored source ("según un familiar", "según lo que
+me contó la propia persona") when one exists. A question with no matching fact
+gets an honest "no stored data about that" answer instead of a dump of unrelated
+facts.
+
+The active sensitive-topic policy runs before and after this path unchanged:
+blocked-topic facts are withheld from the context, an explicit sensitive
+question keeps the cautious no-invention redirect, and the output guard still
+replaces a responder that mentions a blocked topic. Deferred for this slice:
+semantic fact matching, multi-fact temporal reasoning, and a broader profile or
+onboarding UI.
 
 ### Conversational profiles and sensitive topics
 
@@ -727,9 +755,10 @@ and error flash messages identical to the API guards.
 The MVP is feature-complete against the dossier. Implemented and verified:
 
 - **Query pipeline** — intent routing (`person_query`, `memory_query`,
-  `event_query`, `orientation_query`, `general_chat`), entity resolution with
-  explicit ambiguity handling, structured retrieval (relationships, facts,
-  events), semantic memory retrieval (pgvector on PostgreSQL, in-memory
+  `fact_query`, `event_query`, `orientation_query`, `general_chat`), entity
+  resolution with explicit ambiguity handling, structured retrieval
+  (relationships, facts, events), topic-scoped fact/preference retrieval with
+  provenance, semantic memory retrieval (pgvector on PostgreSQL, in-memory
   fallback on SQLite), and trust-model context building.
 - **Trust model** — rules enforced in code: no invention, memories never
   presented as verified facts, planned/confirmed events never phrased as
@@ -748,7 +777,7 @@ The MVP is feature-complete against the dossier. Implemented and verified:
 
 Verification:
 
-- 447 tests pass on the default in-memory SQLite suite.
+- 464 tests pass on the default in-memory SQLite suite.
 - The same suite runs against real PostgreSQL + pgvector with `make test-postgres`.
 - Alembic migrations apply cleanly (head `a1b2c3d4e5f6`), 25 tables.
 

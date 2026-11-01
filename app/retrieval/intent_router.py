@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass
 
 from app.domain.enums import Intent
+from app.retrieval.fact_topics import FactTopic, classify_fact_question
 
 _PERSON_QUESTION = re.compile(
     r"(?:quién|quien|who)\s+(?:es|era|fue|is|was)\s+([^?¿]+?)\s*[?¿]*$",
@@ -56,24 +57,66 @@ _ORIENTATION_PATTERNS = (
     _ORIENTATION_YEAR,
 )
 
+# Fact/preference questions reuse the existing person resolver, so the router
+# only has to recognize a question shape, a topic family, and a proper-name
+# subject. A declarative statement ("Me gusta Elena") never matches because a
+# question marker is required.
+_FACT_QUESTION = re.compile(
+    r"^\s*[¿]?\s*(?:qué|que|cuál|cuáles|cual|cuales|dónde|donde|cómo|como|"
+    r"what|which|where|how)\b|[?¿]",
+    re.IGNORECASE,
+)
+_NAME_PHRASE = rf"{_NAME}(?:\s+{_NAME})*"
+_FACT_SUBJECT_PREPOSITION = re.compile(
+    rf"\b(?i:a|de|para|sobre)\s+(?P<name>{_NAME_PHRASE})"
+)
+_FACT_SUBJECT_VERB = re.compile(
+    rf"\b(?i:tiene|tienen|prefiere|prefieren|naci[oó]|vivi[oó]|vive|"
+    rf"trabaj[oó]|trabaja|dedicaba|dedica|opina|cree|piensa)\s+"
+    rf"(?P<name>{_NAME_PHRASE})"
+)
+_FACT_SUBJECT_POSSESSIVE = re.compile(rf"(?P<name>{_NAME_PHRASE})'s\b")
+_FACT_SUBJECT_ENGLISH_AUX = re.compile(
+    rf"\b(?i:does|did|was|is|are)\s+(?P<name>{_NAME_PHRASE})"
+)
+_FACT_SUBJECT_PATTERNS = (
+    _FACT_SUBJECT_PREPOSITION,
+    _FACT_SUBJECT_VERB,
+    _FACT_SUBJECT_POSSESSIVE,
+    _FACT_SUBJECT_ENGLISH_AUX,
+)
+
+
+def _extract_fact_subject(text: str) -> str | None:
+    for pattern in _FACT_SUBJECT_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            term = match.group("name").strip()
+            if term:
+                return term
+    return None
+
 
 @dataclass(frozen=True)
 class RouteResult:
     intent: Intent
     term: str | None = None
+    fact_topic: FactTopic | None = None
 
 
 class IntentRouter:
     """Minimal deterministic intent classifier.
 
     Kept to a small dossier-aligned vocabulary: ``person_query``,
-    ``memory_query``, ``event_query``, ``orientation_query``,
+    ``memory_query``, ``fact_query``, ``event_query``, ``orientation_query``,
     ``general_chat`` and ``unknown``. ``general_chat`` is the catch-all for
     normal conversational text so everyday topics never touch personal memory.
 
-    Precedence: ``person_query`` > ``memory_query`` > ``event_query`` >
-    ``orientation_query`` > ``general_chat``. Orientation patterns are
-    end-anchored so "¿Qué día viene María?" stays an event query.
+    Precedence: ``person_query`` > ``memory_query`` > ``fact_query`` >
+    ``event_query`` > ``orientation_query`` > ``general_chat``. Orientation
+    patterns are end-anchored so "¿Qué día viene María?" stays an event query.
+    Fact questions are checked before event markers so "¿Cuándo nació Elena?"
+    asks for a stored fact instead of an event.
     """
 
     def route(self, text: str) -> RouteResult:
@@ -89,6 +132,14 @@ class IntentRouter:
 
         if _MEMORY_MARKERS.search(normalized):
             return RouteResult(intent=Intent.memory_query)
+
+        fact_topic = classify_fact_question(normalized)
+        if fact_topic is not None and _FACT_QUESTION.search(normalized):
+            term = _extract_fact_subject(normalized)
+            if term:
+                return RouteResult(
+                    intent=Intent.fact_query, term=term, fact_topic=fact_topic
+                )
 
         if _EVENT_MARKERS.search(normalized):
             term = None
