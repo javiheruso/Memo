@@ -71,6 +71,51 @@ async def test_semantic_search_filters_sensitive_memories(
 
 
 @_SKIP_ON_POSTGRES
+async def test_semantic_search_filters_sensitivity_before_the_limit(
+    retriever: SemanticRetriever, db_session: AsyncSession, seed: SeedUniverse
+):
+    """Protected memories must not consume the requested result slots.
+
+    The high-sensitivity rows outrank the allowed ones on purpose. Filtering
+    after truncation would return zero hits for ``limit=2``; filtering first
+    must return both allowed memories.
+    """
+    repo = MemoryRepository(db_session)
+    query = "lighthouse keeper secret diaries"
+    for index in range(2):
+        await repo.create(
+            MemoryCreate(
+                title=f"Protected lighthouse keeper secret diaries {index}",
+                narrative="lighthouse keeper secret diaries",
+                memory_status=MemoryStatus.consolidated,
+                sensitivity_level=SensitivityLevel.high,
+                source_id=seed.source_ids["family_records"],
+            )
+        )
+    allowed_ids = set()
+    for index in range(2):
+        memory = await repo.create(
+            MemoryCreate(
+                title=f"Lighthouse keeper {index}",
+                narrative="A quiet keeper memory.",
+                memory_status=MemoryStatus.consolidated,
+                sensitivity_level=SensitivityLevel.low,
+                source_id=seed.source_ids["shared_by_carmen"],
+            )
+        )
+        allowed_ids.add(memory.id)
+
+    result = await retriever.search(query, limit=2)
+
+    assert {hit.memory.id for hit in result.hits} == allowed_ids
+    assert all(
+        hit.memory.sensitivity_level == SensitivityLevel.low
+        for hit in result.hits
+    )
+    assert result.filtered_count == 2
+
+
+@_SKIP_ON_POSTGRES
 async def test_semantic_fallback_embeds_memories_without_stored_embedding(
     retriever: SemanticRetriever, db_session: AsyncSession, seed: SeedUniverse
 ):
