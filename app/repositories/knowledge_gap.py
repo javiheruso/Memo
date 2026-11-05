@@ -68,6 +68,7 @@ class KnowledgeGapRepository(SQLRepository[KnowledgeGap]):
         conversation_id: uuid.UUID,
         description: str | None = None,
         now: datetime | None = None,
+        commit: bool = True,
     ) -> tuple[KnowledgeGap, bool]:
         """Record an occurrence of a knowledge gap.
 
@@ -75,6 +76,9 @@ class KnowledgeGapRepository(SQLRepository[KnowledgeGap]):
         occurrence increments ``occurrence_count``; a first occurrence from a
         conversation that has not seen the gap before also increments
         ``distinct_sessions``. Returns the gap and whether it was created.
+
+        ``commit=False`` keeps the write inside the caller's transaction, so a
+        gap derived from a turn can commit or roll back with that turn.
         """
         moment = now or datetime.now(UTC)
         stmt = select(KnowledgeGap).where(
@@ -99,7 +103,10 @@ class KnowledgeGapRepository(SQLRepository[KnowledgeGap]):
             self._session.add(
                 KnowledgeGapConversation(gap_id=gap.id, conversation_id=conversation_id)
             )
-            await self._session.commit()
+            if commit:
+                await self._session.commit()
+            else:
+                await self._session.flush()
             return gap, True
 
         gap.occurrence_count += 1
@@ -115,5 +122,8 @@ class KnowledgeGapRepository(SQLRepository[KnowledgeGap]):
                 KnowledgeGapConversation(gap_id=gap.id, conversation_id=conversation_id)
             )
             gap.distinct_sessions += 1
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
+        else:
+            await self._session.flush()
         return gap, False

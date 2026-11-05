@@ -20,7 +20,12 @@ class ResponseSourceRef:
 class ConversationRepository(SQLRepository[Conversation]):
     model = Conversation
 
-    async def get_or_create(self, conversation_id: uuid.UUID | None) -> Conversation:
+    async def get_or_create(
+        self,
+        conversation_id: uuid.UUID | None,
+        *,
+        commit: bool = True,
+    ) -> Conversation:
         if conversation_id is not None:
             existing = await self.get(conversation_id)
             if existing is not None:
@@ -30,7 +35,8 @@ class ConversationRepository(SQLRepository[Conversation]):
                 started_at=datetime.now(UTC),
                 initiated_by="user",
                 initiation_reason=None,
-            )
+            ),
+            commit=commit,
         )
 
     async def add_message(
@@ -40,6 +46,7 @@ class ConversationRepository(SQLRepository[Conversation]):
         speaker: str,
         text: str,
         intent: str | None = None,
+        commit: bool = True,
     ) -> Message:
         message = Message(
             conversation_id=conversation_id,
@@ -49,11 +56,18 @@ class ConversationRepository(SQLRepository[Conversation]):
             created_at=datetime.now(UTC),
         )
         self._session.add(message)
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
+        else:
+            await self._session.flush()
         return message
 
     async def add_response_sources(
-        self, message_id: uuid.UUID, sources: list[ResponseSourceRef]
+        self,
+        message_id: uuid.UUID,
+        sources: list[ResponseSourceRef],
+        *,
+        commit: bool = True,
     ) -> list[ResponseSource]:
         """Persist response sources preserving the given order.
 
@@ -75,8 +89,19 @@ class ConversationRepository(SQLRepository[Conversation]):
             for index, source in enumerate(sources)
         ]
         self._session.add_all(created)
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
+        else:
+            await self._session.flush()
         return created
+
+    async def commit_turn(self) -> None:
+        """Commit the atomic persistence unit of one conversation turn."""
+        await self._session.commit()
+
+    async def rollback_turn(self) -> None:
+        """Roll back a failed turn so no partial message/source pair remains."""
+        await self._session.rollback()
 
     async def last_assistant_candidates(
         self, conversation_id: uuid.UUID

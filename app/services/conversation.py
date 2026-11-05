@@ -1,5 +1,7 @@
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,10 +85,10 @@ class ConversationService:
 
     Flow: intent routing -> entity resolution -> structured retrieval /
     semantic memory retrieval -> context building (policies) -> response ->
-    persistence of the conversation, messages, response sources and knowledge
-    gaps. On conversational turns, candidate claims are extracted from the user
-    message, persisted append-only and routed into claim groups, all without
-    changing the response.
+    one atomic persistence unit for the user message, assistant reply, response
+    sources and any turn-derived knowledge gap. On conversational turns,
+    candidate claims are then extracted from the stored user message and
+    persisted append-only outside that unit, without changing the response.
     """
 
     def __init__(
@@ -129,8 +131,29 @@ class ConversationService:
             ),
         )
 
+    @asynccontextmanager
+    async def _turn_transaction(self) -> AsyncIterator[None]:
+        """Make the turn's persistence atomic.
+
+        The user message, assistant response, response sources and any gap
+        derived from the turn are written without intermediate commits and
+        committed together. If any step raises, the whole turn is rolled back,
+        so a stored user message can never exist without its reply (or an
+        assistant reply without its sources). Claim ingestion is intentionally
+        outside this boundary: it is fail-safe and independently persisted
+        after the turn, as the domain documents.
+        """
+        try:
+            yield
+            await self._conversations.commit_turn()
+        except Exception:
+            await self._conversations.rollback_turn()
+            raise
+
     async def handle_user_message(
-        self, text: str, conversation_id: uuid.UUID | None = None
+        self,
+        text: str,
+        conversation_id: uuid.UUID | None = None,
     ) -> ChatResult:
         route = self._router.route(text)
         profile = await self._profiles.get_active()
@@ -139,107 +162,124 @@ class ConversationService:
         positive_topics = (
             tuple(profile.positive_topics or ()) if profile is not None else ()
         )
-        conversation = await self._conversations.get_or_create(conversation_id)
 
-        pending = await self._conversations.last_assistant_candidates(
-            conversation.id
-        )
-        if pending:
-            person = await self._disambiguation.resolve(text, pending)
-            if person is not None:
-                return await self._disambiguation_turn(
-                    conversation.id,
-                    text,
-                    person,
-                    sensitive_evaluation,
-                    positive_topics,
-                )
+        async with self._turn_transaction():
+            conversation = await self._conversations.get_or_create(
+                conversation_id,
+                commit=False,
+            )
 
-        # Elliptical follow-ups ("¿Y de comer?", "¿Y dónde vivió?") keep the
-        # subject of the immediately previous resolved fact answer. The
-        # repository refuses to carry a subject across any other intent or an
-        # ambiguous answer, so this never guesses after unrelated turns or
-        # multiple candidate persons.
-        follow_up_resolution: Resolution | None = None
-        if route.intent in (Intent.general_chat, Intent.event_query):
-            follow_up_route = self._router.route_fact_follow_up(text)
-            if follow_up_route is not None:
-                subject_id = await self._conversations.last_fact_subject(
-                    conversation.id
+            pending = await self._conversations.last_assistant_candidates(
+                conversation.id
+            )
+            if pending:
+                person = await self._disambiguation.resolve(text, pending)
+                if person is not None:
+                    return await self._disambiguation_turn(
+                        conversation.id,
+                        text,
+                        person,
+                        sensitive_evaluation,
+                        positive_topics,
+                    )
+
+            # Elliptical follow-ups ("¿Y de comer?", "¿Y dónde vivió?") keep the
+            # subject of the immediately previous resolved fact answer. The
+            # repository refuses to carry a subject across any other intent or
+            # an ambiguous answer, so this never guesses after unrelated turns
+            # or multiple candidate persons.
+            follow_up_resolution: Resolution | None = None
+            if route.intent in (Intent.general_chat, Intent.event_query):
+                follow_up_route = self._router.route_fact_follow_up(text)
+                if follow_up_route is not None:
+                    subject_id = await self._conversations.last_fact_subject(
+                        conversation.id
+                    )
+                    if subject_id is not None:
+                        subject = await self._people.get(subject_id)
+                        if subject is not None:
+                            follow_up_resolution = Resolution.from_people(
+                                subject.display_name, [subject]
+                            )
+                            route = follow_up_route
+
+            resolution: Resolution | None = None
+            context: AnswerContext
+            if route.intent == Intent.memory_query:
+                semantic = await self._semantic_retriever.search(text)
+                context = self._context_builder.build_from_semantic_memories(
+                    semantic, term=route.term
                 )
-                if subject_id is not None:
-                    subject = await self._people.get(subject_id)
-                    if subject is not None:
-                        follow_up_resolution = Resolution.from_people(
-                            subject.display_name, [subject]
+            elif route.intent in (
+                Intent.person_query,
+                Intent.event_query,
+                Intent.fact_query,
+            ) and (route.term or follow_up_resolution):
+                resolution = follow_up_resolution or await self._resolver.resolve(
+                    route.term
+                )
+                if resolution.kind == ResolutionKind.resolved:
+                    if route.intent == Intent.fact_query:
+                        data = await self._structured_retriever.retrieve_facts(
+                            resolution.person.id,
+                            topic=route.fact_topic or FactTopic.general,
                         )
-                        route = follow_up_route
-
-        user_message = await self._conversations.add_message(
-            conversation.id, speaker="user", text=text, intent=route.intent.value
-        )
-        if route.intent in _INGEST_INTENTS:
-            await self._ingest_claims(text, conversation.id, user_message.id)
-
-        resolution: Resolution | None = None
-        context: AnswerContext
-        if route.intent == Intent.memory_query:
-            semantic = await self._semantic_retriever.search(text)
-            context = self._context_builder.build_from_semantic_memories(
-                semantic, term=route.term
-            )
-        elif route.intent in (
-            Intent.person_query,
-            Intent.event_query,
-            Intent.fact_query,
-        ) and (route.term or follow_up_resolution):
-            resolution = follow_up_resolution or await self._resolver.resolve(
-                route.term
-            )
-            if resolution.kind == ResolutionKind.resolved:
-                if route.intent == Intent.fact_query:
-                    data = await self._structured_retriever.retrieve_facts(
-                        resolution.person.id,
-                        topic=route.fact_topic or FactTopic.general,
+                    else:
+                        data = await self._structured_retriever.retrieve(
+                            resolution.person.id
+                        )
+                    context = self._context_builder.build_from_person_data(
+                        data, resolution, intent=route.intent
                     )
                 else:
-                    data = await self._structured_retriever.retrieve(
-                        resolution.person.id
+                    context = self._context_builder.build_from_resolution(
+                        resolution, route.intent
                     )
-                context = self._context_builder.build_from_person_data(
-                    data, resolution, intent=route.intent
-                )
             else:
-                context = self._context_builder.build_from_resolution(
-                    resolution, route.intent
+                context = AnswerContext(intent=route.intent, term=route.term)
+
+            context = apply_to_context(
+                context, sensitive_evaluation, positive_topics=positive_topics
+            )
+            answer = await self._respond(
+                context, sensitive_evaluation, conversation.id
+            )
+
+            user_message = await self._conversations.add_message(
+                conversation.id,
+                speaker="user",
+                text=text,
+                intent=route.intent.value,
+                commit=False,
+            )
+            user_message_id = user_message.id
+            assistant_message = await self._conversations.add_message(
+                conversation.id,
+                speaker="assistant",
+                text=answer.text,
+                intent=route.intent.value,
+                commit=False,
+            )
+            if answer.sources:
+                await self._conversations.add_response_sources(
+                    assistant_message.id, answer.sources, commit=False
                 )
-        else:
-            context = AnswerContext(intent=route.intent, term=route.term)
 
-        context = apply_to_context(
-            context, sensitive_evaluation, positive_topics=positive_topics
-        )
-        answer = await self._respond(context, sensitive_evaluation, conversation.id)
-        assistant_message = await self._conversations.add_message(
-            conversation.id,
-            speaker="assistant",
-            text=answer.text,
-            intent=route.intent.value,
-        )
-        if answer.sources:
-            await self._conversations.add_response_sources(
-                assistant_message.id, answer.sources
-            )
+            gap: KnowledgeGap | None = None
+            gap_created = False
+            if context.resolution == ResolutionKind.not_found and route.term:
+                gap, gap_created = await self._gaps.upsert(
+                    gap_type="person_unknown",
+                    canonical_reference=route.term.lower(),
+                    conversation_id=conversation.id,
+                    description=f"User asked about unknown person '{route.term}'.",
+                    commit=False,
+                )
 
-        gap: KnowledgeGap | None = None
-        gap_created = False
-        if context.resolution == ResolutionKind.not_found and route.term:
-            gap, gap_created = await self._gaps.upsert(
-                gap_type="person_unknown",
-                canonical_reference=route.term.lower(),
-                conversation_id=conversation.id,
-                description=f"User asked about unknown person '{route.term}'.",
-            )
+        # Claim ingestion is fail-safe and intentionally independent from the
+        # turn transaction: failures are caught and can never undo the reply.
+        if route.intent in _INGEST_INTENTS:
+            await self._ingest_claims(text, conversation.id, user_message_id)
 
         return ChatResult(
             conversation_id=conversation.id,
@@ -268,13 +308,15 @@ class ConversationService:
 
         The user is picking a person already listed by the previous assistant
         turn, not making a new query or a declarative statement, so neither
-        claim ingestion nor a knowledge-gap upsert runs for this turn.
+        claim ingestion nor a knowledge-gap upsert runs for this turn. The
+        caller owns the turn transaction; this method never commits.
         """
         await self._conversations.add_message(
             conversation_id,
             speaker="user",
             text=text,
             intent=Intent.person_query.value,
+            commit=False,
         )
         resolution = Resolution.from_people(person.display_name, [person])
         data = await self._structured_retriever.retrieve(person.id)
@@ -290,10 +332,11 @@ class ConversationService:
             speaker="assistant",
             text=answer.text,
             intent=Intent.person_query.value,
+            commit=False,
         )
         if answer.sources:
             await self._conversations.add_response_sources(
-                assistant_message.id, answer.sources
+                assistant_message.id, answer.sources, commit=False
             )
         return ChatResult(
             conversation_id=conversation_id,
