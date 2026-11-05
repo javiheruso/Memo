@@ -99,12 +99,15 @@ Quick path:
 | `make test` | Default suite on in-memory SQLite (no database required) |
 | `make test-postgres` | Full suite including the `postgres` smoke tests against `memo_test` |
 
-The compose service uses the image `pgvector/pgvector:pg16` and defaults that
-match the app settings (`memo` / `memo` on port `5432`). Values can be
-overridden through environment variables (`POSTGRES_USER`, `POSTGRES_PASSWORD`,
-`POSTGRES_DB`, `POSTGRES_PORT`), for example in `.env`. The credentials must
-match what the app connects with, so when you override them also update
-`MEMO_DATABASE_URL` and the `make test-postgres` connection string.
+The compose service uses the image `pgvector/pgvector:pg16`. `make db-up`
+supplies a local-only default password (`memo`) and binds PostgreSQL to
+`127.0.0.1` only, so it stays reachable from the host but not from other
+interfaces. Override the values with `POSTGRES_USER`, `POSTGRES_PASSWORD`,
+`POSTGRES_DB`, and `POSTGRES_PORT`, for example in `.env`. Plain
+`docker compose` requires `POSTGRES_PASSWORD` explicitly and fails closed when
+it is unset. The credentials must match what the app connects with, so when you
+override them also update `MEMO_DATABASE_URL` and the `make test-postgres`
+connection string.
 
 > DANGER: the postgres test profile is destructive by design. It drops and
 > recreates the schema in `memo_test` on every run and truncates all tables
@@ -321,11 +324,12 @@ statuses, dropped dates and skipped sections.
 
 ## Minimal admin authentication
 
-Both the JSON admin API and the admin UI share one optional gate: a single
-admin password (`MEMO_ADMIN_PASSWORD`). With it unset the surface is
-**fail-open** — no credentials are required, which keeps local development and
-the default test suite unchanged. Set it and both surfaces require the same
-password:
+Both the JSON admin API and the admin UI share one gate: a single admin
+password (`MEMO_ADMIN_PASSWORD`). Outside `development` the password is
+required: the process refuses to start when it is empty. In local development
+with it unset the surface remains **fail-open** — no credentials are required,
+which keeps the local workflow and the default test suite unchanged. Set it and
+both surfaces require the same password:
 
 | Surface | How you authenticate |
 |---------|----------------------|
@@ -340,7 +344,8 @@ How it stays small:
 - The bearer token *is* the password, compared in constant time.
 - Auth is enforced through shared dependencies (`app/security.py`) mounted on
   both routers, so the two surfaces can never drift apart.
-- Fail-open is the only special case: unset password ⇒ every admin route passes.
+- Fail-open is limited to `MEMO_ENVIRONMENT=development`; any other
+  environment fails at startup without a password.
 
 Quick path:
 
@@ -872,6 +877,8 @@ Deferred by design (dossier phases) and not required for the MVP:
 `pgvector/pgvector:pg16` database:
 
 ```bash
+POSTGRES_PASSWORD='a-strong-db-password' \
+MEMO_ADMIN_PASSWORD='a-strong-admin-password' \
 docker compose up -d --build
 docker compose run --rm app alembic upgrade head   # apply migrations once
 ```
@@ -879,13 +886,9 @@ docker compose run --rm app alembic upgrade head   # apply migrations once
 Then open <http://localhost:8000> (chat at `/chat`, admin at `/admin`, docs at
 `/docs`).
 
-Set the admin password before exposing the service, otherwise the admin
-surface stays unauthenticated (the app logs a startup warning in
-non-development environments):
-
-```bash
-MEMO_ADMIN_PASSWORD='a-strong-password' docker compose up -d
-```
+Compose fails closed when `POSTGRES_PASSWORD` is unset, and the app refuses to
+start in production when `MEMO_ADMIN_PASSWORD` is empty. The PostgreSQL port is
+published on loopback only by default.
 
 The database host inside the compose network is the service name (`postgres`);
 `compose.yaml` sets `MEMO_DATABASE_URL` accordingly. Data persists in the named
@@ -936,8 +939,8 @@ The database host inside the compose network is the service name (`postgres`);
 
 ### Production safety notes
 
-- Admin auth is **fail-open only when `MEMO_ADMIN_PASSWORD` is unset**; a
-  production deployment must set it.
+- Admin auth fails closed outside `development`: production startup requires
+  `MEMO_ADMIN_PASSWORD`, and Compose requires `POSTGRES_PASSWORD` explicitly.
 - The admin credential is a single shared password with no per-user audit,
   no CSRF tokens, and no login rate limiting — adequate for a local/single
   operator, not a multi-user public service.

@@ -1,5 +1,4 @@
 import asyncio
-import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -13,18 +12,17 @@ from app.web.chat import router as chat_ui_router
 from app.web.router import auth_router
 from app.web.router import router as admin_ui_router
 
-logger = logging.getLogger(__name__)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if settings.environment != "development" and not admin_auth_enabled():
-        logger.warning(
-            "MEMO_ADMIN_PASSWORD is unset in the '%s' environment: the admin UI "
-            "and admin API are UNAUTHENTICATED. Set MEMO_ADMIN_PASSWORD before "
-            "exposing the service.",
-            settings.environment,
-        )
+    # Settings already refuses to build outside development without the
+    # required security secrets. Keep a hard guard here as defense in depth for
+    # any runtime override.
+    if settings.environment.strip().lower() != "development":
+        if not admin_auth_enabled():
+            raise RuntimeError(
+                "MEMO_ADMIN_PASSWORD must be set when MEMO_ENVIRONMENT is not "
+                "'development'"
+            )
     if settings.auto_migrate:
         await asyncio.to_thread(run_migrations)
     yield
