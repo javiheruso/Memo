@@ -40,9 +40,18 @@ class FactRepository(SQLRepository[Fact]):
         )
 
     async def for_subject_person(self, person_id: uuid.UUID) -> list[Fact]:
+        """Facts about one person that may still reach an answer.
+
+        Rejected facts are excluded at the query boundary so they never enter
+        retrieval, context building, or a response. Pending facts are left in
+        place for the context layer to withhold and report explicitly.
+        """
         stmt = (
             select(Fact)
-            .where(Fact.subject_person_id == person_id)
+            .where(
+                Fact.subject_person_id == person_id,
+                Fact.status != FactStatus.rejected,
+            )
             .options(joinedload(Fact.source))
             .order_by(Fact.created_at)
         )
