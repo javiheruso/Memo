@@ -98,6 +98,7 @@ class VoiceService:
         audio: bytes | None = None,
         audio_content_type: str | None = None,
         conversation_id: uuid.UUID | None = None,
+        owner_session_id: str | None = None,
     ) -> VoiceResult:
         text_input = text.strip() if text and text.strip() else None
 
@@ -110,7 +111,9 @@ class VoiceService:
             )
 
         result = await self._conversation.handle_user_message(
-            user_text, conversation_id=conversation_id
+            user_text,
+            conversation_id=conversation_id,
+            owner_session_id=owner_session_id,
         )
         audio_bytes = await self._synthesize(result.answer)
 
@@ -140,10 +143,10 @@ class VoiceService:
             return None
         try:
             return (await self._stt.transcribe(audio, content_type=content_type)).strip()
-        except _VOICE_PROVIDER_ERRORS:
+        except _VOICE_PROVIDER_ERRORS as exc:
             logger.warning(
-                "STT transcription failed; degrading this turn to text input",
-                exc_info=True,
+                "STT transcription failed (%s); degrading this turn to text input",
+                type(exc).__name__,
             )
             return None
 
@@ -157,9 +160,9 @@ class VoiceService:
             return None
         try:
             return await self._tts.synthesize(answer)
-        except _VOICE_PROVIDER_ERRORS:
+        except _VOICE_PROVIDER_ERRORS as exc:
             logger.warning(
-                "TTS synthesis failed; returning the text reply without audio",
-                exc_info=True,
+                "TTS synthesis failed (%s); returning the text reply without audio",
+                type(exc).__name__,
             )
             return None

@@ -30,8 +30,16 @@ services:
       MEMO_ENVIRONMENT: production
       # Inside the compose network the database host is the service name.
       MEMO_DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-memo}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-memo}"
-      # Set this to enable admin auth; leave empty to run fail-open (dev only).
+      # Required outside development: the app refuses to start in production
+      # when this is empty. Local development keeps the explicit fail-open mode.
       MEMO_ADMIN_PASSWORD: ${MEMO_ADMIN_PASSWORD:-}
+      # Required: dedicated signing key for public chat-session cookies. It
+      # must be different from MEMO_ADMIN_PASSWORD. Generate a strong value
+      # with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+      MEMO_CHAT_SESSION_SECRET: ${MEMO_CHAT_SESSION_SECRET:?MEMO_CHAT_SESSION_SECRET must be set}
+      # Active rotation key id. To rotate, bump this and add the retired key to
+      # MEMO_CHAT_SESSION_PREVIOUS_KEYS (JSON object of key id -> secret).
+      MEMO_CHAT_SESSION_KEY_ID: ${MEMO_CHAT_SESSION_KEY_ID:-v1}
       # Apply migrations on boot so the stack comes up ready.
       MEMO_AUTO_MIGRATE: "true"
     ports:

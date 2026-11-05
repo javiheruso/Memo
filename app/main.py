@@ -12,6 +12,7 @@ from app.web.chat import router as chat_ui_router
 from app.web.router import auth_router
 from app.web.router import router as admin_ui_router
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Settings already refuses to build outside development without the
@@ -22,6 +23,11 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "MEMO_ADMIN_PASSWORD must be set when MEMO_ENVIRONMENT is not "
                 "'development'"
+            )
+        if not settings.chat_session_secret.strip():
+            raise RuntimeError(
+                "MEMO_CHAT_SESSION_SECRET must be set when MEMO_ENVIRONMENT is "
+                "not 'development'"
             )
     if settings.auto_migrate:
         await asyncio.to_thread(run_migrations)

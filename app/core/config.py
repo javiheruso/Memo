@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +18,15 @@ class Settings(BaseSettings):
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
     admin_password: str = ""
+    # Dedicated signing key for public chat-session cookies. It must never
+    # reuse ``admin_password``. Outside development it is required; local
+    # development falls back to a fixed non-production key.
+    chat_session_secret: str = ""
+    # Identifies the active signing key. ``chat_session_previous_keys`` maps
+    # retired key ids to their secrets so existing chat sessions survive a
+    # rotation until they naturally expire or are dropped by the client.
+    chat_session_key_id: str = "v1"
+    chat_session_previous_keys: dict[str, str] = Field(default_factory=dict)
     auto_migrate: bool = False
     database_url: str = "postgresql+psycopg://memo:memo@localhost:5432/memo"
     test_database_url: str | None = None
@@ -63,6 +72,64 @@ class Settings(BaseSettings):
                 "MEMO_ADMIN_PASSWORD must be set when MEMO_ENVIRONMENT is not "
                 "'development'"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_chat_session_keys(self) -> "Settings":
+        """Keep public chat-session signing independent from the admin secret.
+
+        A non-development process must configure a dedicated secret. The
+        active key id must be usable in the cookie envelope, and retired key
+        ids must be distinct from the active one so a rotation is explicit.
+        """
+        active_secret = self.chat_session_secret.strip()
+        active_key_id = self.chat_session_key_id.strip()
+        previous_keys = {
+            key_id.strip(): secret.strip()
+            for key_id, secret in self.chat_session_previous_keys.items()
+        }
+
+        if self.environment.strip().lower() != "development" and not active_secret:
+            raise ValueError(
+                "MEMO_CHAT_SESSION_SECRET must be set when MEMO_ENVIRONMENT is "
+                "not 'development'"
+            )
+
+        admin_password = self.admin_password.strip()
+        if active_secret and admin_password and active_secret == admin_password:
+            raise ValueError(
+                "MEMO_CHAT_SESSION_SECRET must differ from MEMO_ADMIN_PASSWORD"
+            )
+        if any(
+            secret and admin_password and secret == admin_password
+            for secret in previous_keys.values()
+        ):
+            raise ValueError(
+                "MEMO_CHAT_SESSION_PREVIOUS_KEYS must not reuse MEMO_ADMIN_PASSWORD"
+            )
+
+        if active_secret and not active_key_id:
+            raise ValueError(
+                "MEMO_CHAT_SESSION_KEY_ID must be set when "
+                "MEMO_CHAT_SESSION_SECRET is configured"
+            )
+        if "." in active_key_id:
+            raise ValueError("MEMO_CHAT_SESSION_KEY_ID must not contain '.'")
+        if active_key_id in previous_keys:
+            raise ValueError(
+                "MEMO_CHAT_SESSION_PREVIOUS_KEYS must not include the active "
+                "MEMO_CHAT_SESSION_KEY_ID"
+            )
+        for key_id, secret in previous_keys.items():
+            if not key_id or not secret:
+                raise ValueError(
+                    "MEMO_CHAT_SESSION_PREVIOUS_KEYS entries need a non-empty "
+                    "key id and secret"
+                )
+            if "." in key_id:
+                raise ValueError(
+                    "MEMO_CHAT_SESSION_PREVIOUS_KEYS key ids must not contain '.'"
+                )
         return self
 
     @field_validator("database_url", "test_database_url")

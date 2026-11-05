@@ -364,6 +364,27 @@ Accepted limitations for this slice:
 - The bearer token is the raw password, so it is only as safe as the transport
   and wherever you paste it.
 
+### Public chat-session signing
+
+The public `/chat` and JSON chat surfaces use a separate signed
+`memo_chat_session` cookie to prove that a browser owns a conversation. This
+cookie is signed with `MEMO_CHAT_SESSION_SECRET`, **never** with
+`MEMO_ADMIN_PASSWORD`, so a public endpoint cannot be used to obtain HMACs for
+the admin credential.
+
+- Outside `development`, `MEMO_CHAT_SESSION_SECRET` is required and startup
+  fails when it is empty. Development keeps a fixed local-only fallback when it
+  is unset, and that fallback still does not use the admin password.
+- Generate a strong random value with
+  `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+- The cookie envelope is `<key-id>.<session-uuid>.<hmac>`. New cookies use
+  `MEMO_CHAT_SESSION_KEY_ID` (default `v1`).
+- To rotate, keep the old id and secret in `MEMO_CHAT_SESSION_PREVIOUS_KEYS`
+  (a JSON object, e.g. `{"v1":"the-old-secret"}`) and set a new
+  `MEMO_CHAT_SESSION_KEY_ID` plus `MEMO_CHAT_SESSION_SECRET`. Old cookies are
+  accepted only while their key id is configured as a prior key; unknown,
+  retired or invalid signatures mint a fresh anonymous session.
+
 ## Server-rendered admin UI
 
 Open <http://localhost:8000/admin> to operate the backend workflows without
@@ -879,6 +900,7 @@ Deferred by design (dossier phases) and not required for the MVP:
 ```bash
 POSTGRES_PASSWORD='a-strong-db-password' \
 MEMO_ADMIN_PASSWORD='a-strong-admin-password' \
+MEMO_CHAT_SESSION_SECRET='a-strong-chat-session-secret' \
 docker compose up -d --build
 docker compose run --rm app alembic upgrade head   # apply migrations once
 ```
@@ -886,11 +908,12 @@ docker compose run --rm app alembic upgrade head   # apply migrations once
 Then open <http://localhost:8000> (chat at `/chat`, admin at `/admin`, docs at
 `/docs`).
 
-Compose fails closed when `POSTGRES_PASSWORD` is unset, and the app refuses to
-start in production when `MEMO_ADMIN_PASSWORD` is empty. The PostgreSQL and app
-ports are published on `127.0.0.1` only by default; set `POSTGRES_PORT` or
-`APP_PORT` to change the host port. Expose either service on other interfaces
-only by editing `compose.yaml` deliberately.
+Compose fails closed when `POSTGRES_PASSWORD` or `MEMO_CHAT_SESSION_SECRET` is
+unset, and the app refuses to start in production when `MEMO_ADMIN_PASSWORD` or
+`MEMO_CHAT_SESSION_SECRET` is empty. The PostgreSQL and app ports are published
+on `127.0.0.1` only by default; set `POSTGRES_PORT` or `APP_PORT` to change the
+host port. Expose either service on other interfaces only by editing
+`compose.yaml` deliberately.
 
 The database host inside the compose network is the service name (`postgres`);
 `compose.yaml` sets `MEMO_DATABASE_URL` accordingly. Data persists in the named
@@ -911,6 +934,7 @@ The database host inside the compose network is the service name (`postgres`);
    |----------|-------|
    | `MEMO_ENVIRONMENT` | `production` |
    | `MEMO_ADMIN_PASSWORD` | a strong password |
+   | `MEMO_CHAT_SESSION_SECRET` | a different strong random secret |
    | `MEMO_DATABASE_URL` | `${{pgvector.DATABASE_URL_PRIVATE}}` |
    | `MEMO_AUTO_MIGRATE` | `true` |
 
@@ -929,7 +953,8 @@ The database host inside the compose network is the service name (`postgres`);
 
 ### Minimal deployment checklist
 
-1. Set `MEMO_ENVIRONMENT=production` and a strong `MEMO_ADMIN_PASSWORD`.
+1. Set `MEMO_ENVIRONMENT=production`, a strong `MEMO_ADMIN_PASSWORD`, and a
+   separate `MEMO_CHAT_SESSION_SECRET`.
 2. Put the app behind TLS (HTTPS); session cookies are `Secure`-flagged in
    non-development environments.
 3. Configure the optional providers you want to use — `MEMO_LLM_*`,
@@ -942,9 +967,13 @@ The database host inside the compose network is the service name (`postgres`);
 ### Production safety notes
 
 - Admin auth fails closed outside `development`: production startup requires
-  `MEMO_ADMIN_PASSWORD`, and Compose requires `POSTGRES_PASSWORD` explicitly.
+  `MEMO_ADMIN_PASSWORD` and a separate `MEMO_CHAT_SESSION_SECRET`, and Compose
+  requires `POSTGRES_PASSWORD` explicitly.
 - The admin credential is a single shared password with no per-user audit,
   no CSRF tokens, and no login rate limiting — adequate for a local/single
   operator, not a multi-user public service.
-- Secret values (`MEMO_ADMIN_PASSWORD`, API keys) belong in the environment or
-  a secrets manager, never in the repository.
+- Public chat-session signing uses its own key, so a public endpoint can never
+  produce admin-credential HMACs. Rotate it with
+  `MEMO_CHAT_SESSION_KEY_ID`/`MEMO_CHAT_SESSION_PREVIOUS_KEYS`.
+- Secret values (`MEMO_ADMIN_PASSWORD`, `MEMO_CHAT_SESSION_SECRET`, API keys)
+  belong in the environment or a secrets manager, never in the repository.

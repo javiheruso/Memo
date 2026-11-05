@@ -9,8 +9,9 @@ ingestion and knowledge-gap persistence behave identically here.
 This surface adds no auth, no STT/TTS, no streaming and no frontend toolchain:
 messages render with Jinja2 and forms post back to this router (POST/redirect/
 GET, like the admin UI). Multi-turn continuity is carried by a session cookie
-that holds the ``conversation_id``; the conversation itself lives in the
-database, so clearing the cookie never deletes history.
+that holds the ``conversation_id`` plus a signed owner cookie that proves the
+browser owns that conversation; the conversation itself lives in the database,
+so clearing the cookie never deletes history.
 
 UI copy is Spanish because the deterministic responder and the product
 audience (older Spanish-speaking adults) are Spanish; code stays in English.
@@ -35,8 +36,17 @@ from app.api.deps import (
     ResponderDep,
     get_db,
 )
-from app.repositories.conversation import ConversationRepository
-from app.security import cookie_secure
+from app.repositories.conversation import (
+    ConversationAccessDenied,
+    ConversationRepository,
+)
+from app.security import (
+    CHAT_SESSION_COOKIE_NAME,
+    cookie_secure,
+    read_chat_session_id,
+    resolve_chat_session_id,
+    set_chat_session_cookie,
+)
 from app.services.conversation import ChatResult, ConversationService
 
 logger = logging.getLogger(__name__)
@@ -103,9 +113,17 @@ def _set_conversation_cookie(
 @router.get("", response_class=HTMLResponse)
 async def chat_page(request: Request, db: DbSession) -> HTMLResponse:
     conversation_id = _conversation_id_from_cookie(request)
+    owner_session_id = read_chat_session_id(
+        request.cookies.get(CHAT_SESSION_COOKIE_NAME)
+    )
     messages = []
-    if conversation_id is not None:
-        messages = await ConversationRepository(db).list_messages(conversation_id)
+    if conversation_id is not None and owner_session_id is not None:
+        repository = ConversationRepository(db)
+        conversation = await repository.get_owned(
+            conversation_id, str(owner_session_id)
+        )
+        if conversation is not None:
+            messages = await repository.list_messages(conversation.id)
     return templates.TemplateResponse(
         request,
         "chat.html",
@@ -132,6 +150,7 @@ async def chat_send(
     if not text:
         return _back(error="Escribe un mensaje antes de enviar.")
 
+    owner_session_id = resolve_chat_session_id(request)
     conversation_id = _conversation_id_from_cookie(request)
     service = ConversationService(
         db,
@@ -143,14 +162,46 @@ async def chat_send(
     )
     try:
         result = await service.handle_user_message(
-            text=text, conversation_id=conversation_id
+            text=text,
+            conversation_id=conversation_id,
+            owner_session_id=str(owner_session_id),
         )
-    except Exception:
+    except ConversationAccessDenied:
+        # A forged or foreign conversation cookie must not grant access. Keep
+        # the turn usable by starting a fresh conversation owned by this
+        # session instead of exposing the other conversation's history.
+        logger.warning(
+            "chat conversation access denied; starting a new conversation "
+            "(conversation_id=%s)",
+            conversation_id,
+        )
+        try:
+            result = await service.handle_user_message(
+                text=text,
+                conversation_id=None,
+                owner_session_id=str(owner_session_id),
+            )
+        except Exception as exc:
+            await db.rollback()
+            logger.error(
+                "chat turn failed (%s, conversation_id=%s)",
+                type(exc).__name__,
+                conversation_id,
+            )
+            return _back(
+                error="Algo ha ido mal al guardar el mensaje. Inténtalo de nuevo."
+            )
+    except Exception as exc:
         await db.rollback()
-        logger.exception("chat turn failed for user message %r", text[:200])
+        logger.error(
+            "chat turn failed (%s, conversation_id=%s)",
+            type(exc).__name__,
+            conversation_id,
+        )
         return _back(error="Algo ha ido mal al guardar el mensaje. Inténtalo de nuevo.")
 
     response = _back(notice=_notice_for(result))
+    set_chat_session_cookie(response, owner_session_id)
     _set_conversation_cookie(response, result.conversation_id)
     return response
 
