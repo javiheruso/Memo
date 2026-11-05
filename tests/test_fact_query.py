@@ -9,15 +9,17 @@ are withheld and an explicit sensitive question keeps the careful redirect.
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import Intent
+from app.domain.enums import FactStatus, Intent
 from app.embeddings.deterministic import DeterministicEmbedder
 from app.importers.onboarding_demo import OnboardingDemoImporter
 from app.llm.base import Responder, Response
 from app.llm.deterministic import DeterministicResponder
 from app.models import Fact
 from app.policies.sensitive_topics import SPONTANEOUS_SUPPRESSION_REPLY
+from app.repositories.fact import FactRepository
 from app.retrieval.context_builder import AnswerContext
 from app.retrieval.fact_topics import FactTopic, fact_matches_topic
+from app.schemas.fact import FactCreate
 from app.services.conversation import ConversationService
 
 PREFERENCE_DOCUMENT = {
@@ -477,3 +479,41 @@ async def test_follow_up_with_event_marker_stays_a_fact_query(
 
     assert follow.intent == Intent.fact_query
     assert "Santa Pola" in follow.answer
+
+
+async def test_pending_and_rejected_facts_never_reach_the_answer(
+    db_session: AsyncSession, seed
+) -> None:
+    fact_repo = FactRepository(db_session)
+    pending = await fact_repo.create(
+        FactCreate(
+            subject_person_id=seed.person_ids["antonio"],
+            fact_type="hobby",
+            value_text="Pending sailing",
+            status=FactStatus.pending,
+            source_id=seed.source_ids["shared_by_carmen"],
+        )
+    )
+    rejected = await fact_repo.create(
+        FactCreate(
+            subject_person_id=seed.person_ids["antonio"],
+            fact_type="hobby",
+            value_text="Rejected sailing",
+            status=FactStatus.rejected,
+            source_id=seed.source_ids["shared_by_carmen"],
+        )
+    )
+
+    result = await _service(db_session).handle_user_message(
+        "¿Qué aficiones tiene Antonio?"
+    )
+
+    assert result.intent == Intent.fact_query
+    assert "Fishing" in result.answer
+    assert "Pending sailing" not in result.answer
+    assert "Rejected sailing" not in result.answer
+    fact_ids = {
+        source.entity_id for source in result.sources if source.entity_type == "fact"
+    }
+    assert pending.id not in fact_ids
+    assert rejected.id not in fact_ids

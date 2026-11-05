@@ -23,6 +23,10 @@ from app.domain.enums import (
     SourceType,
 )
 from app.llm.base import Responder, Response
+from app.policies.trust import (
+    is_answerable_fact_status,
+    is_answerable_relationship_status,
+)
 from app.repositories.conversation import ResponseSourceRef
 from app.retrieval.context_builder import AnswerContext
 from app.retrieval.entity_resolver import ResolutionKind
@@ -139,9 +143,20 @@ class DeterministicResponder(Responder):
 
         display = context.person.display_name
 
-        if context.verified_relations:
+        verified_relations = [
+            item
+            for item in context.verified_relations
+            if is_answerable_relationship_status(item.status)
+        ]
+        probable_relations = [
+            item
+            for item in context.probable_relations
+            if is_answerable_relationship_status(item.status)
+        ]
+
+        if verified_relations:
             hints = ", ".join(
-                self._relation_phrase(item) for item in context.verified_relations
+                self._relation_phrase(item) for item in verified_relations
             )
             return Response(
                 text=f"{display} {hints}.",
@@ -151,15 +166,15 @@ class DeterministicResponder(Responder):
                         ResponseSourceRef(
                             "relationship", item.entity_id, item.epistemic.value
                         )
-                        for item in context.verified_relations
+                        for item in verified_relations
                     ],
                 ],
             )
 
-        if context.probable_relations:
+        if probable_relations:
             hints = " ".join(
                 self._probable_relation_phrase(item)
-                for item in context.probable_relations
+                for item in probable_relations
             )
             return Response(
                 text=f"No tengo claro exactamente quién era {display}. {hints}",
@@ -169,7 +184,7 @@ class DeterministicResponder(Responder):
                         ResponseSourceRef(
                             "relationship", item.entity_id, item.epistemic.value
                         )
-                        for item in context.probable_relations
+                        for item in probable_relations
                     ],
                 ],
             )
@@ -177,12 +192,14 @@ class DeterministicResponder(Responder):
         verified_facts = [
             item
             for item in context.facts
-            if item.epistemic == EpistemicKind.verified_fact
+            if is_answerable_fact_status(item.status)
+            and item.epistemic == EpistemicKind.verified_fact
         ]
         probable_facts = [
             item
             for item in context.facts
-            if item.epistemic == EpistemicKind.probable_fact
+            if is_answerable_fact_status(item.status)
+            and item.epistemic == EpistemicKind.probable_fact
         ]
         if verified_facts or probable_facts:
             return self._facts_response(
@@ -240,24 +257,25 @@ class DeterministicResponder(Responder):
             return Response(text=_FACT_ASK_WHOSE)
 
         display = context.person.display_name
-        if not context.facts:
+        verified_facts = [
+            item
+            for item in context.facts
+            if is_answerable_fact_status(item.status)
+            and item.epistemic == EpistemicKind.verified_fact
+        ]
+        probable_facts = [
+            item
+            for item in context.facts
+            if is_answerable_fact_status(item.status)
+            and item.epistemic == EpistemicKind.probable_fact
+        ]
+        if not verified_facts and not probable_facts:
             return Response(
                 text=f"No tengo guardado ningún dato sobre eso de {display}.",
                 sources=[
                     ResponseSourceRef("person", context.person.id, "subject")
                 ],
             )
-
-        verified_facts = [
-            item
-            for item in context.facts
-            if item.epistemic == EpistemicKind.verified_fact
-        ]
-        probable_facts = [
-            item
-            for item in context.facts
-            if item.epistemic == EpistemicKind.probable_fact
-        ]
 
         segments: list[str] = []
         if verified_facts:

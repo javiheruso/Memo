@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from app.domain.enums import (
     EpistemicKind,
     EventStatus,
+    FactStatus,
     Intent,
     MemoryStatus,
     RelationshipStatus,
@@ -15,6 +16,8 @@ from app.policies.trust import (
     epistemic_kind_for_fact,
     epistemic_kind_for_relationship,
     filter_sensitive_memories,
+    is_answerable_fact_status,
+    is_answerable_relationship_status,
 )
 from app.retrieval.entity_resolver import PersonCandidate, Resolution, ResolutionKind
 from app.retrieval.semantic_retriever import SemanticSearchResult
@@ -140,19 +143,41 @@ class ContextBuilder:
         resolution: Resolution,
         intent: Intent = Intent.person_query,
     ) -> AnswerContext:
+        answerable_relationships = [
+            relationship
+            for relationship in data.relationships
+            if is_answerable_relationship_status(relationship.status)
+        ]
+        withheld_relationships = [
+            relationship
+            for relationship in data.relationships
+            if not is_answerable_relationship_status(relationship.status)
+        ]
         verified_relations: list[RelationshipItem] = []
         probable_relations: list[RelationshipItem] = []
-        for relationship in data.relationships:
+        for relationship in answerable_relationships:
             item = self._relationship_item(relationship, data.person.id)
             if item.epistemic == EpistemicKind.verified_fact:
                 verified_relations.append(item)
             else:
                 probable_relations.append(item)
 
-        facts = [self._fact_item(fact) for fact in data.facts]
+        answerable_facts = [
+            fact for fact in data.facts if is_answerable_fact_status(fact.status)
+        ]
+        withheld_facts = [
+            fact for fact in data.facts if not is_answerable_fact_status(fact.status)
+        ]
+        facts = [self._fact_item(fact) for fact in answerable_facts]
 
         safe_memories, filtered_memories = filter_sensitive_memories(data.memories)
         policies: list[str] = []
+        policies.extend(
+            self._withheld_status_policies(
+                facts=withheld_facts,
+                relationships=withheld_relationships,
+            )
+        )
         if filtered_memories:
             policies.append(
                 "sensitive_content_filtered: "
@@ -233,6 +258,46 @@ class ContextBuilder:
             memories=memories,
             policies=policies,
         )
+
+    @staticmethod
+    def _withheld_status_policies(
+        *,
+        facts: list[Fact],
+        relationships: list[Relationship],
+    ) -> list[str]:
+        """Name every withheld row so pending is never silently re-labelled."""
+        policies: list[str] = []
+        pending_facts = sum(fact.status == FactStatus.pending for fact in facts)
+        rejected_facts = sum(fact.status == FactStatus.rejected for fact in facts)
+        pending_relationships = sum(
+            relationship.status == RelationshipStatus.pending
+            for relationship in relationships
+        )
+        rejected_relationships = sum(
+            relationship.status == RelationshipStatus.rejected
+            for relationship in relationships
+        )
+        if pending_facts:
+            policies.append(
+                "pending_facts_withheld: "
+                f"{pending_facts} pending facts excluded until verified"
+            )
+        if rejected_facts:
+            policies.append(
+                "rejected_facts_excluded: "
+                f"{rejected_facts} rejected facts excluded from answers"
+            )
+        if pending_relationships:
+            policies.append(
+                "pending_relationships_withheld: "
+                f"{pending_relationships} pending relationships excluded until verified"
+            )
+        if rejected_relationships:
+            policies.append(
+                "rejected_relationships_excluded: "
+                f"{rejected_relationships} rejected relationships excluded from answers"
+            )
+        return policies
 
     @staticmethod
     def _relationship_item(

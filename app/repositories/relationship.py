@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
+from app.domain.enums import RelationshipStatus
 from app.models import Relationship
 from app.repositories.base import SQLRepository
 from app.schemas.relationship import RelationshipCreate
@@ -36,13 +37,19 @@ class RelationshipRepository(SQLRepository[Relationship]):
         )
 
     async def for_person(self, person_id: uuid.UUID) -> list[Relationship]:
+        """Relationships for one person that may still reach an answer.
+
+        Rejected relationships are excluded at the query boundary. Pending
+        relationships remain for the context layer to withhold explicitly.
+        """
         stmt = (
             select(Relationship)
             .where(
                 or_(
                     Relationship.person_a_id == person_id,
                     Relationship.person_b_id == person_id,
-                )
+                ),
+                Relationship.status != RelationshipStatus.rejected,
             )
             .options(
                 selectinload(Relationship.person_a),
