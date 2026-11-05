@@ -112,6 +112,44 @@ async def test_semantic_retrieval_uses_pgvector_on_postgres(
 
 
 @_NEEDS_POSTGRES
+async def test_pgvector_filters_sensitivity_before_the_limit(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    """The pgvector query must exclude protected rows before LIMIT."""
+    embedder = DeterministicEmbedder()
+    query = "lighthouse keeper secret diaries"
+    protected = Memory(
+        title="Protected lighthouse keeper secret diaries",
+        narrative="lighthouse keeper secret diaries",
+        memory_status=MemoryStatus.consolidated,
+        sensitivity_level=SensitivityLevel.high,
+        source_id=seed.source_ids["family_records"],
+        embedding=await embedder.embed(query),
+    )
+    allowed = Memory(
+        title="Lighthouse keeper",
+        narrative="A quiet keeper memory.",
+        memory_status=MemoryStatus.consolidated,
+        sensitivity_level=SensitivityLevel.low,
+        source_id=seed.source_ids["shared_by_carmen"],
+        embedding=await embedder.embed("lighthouse keeper"),
+    )
+    db_session.add_all([protected, allowed])
+    await db_session.commit()
+
+    retriever = SemanticRetriever(
+        embedder=embedder, memory_repo=MemoryRepository(db_session)
+    )
+    result = await retriever.search(query, limit=1)
+
+    assert [hit.memory.id for hit in result.hits] == [allowed.id]
+    assert all(
+        hit.memory.sensitivity_level == SensitivityLevel.low
+        for hit in result.hits
+    )
+
+
+@_NEEDS_POSTGRES
 async def test_repo_persists_lists_and_batches_embeddings_on_postgres(
     db_session: AsyncSession, seed: SeedUniverse
 ) -> None:

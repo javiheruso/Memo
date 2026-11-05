@@ -606,8 +606,10 @@ full user text and ranks memories by similarity:
   `embedding` is `NULL` on the fly from their title and narrative, so no
   vector-capable database is needed to run the suite.
 
-Trust stays strict on this path: hits above the sensitivity ceiling are
-excluded in code before they reach the context, every hit is tagged with the
+Trust stays strict on this path: the sensitivity filter is applied *before*
+the requested limit on both engines (a SQL predicate on pgvector, a filter over
+the full ranked list on the SQLite fallback), so protected memories can never
+consume the result slots or reach the context. Every hit is tagged with the
 `memory` epistemic kind (never a fact), and a query with no meaningful match
 gets an honest "I don't have that memory stored" answer with no sources and no
 invention.

@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import bindparam, select, update
 from sqlalchemy.orm import selectinload
 
+from app.domain.enums import SensitivityLevel
 from app.models import Memory, MemoryPerson
 from app.repositories.base import SQLRepository
 from app.schemas.memory import MemoryCreate
@@ -25,7 +26,11 @@ class MemoryRepository(SQLRepository[Memory]):
         return self._session.get_bind().dialect.name == "postgresql"
 
     async def similarity_search(
-        self, query_vector: list[float], *, limit: int = 5
+        self,
+        query_vector: list[float],
+        *,
+        limit: int = 5,
+        sensitivity_levels: tuple[SensitivityLevel, ...] | None = None,
     ) -> list[tuple[Memory, float]]:
         """Nearest-neighbor memories on PostgreSQL via pgvector.
 
@@ -33,6 +38,9 @@ class MemoryRepository(SQLRepository[Memory]):
         similarity. ``similarity`` is derived from the L2 distance so higher
         is better, matching the cosine scoring used by the SQLite fallback.
         Memories without a stored embedding are never matched.
+
+        When ``sensitivity_levels`` is provided, the sensitivity filter is part
+        of the query so protected rows can never consume the final ``limit``.
         """
         if not self.supports_vector_search:
             raise UnsupportedVectorSearch(
@@ -43,9 +51,10 @@ class MemoryRepository(SQLRepository[Memory]):
             select(Memory, distance_expr.label("distance"))
             .where(Memory.embedding.is_not(None))
             .options(*self.load_options)
-            .order_by(distance_expr)
-            .limit(limit)
         )
+        if sensitivity_levels is not None:
+            stmt = stmt.where(Memory.sensitivity_level.in_(sensitivity_levels))
+        stmt = stmt.order_by(distance_expr).limit(limit)
         rows = (await self._session.execute(stmt)).all()
         return [
             (memory, 1.0 / (1.0 + float(distance))) for memory, distance in rows

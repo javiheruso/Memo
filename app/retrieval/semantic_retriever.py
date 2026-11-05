@@ -18,7 +18,10 @@ from app.domain.enums import SensitivityLevel
 from app.embeddings.base import Embedder, cosine_similarity
 from app.embeddings.memory_text import memory_search_text
 from app.models import Memory
-from app.policies.trust import filter_sensitive_memories
+from app.policies.trust import (
+    filter_sensitive_memories,
+    sensitivity_levels_at_or_below,
+)
 from app.repositories.memory import MemoryRepository
 
 _FALLBACK_CORPUS_LIMIT = 1000
@@ -54,32 +57,54 @@ class SemanticRetriever:
     ) -> SemanticSearchResult:
         query_vector = await self._embedder.embed(query)
         if self._memory_repo.supports_vector_search:
+            # The SQL path filters sensitivity in the query itself, before the
+            # neighbour limit, so protected rows never consume safe slots.
             scored = await self._memory_repo.similarity_search(
-                query_vector, limit=limit
+                query_vector,
+                limit=limit,
+                sensitivity_levels=sensitivity_levels_at_or_below(max_level),
             )
-        else:
-            scored = await self._fallback(query_vector, limit=limit)
+            safe, filtered = filter_sensitive_memories(
+                [memory for memory, _ in scored], max_level
+            )
+            safe_ids = {memory.id for memory in safe}
+            hits = [
+                SemanticHit(memory=memory, score=score)
+                for memory, score in scored
+                if memory.id in safe_ids
+            ][:limit]
+            return SemanticSearchResult(
+                hits=hits, filtered_count=len(filtered)
+            )
 
-        safe, filtered = filter_sensitive_memories(
-            [memory for memory, _ in scored], max_level
+        scored, filtered = await self._fallback(
+            query_vector, limit=limit, max_level=max_level
         )
-        safe_ids = {memory.id for memory in safe}
-        hits = [
-            SemanticHit(memory=memory, score=score)
-            for memory, score in scored
-            if memory.id in safe_ids
-        ]
-        return SemanticSearchResult(hits=hits, filtered_count=len(filtered))
+        return SemanticSearchResult(
+            hits=[
+                SemanticHit(memory=memory, score=score)
+                for memory, score in scored
+            ],
+            filtered_count=len(filtered),
+        )
 
     async def _fallback(
-        self, query_vector: list[float], *, limit: int
-    ) -> list[tuple[Memory, float]]:
+        self,
+        query_vector: list[float],
+        *,
+        limit: int,
+        max_level: SensitivityLevel,
+    ) -> tuple[list[tuple[Memory, float]], list[Memory]]:
         """Score memories in Python when pgvector is not available (SQLite).
 
         Memories with a stored embedding use it; memories created through the
         repository (``embedding`` is ``NULL``) are embedded on the fly from
         their title and narrative, so the default test path never needs a
         vector-capable database.
+
+        The sensitivity filter runs over the full ranked list *before*
+        ``[:limit]``, so high-sensitivity memories cannot crowd out allowed
+        ones. The filtered rows are still returned for policy reporting.
         """
         candidates = await self._memory_repo.list(limit=_FALLBACK_CORPUS_LIMIT)
         scored: list[tuple[Memory, float]] = []
@@ -95,4 +120,15 @@ class SemanticRetriever:
             if score > 0.0:
                 scored.append((memory, score))
         scored.sort(key=lambda pair: pair[1], reverse=True)
-        return scored[:limit]
+        safe, filtered = filter_sensitive_memories(
+            [memory for memory, _ in scored], max_level
+        )
+        safe_ids = {memory.id for memory in safe}
+        return (
+            [
+                (memory, score)
+                for memory, score in scored
+                if memory.id in safe_ids
+            ][:limit],
+            filtered,
+        )
