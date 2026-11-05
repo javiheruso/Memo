@@ -73,6 +73,21 @@ def epistemic_kind_for_relationship(status: RelationshipStatus) -> EpistemicKind
     )
 
 
+def sensitivity_levels_at_or_below(
+    max_level: SensitivityLevel = SensitivityLevel.low,
+) -> tuple[SensitivityLevel, ...]:
+    """Return the levels allowed by ``max_level``, for query-side filtering.
+
+    Retrieval must filter sensitivity *before* applying its final limit;
+    otherwise protected rows consume slots and the caller receives fewer
+    allowed memories than requested. SQL engines can use this tuple directly.
+    """
+    threshold = _SENSITIVITY_RANK[max_level]
+    return tuple(
+        level for level, rank in _SENSITIVITY_RANK.items() if rank <= threshold
+    )
+
+
 def filter_sensitive_memories(
     memories: list[Memory],
     max_level: SensitivityLevel = SensitivityLevel.low,
