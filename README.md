@@ -480,8 +480,12 @@ deployment), and the whole surface speaks to whatever person is at the device
    configured sensitive topics withheld unless explicitly raised);
 5. a replaceable responder — today a deterministic Spanish text responder,
    selected through the `MEMO_RESPONDER` setting;
-6. persistence of the conversation, messages, `response_sources`, and a
-   `knowledge_gap` when the person is unknown.
+6. one atomic persistence unit for the turn: the user message, assistant reply,
+   `response_sources`, and a `knowledge_gap` when the person is unknown commit
+   together, so an intermediate failure never leaves a misleading stored user
+   message without its reply (or a reply without its sources). Conversational
+   claim ingestion runs after that commit as an intentionally independent,
+   fail-safe effect.
 
 `event_query` resolves the person from phrasings like "¿Viene María hoy?" or
 "¿Qué eventos tiene Antonio?" and renders upcoming events phrased by their own
