@@ -118,10 +118,10 @@ class ClaimIngestionService:
                 if group_needs_review:
                     group.needs_review = True
             await self._session.commit()
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "claim contradiction detection failed for %d group(s); "
+                "claim contradiction detection failed for %d group(s) (%s); "
                 "claims and groups were already persisted",
                 len(groups),
-                exc_info=True,
+                type(exc).__name__,
             )

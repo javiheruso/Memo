@@ -2,7 +2,16 @@ import base64
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -15,6 +24,7 @@ from app.api.deps import (
     TtsDep,
     get_db,
 )
+from app.repositories.conversation import ConversationAccessDenied
 from app.schemas.chat import (
     AmbiguityInfo,
     CandidateRef,
@@ -22,6 +32,7 @@ from app.schemas.chat import (
     SourceRef,
 )
 from app.schemas.voice import VoiceResponse
+from app.security import resolve_chat_session_id, set_chat_session_cookie
 from app.voice.service import VoiceInputError, VoiceService
 
 router = APIRouter(tags=["voice"])
@@ -35,6 +46,8 @@ _AUDIO_CONTENT_TYPE = "audio/mpeg"
 
 @router.post("/chat/voice", response_model=VoiceResponse)
 async def chat_voice(
+    request: Request,
+    response: Response,
     db: DbSession,
     responder: ResponderDep,
     embedder: EmbedderDep,
@@ -53,6 +66,7 @@ async def chat_voice(
         audio_bytes = await audio.read()
         audio_content_type = audio.content_type
 
+    owner_session_id = resolve_chat_session_id(request)
     service = VoiceService(
         db,
         responder,
@@ -69,9 +83,14 @@ async def chat_voice(
             audio=audio_bytes,
             audio_content_type=audio_content_type,
             conversation_id=conversation_id,
+            owner_session_id=str(owner_session_id),
         )
+    except ConversationAccessDenied as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
     except VoiceInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    set_chat_session_cookie(response, owner_session_id)
 
     ambiguity = None
     if result.ambiguity is not None:

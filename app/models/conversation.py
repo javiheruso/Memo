@@ -17,6 +17,7 @@ class Conversation(Base):
     initiated_by: Mapped[str] = mapped_column(String(50))
     initiation_reason: Mapped[str | None] = mapped_column(String(500))
     device_id: Mapped[str | None] = mapped_column(String(255))
+    owner_session_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), server_default=func.now()
     )

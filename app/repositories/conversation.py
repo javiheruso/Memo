@@ -17,6 +17,10 @@ class ResponseSourceRef:
     usage_type: str | None = None
 
 
+class ConversationAccessDenied(Exception):
+    """Raised when a caller tries to use a conversation it does not own."""
+
+
 class ConversationRepository(SQLRepository[Conversation]):
     model = Conversation
 
@@ -24,20 +28,40 @@ class ConversationRepository(SQLRepository[Conversation]):
         self,
         conversation_id: uuid.UUID | None,
         *,
+        owner_session_id: str | None = None,
         commit: bool = True,
     ) -> Conversation:
         if conversation_id is not None:
             existing = await self.get(conversation_id)
             if existing is not None:
+                if (
+                    owner_session_id is not None
+                    and existing.owner_session_id != owner_session_id
+                ):
+                    raise ConversationAccessDenied
                 return existing
+            if owner_session_id is not None:
+                raise ConversationAccessDenied
         return await self._create(
             lambda: Conversation(
                 started_at=datetime.now(UTC),
                 initiated_by="user",
                 initiation_reason=None,
+                owner_session_id=owner_session_id,
             ),
             commit=commit,
         )
+
+    async def get_owned(
+        self, conversation_id: uuid.UUID, owner_session_id: str
+    ) -> Conversation | None:
+        conversation = await self.get(conversation_id)
+        if (
+            conversation is None
+            or conversation.owner_session_id != owner_session_id
+        ):
+            return None
+        return conversation
 
     async def add_message(
         self,

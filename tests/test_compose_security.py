@@ -35,3 +35,8 @@ def test_compose_app_uses_the_required_database_password() -> None:
     )
     assert "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}" in database_url_line
     assert "${POSTGRES_PASSWORD:-memo}" not in database_url_line
+
+
+def test_compose_requires_chat_session_secret() -> None:
+    text = _compose_text()
+    assert "${MEMO_CHAT_SESSION_SECRET:?MEMO_CHAT_SESSION_SECRET must be set}" in text

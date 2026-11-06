@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -11,6 +11,7 @@ from app.api.deps import (
     ResponderDep,
     get_db,
 )
+from app.repositories.conversation import ConversationAccessDenied
 from app.schemas.chat import (
     AmbiguityInfo,
     CandidateRef,
@@ -19,6 +20,7 @@ from app.schemas.chat import (
     GapRef,
     SourceRef,
 )
+from app.security import resolve_chat_session_id, set_chat_session_cookie
 from app.services.conversation import ConversationService
 
 router = APIRouter(tags=["chat"])
@@ -28,6 +30,8 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
+    request: Request,
+    response: Response,
     db: DbSession,
     responder: ResponderDep,
     embedder: EmbedderDep,
@@ -36,16 +40,24 @@ async def chat(
     claim_contradiction_detector: ClaimContradictionDetectorDep,
     payload: ChatRequest,
 ) -> ChatResponse:
-    result = await ConversationService(
-        db,
-        responder,
-        embedder=embedder,
-        claim_extractor=claim_extractor,
-        claim_grouper=claim_grouper,
-        claim_contradiction_detector=claim_contradiction_detector,
-    ).handle_user_message(
-        text=payload.message, conversation_id=payload.conversation_id
-    )
+    owner_session_id = resolve_chat_session_id(request)
+    try:
+        result = await ConversationService(
+            db,
+            responder,
+            embedder=embedder,
+            claim_extractor=claim_extractor,
+            claim_grouper=claim_grouper,
+            claim_contradiction_detector=claim_contradiction_detector,
+        ).handle_user_message(
+            text=payload.message,
+            conversation_id=payload.conversation_id,
+            owner_session_id=str(owner_session_id),
+        )
+    except ConversationAccessDenied as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
+
+    set_chat_session_cookie(response, owner_session_id)
 
     ambiguity = None
     if result.ambiguity is not None:

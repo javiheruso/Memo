@@ -100,6 +100,7 @@ class ConversationService:
         claim_grouper: ClaimGrouper | None = None,
         claim_contradiction_detector: ContradictionDetector | None = None,
     ) -> None:
+        self._session = session
         self._router = IntentRouter()
         self._people = PersonRepository(session)
         self._resolver = EntityResolver(self._people)
@@ -154,6 +155,8 @@ class ConversationService:
         self,
         text: str,
         conversation_id: uuid.UUID | None = None,
+        *,
+        owner_session_id: str | None = None,
     ) -> ChatResult:
         route = self._router.route(text)
         profile = await self._profiles.get_active()
@@ -166,6 +169,7 @@ class ConversationService:
         async with self._turn_transaction():
             conversation = await self._conversations.get_or_create(
                 conversation_id,
+                owner_session_id=owner_session_id,
                 commit=False,
             )
 
@@ -388,10 +392,18 @@ class ConversationService:
                     conversation_id=conversation_id,
                     message_id=message_id,
                 )
-        except Exception:
+        except Exception as exc:
+            # Keep the session usable for later work even when the independent
+            # claim unit fails; rows committed before the failure stay durable.
+            try:
+                await self._session.rollback()
+            except Exception:
+                logger.exception(
+                    "claim ingestion rollback failed after message %s", message_id
+                )
             logger.warning(
                 "claim ingestion (extraction/persistence/grouping) failed for "
-                "message %s; skipping ingestion",
+                "message %s (%s); skipping ingestion",
                 message_id,
-                exc_info=True,
+                type(exc).__name__,
             )
