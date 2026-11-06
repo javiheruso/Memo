@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,6 +46,24 @@ class Settings(BaseSettings):
     tts_voice: str = "alloy"
     tts_timeout_seconds: float = 30.0
     cors_origins: list[str] = ["http://localhost:3000"]
+
+    @model_validator(mode="after")
+    def _require_admin_password_outside_development(self) -> "Settings":
+        """Fail closed when a non-development process has no admin password.
+
+        Local development keeps the explicit fail-open behaviour documented in
+        the README and the default test suite. Any other environment is treated
+        as deployable, so the admin UI/API cannot silently start unauthenticated.
+        """
+        if (
+            self.environment.strip().lower() != "development"
+            and not self.admin_password.strip()
+        ):
+            raise ValueError(
+                "MEMO_ADMIN_PASSWORD must be set when MEMO_ENVIRONMENT is not "
+                "'development'"
+            )
+        return self
 
     @field_validator("database_url", "test_database_url")
     @classmethod
