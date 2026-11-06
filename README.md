@@ -887,8 +887,10 @@ Then open <http://localhost:8000> (chat at `/chat`, admin at `/admin`, docs at
 `/docs`).
 
 Compose fails closed when `POSTGRES_PASSWORD` is unset, and the app refuses to
-start in production when `MEMO_ADMIN_PASSWORD` is empty. The PostgreSQL port is
-published on loopback only by default.
+start in production when `MEMO_ADMIN_PASSWORD` is empty. The PostgreSQL and app
+ports are published on `127.0.0.1` only by default; set `POSTGRES_PORT` or
+`APP_PORT` to change the host port. Expose either service on other interfaces
+only by editing `compose.yaml` deliberately.
 
 The database host inside the compose network is the service name (`postgres`);
 `compose.yaml` sets `MEMO_DATABASE_URL` accordingly. Data persists in the named

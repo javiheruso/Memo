@@ -21,6 +21,13 @@ def test_compose_publishes_postgres_on_loopback_only() -> None:
     assert '"${POSTGRES_PORT:-5432}:5432"' not in text
 
 
+def test_compose_publishes_app_on_loopback_only() -> None:
+    text = _compose_text()
+    assert '"127.0.0.1:${APP_PORT:-8000}:8000"' in text
+    assert '"${APP_PORT:-8000}:8000"' not in text
+    assert "${APP_PORT:-8000}" in text
+
+
 def test_compose_app_uses_the_required_database_password() -> None:
     text = _compose_text()
     database_url_line = next(

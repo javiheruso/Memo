@@ -35,7 +35,8 @@ services:
       # Apply migrations on boot so the stack comes up ready.
       MEMO_AUTO_MIGRATE: "true"
     ports:
-      - "${APP_PORT:-8000}:8000"
+      # Bind to loopback only by default; expose explicitly for remote access.
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
