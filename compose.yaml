@@ -50,5 +50,23 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  caddy:
+    image: caddy:2-alpine
+    container_name: memo-caddy
+    depends_on:
+      - app
+    ports:
+      # Local HTTPS only: loopback host port, Caddy's internal port stays 8443.
+      - "127.0.0.1:${CADDY_HTTPS_PORT:-8443}:8443"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Persist the internal CA and issued certificates across recreated
+      # containers so browsers keep trusting the same local root certificate.
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:

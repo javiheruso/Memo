@@ -94,10 +94,13 @@ Quick path:
 | `make db-down` | Stop the container; the data volume is kept |
 | `make db-logs` | Tail the postgres container logs |
 | `make db-shell` | Open a `psql` shell against `memo` |
-| `make db-reset` | DESTRUCTIVE — drops the data volume (`memo` + `memo_test`) and restarts fresh |
+| `make db-reset` | DESTRUCTIVE — drops all compose volumes (`memo` + `memo_test` and the Caddy local CA) and restarts postgres fresh |
 | `make migrate` | Run `alembic upgrade head` against `memo` |
 | `make test` | Default suite on in-memory SQLite (no database required) |
 | `make test-postgres` | Full suite including the `postgres` smoke tests against `memo_test` |
+
+`make db-reset` also clears Caddy's named volumes, including its local CA, so
+re-export and re-import the root certificate after a reset.
 
 The compose service uses the image `pgvector/pgvector:pg16`. `make db-up`
 supplies a local-only default password (`memo`) and binds PostgreSQL to
@@ -905,19 +908,62 @@ docker compose up -d --build
 docker compose run --rm app alembic upgrade head   # apply migrations once
 ```
 
-Then open <http://localhost:8000> (chat at `/chat`, admin at `/admin`, docs at
-`/docs`).
+The stack includes a Caddy reverse proxy that terminates local HTTPS on
+<https://memo.localhost:8443> (chat at `/chat`, admin at `/admin`, docs at
+`/docs`). The app also stays reachable directly on <http://localhost:8000> for
+local debugging; both ports are published on `127.0.0.1` only.
 
 Compose fails closed when `POSTGRES_PASSWORD` or `MEMO_CHAT_SESSION_SECRET` is
 unset, and the app refuses to start in production when `MEMO_ADMIN_PASSWORD` or
-`MEMO_CHAT_SESSION_SECRET` is empty. The PostgreSQL and app ports are published
-on `127.0.0.1` only by default; set `POSTGRES_PORT` or `APP_PORT` to change the
-host port. Expose either service on other interfaces only by editing
-`compose.yaml` deliberately.
+`MEMO_CHAT_SESSION_SECRET` is empty. The PostgreSQL, app, and Caddy ports are
+published on `127.0.0.1` only by default; set `POSTGRES_PORT`, `APP_PORT`, or
+`CADDY_HTTPS_PORT` to change the host port. Expose any service on other
+interfaces only by editing `compose.yaml` deliberately.
 
 The database host inside the compose network is the service name (`postgres`);
 `compose.yaml` sets `MEMO_DATABASE_URL` accordingly. Data persists in the named
 `postgres_data` volume.
+
+#### Local HTTPS with Caddy
+
+Caddy listens on container port `8443` and proxies to `app:8000`. Because the
+site name is under `.localhost`, Caddy uses its internal CA (`tls internal`) and
+never contacts a public ACME server. `memo.localhost` resolves to loopback per
+RFC 6761, so no hosts-file entry is needed. The host port defaults to `8443` and
+can be changed with `CADDY_HTTPS_PORT`; the container port stays `8443`.
+
+Caddy's CA, certificate, and config data persist in the `caddy_data` and
+`caddy_config` named volumes, so recreating the container keeps the same local
+root certificate. Export the root certificate and trust it before opening the
+HTTPS URL:
+
+```bash
+docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt /tmp/memo-caddy-root.crt
+```
+
+- **Linux host:** trust it system-wide with
+  `sudo cp /tmp/memo-caddy-root.crt /usr/local/share/ca-certificates/memo-caddy-local.crt && sudo update-ca-certificates`,
+  or pass `--cacert /tmp/memo-caddy-root.crt` to `curl`.
+- **Windows or WSL:** copy the certificate to a Windows path, for example
+  `docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt /mnt/c/Users/<you>/Downloads/memo-caddy-root.crt`,
+  then import it into the current-user root store from PowerShell:
+
+  ```powershell
+  certutil -addstore -user Root "$env:USERPROFILE\Downloads\memo-caddy-root.crt"
+  ```
+
+  This does not require administrator rights and affects only your user
+  account. Restart the browser after importing. Remove the certificate from
+  `certmgr.msc` when you no longer need the local stack. Firefox keeps its own
+  trust store; if it still warns, import the same file under Settings →
+  Privacy & Security → Certificates, or use Chrome/Edge.
+- **WSL networking:** with Docker Desktop or WSL2 localhost forwarding, Windows
+  reaches the loopback-published port as `https://memo.localhost:8443`. If the
+  name does not resolve, add `127.0.0.1 memo.localhost` to the Windows hosts
+  file or use the WSL-side browser.
+
+Do not commit the exported certificate. The CA is local validation material,
+not an application secret.
 
 ### Railway
 

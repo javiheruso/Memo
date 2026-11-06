@@ -1,0 +1,9 @@
+# Local-only TLS entry point for the Memo compose stack.
+#
+# Caddy's internal CA issues the certificate for names under .localhost, so no
+# public ACME traffic or public DNS is involved. The container listens on 8443
+# and compose publishes that port on 127.0.0.1 only.
+memo.localhost:8443 {
+	tls internal
+	reverse_proxy app:8000
+}

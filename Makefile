@@ -28,8 +28,8 @@ db-logs: ## Tail the postgres container logs
 db-shell: ## Open a psql shell against the local dev database (memo)
 	$(COMPOSE_ENV) $(COMPOSE) exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)
 
-db-reset: ## DESTRUCTIVE: drop the data volume (memo + memo_test) and start fresh
-	@echo "This deletes ALL data in the local compose volume (memo and memo_test)."
+db-reset: ## DESTRUCTIVE: drop all compose volumes (database + Caddy CA) and start fresh
+	@echo "This deletes ALL data in the local compose volumes (memo, memo_test, and the Caddy local CA)."
 	@read -p "Type 'reset' to confirm: " confirmation; \
 	test "$$confirmation" = "reset" || { echo "Aborted."; exit 1; }
 	$(COMPOSE_ENV) $(COMPOSE) down -v
