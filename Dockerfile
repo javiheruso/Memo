@@ -14,9 +14,16 @@ COPY migrations ./migrations
 
 RUN pip install --no-cache-dir .
 
+# Repository-owned startup wrapper: when MEMO_AUTO_MIGRATE is enabled it
+# applies pending migrations, disables the in-app lifespan migration, and
+# replaces itself with Uvicorn. Explicit commands (e.g. `docker compose run
+# --rm app alembic upgrade head`) bypass that default.
+COPY docker/entrypoint.sh /usr/local/bin/memo-entrypoint
+RUN chmod 0755 /usr/local/bin/memo-entrypoint
+
 EXPOSE 8000
 
-# Serve the API/UI. Bind to $PORT when present (Railway injects it), falling
-# back to 8000 for local Docker Compose. Apply migrations as a deploy step:
-#   docker compose run --rm app alembic upgrade head
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+ENTRYPOINT ["/usr/local/bin/memo-entrypoint"]
+# "serve" is handled by the wrapper; it reads $PORT (Render) or falls back to
+# 8000 for local Docker Compose. Keep Render's Docker Command empty.
+CMD ["serve"]
