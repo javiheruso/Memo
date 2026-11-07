@@ -905,8 +905,14 @@ POSTGRES_PASSWORD='a-strong-db-password' \
 MEMO_ADMIN_PASSWORD='a-strong-admin-password' \
 MEMO_CHAT_SESSION_SECRET='a-strong-chat-session-secret' \
 docker compose up -d --build
-docker compose run --rm app alembic upgrade head   # apply migrations once
 ```
+
+The app image runs `docker/entrypoint.sh` on startup. Because `compose.yaml`
+sets `MEMO_AUTO_MIGRATE=true`, the wrapper applies pending Alembic migrations
+once and then disables the in-app lifespan migration before handing off to
+Uvicorn, so migrations are never applied twice. To run migrations manually
+instead, use `docker compose run --rm app alembic upgrade head`; an explicit
+command bypasses the wrapper's default migration step.
 
 The stack includes a Caddy reverse proxy that terminates local HTTPS on
 <https://memo.localhost:8443> (chat at `/chat`, admin at `/admin`, docs at
@@ -985,8 +991,9 @@ not an application secret.
    | `MEMO_AUTO_MIGRATE` | `true` |
 
    The bare `postgresql://` URL is normalized to `postgresql+psycopg://` at
-   startup automatically, and `MEMO_AUTO_MIGRATE=true` applies migrations on
-   boot (no shell command needed).
+   startup automatically. With `MEMO_AUTO_MIGRATE=true`, the image entrypoint
+   applies pending migrations before Uvicorn starts (no shell command needed),
+   then disables the lifespan migration so it does not run twice.
 4. Enable the extension once in the database (Railway CLI or the database
    service's shell):
 
@@ -994,6 +1001,39 @@ not an application secret.
    CREATE EXTENSION IF NOT EXISTS vector;
    ```
 
+5. Optionally add the provider variables (`MEMO_LLM_*`, `MEMO_EMBEDDER_*`,
+   `MEMO_STT_*`, `MEMO_TTS_*`); text mode works without them.
+
+### Render
+
+Render builds the `Dockerfile` and runs the image's default command. The
+repository-owned entrypoint handles migrations and port binding, so Render does
+not need a compound Docker Command:
+
+1. Create a **Web Service** from this repository and set **Language** to
+   **Docker**. Leave **Docker Command** empty so Render uses the image's
+   `CMD ["serve"]`.
+2. Attach a PostgreSQL database where `CREATE EXTENSION vector` is available
+   (for example a Render Postgres instance with pgvector enabled, or an
+   external pgvector provider) and enable the extension once:
+
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS vector;
+   ```
+
+3. Set these environment variables:
+
+   | Variable | Value |
+   |----------|-------|
+   | `MEMO_ENVIRONMENT` | `production` |
+   | `MEMO_ADMIN_PASSWORD` | a strong password |
+   | `MEMO_CHAT_SESSION_SECRET` | a different strong random secret |
+   | `MEMO_DATABASE_URL` | the database's internal connection URL |
+   | `MEMO_AUTO_MIGRATE` | `true` |
+
+   Render injects `$PORT`; do not set it yourself. The entrypoint binds Uvicorn
+   to `0.0.0.0:$PORT`, falling back to `8000` outside Render.
+4. Set the health check path to `/api/v1/health`.
 5. Optionally add the provider variables (`MEMO_LLM_*`, `MEMO_EMBEDDER_*`,
    `MEMO_STT_*`, `MEMO_TTS_*`); text mode works without them.
 
@@ -1006,7 +1046,9 @@ not an application secret.
 3. Configure the optional providers you want to use — `MEMO_LLM_*`,
    `MEMO_EMBEDDER_*`, `MEMO_STT_*`, `MEMO_TTS_*` (OpenAI-compatible). Without
    them the deterministic defaults keep text mode fully functional.
-4. Run `alembic upgrade head` against the target database.
+4. Apply migrations before serving: set `MEMO_AUTO_MIGRATE=true` for the
+   container entrypoint, or run `alembic upgrade head` against the target
+   database. Both paths must complete successfully before traffic arrives.
 5. Keep `/chat` public (the companion) and `/admin` protected by the shared
    password; do not expose the admin password in plaintext or commit it.
 
@@ -1023,3 +1065,6 @@ not an application secret.
   `MEMO_CHAT_SESSION_KEY_ID`/`MEMO_CHAT_SESSION_PREVIOUS_KEYS`.
 - Secret values (`MEMO_ADMIN_PASSWORD`, `MEMO_CHAT_SESSION_SECRET`, API keys)
   belong in the environment or a secrets manager, never in the repository.
+- The container entrypoint only migrates when `MEMO_AUTO_MIGRATE=true`, aborts
+  startup if migrations fail, and `exec`s Uvicorn so it receives container
+  signals directly.
