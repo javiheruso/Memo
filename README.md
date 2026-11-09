@@ -238,10 +238,28 @@ the recognized `transcript`, the explicit `text`, the `answer`, the response
 `sources`/`ambiguity`/`gap` fields and, when synthesized, the audio as base64
 in `audio` (`audio_content_type` is `audio/mpeg`).
 
-Both features default to **disabled**, so text mode stays the zero-config
-default and no voice provider is required to run or test the companion. The
-providers resolve to `None` when unconfigured and the endpoint degrades to
-text-only (see `app/voice/provider.py`).
+The public `/chat` page is the voice-first pilot surface: press **Hablar**,
+speak, press **Terminar** (or **Detener**), and the browser sends the recording
+to the same-origin endpoint, shows the transcript with the spoken answer and
+offers **Repetir**. There is no wake word, VAD or streaming. On first use the
+page asks for explicit consent before sending audio to the cloud STT/TTS
+providers, and raw audio is never persisted: it lives in the browser only long
+enough to upload it and the backend passes the bytes straight to the provider.
+Text entry remains available as a clearly secondary fallback under a disclosure
+for browsers or situations where the microphone is unavailable.
+
+Audio uploads are bounded and validated at the application boundary. Accepted
+media types are audio/webm, audio/ogg, audio/mp4, audio/mpeg, audio/wav,
+audio/x-wav, audio/x-m4a and audio/mpga; MediaRecorder parameters such as
+`audio/webm;codecs=opus` are normalized before validation and provider mapping.
+Uploads over `MEMO_VOICE_MAX_AUDIO_BYTES` are rejected with `413`, unsupported
+types with `415`, and empty audio with `400`.
+
+Both features default to **disabled**, so the endpoint degrades to text-only
+and no voice provider is required to run or test the companion. The providers
+resolve to `None` when unconfigured (see `app/voice/provider.py`). Configure
+both `MEMO_STT_*` and `MEMO_TTS_*` for the full spoken round trip; with only
+STT the transcript and text answer still work.
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
@@ -249,6 +267,7 @@ text-only (see `app/voice/provider.py`).
 | `MEMO_STT_BASE_URL` | *(empty)* | Base URL of the OpenAI-compatible server (e.g. `https://api.openai.com/v1`). Required when `openai_compatible` is selected. |
 | `MEMO_STT_API_KEY` | *(unset)* | Bearer token sent as `Authorization`. Leave unset for local backends that do not need one. |
 | `MEMO_STT_MODEL` | `whisper-1` | Model name sent to `/audio/transcriptions`. |
+| `MEMO_STT_LANGUAGE` | `es` | Language hint sent to `/audio/transcriptions`; Spanish is the pilot default. |
 | `MEMO_STT_TIMEOUT_SECONDS` | `30.0` | HTTP timeout for the transcription call. |
 | `MEMO_TTS` | *(empty)* | TTS provider: `openai_compatible`, or unset to disable |
 | `MEMO_TTS_BASE_URL` | *(empty)* | Base URL of the OpenAI-compatible server. Required when `openai_compatible` is selected. |
@@ -256,6 +275,7 @@ text-only (see `app/voice/provider.py`).
 | `MEMO_TTS_MODEL` | `tts-1` | Model name sent to `/audio/speech`. |
 | `MEMO_TTS_VOICE` | `alloy` | Voice name sent to `/audio/speech`. |
 | `MEMO_TTS_TIMEOUT_SECONDS` | `30.0` | HTTP timeout for the speech call. |
+| `MEMO_VOICE_MAX_AUDIO_BYTES` | `8388608` | Maximum accepted audio upload (8 MiB). |
 
 Fail closed:
 
@@ -466,34 +486,51 @@ surface, not an authorization system.
 
 ## Public chat page
 
-Open <http://localhost:8000/chat> to talk to the companion in text mode with no
-auth. It is a plain FastAPI + Jinja2 surface (no frontend toolchain, no JS, no
-streaming) with a large-text layout sized for the older-adult audience. Every
-message is processed by the same `ConversationService` behind
-`POST /api/v1/chat`, so intent routing, retrieval, trust policies, claim
-ingestion and knowledge-gap persistence behave identically to the API.
+Open <http://localhost:8000/chat> to talk to the companion with no auth. It is
+a plain FastAPI + Jinja2 surface with a small vanilla JavaScript asset (no
+frontend framework, no build step, no streaming) and a large-text layout sized
+for the older-adult audience. The primary interaction is spoken conversation:
+press **Hablar**, speak, then press **Terminar** or **Detener**. The browser
+sends the recording to `POST /api/v1/chat/voice`, shows the recognized
+transcript with the answer, and plays the synthesized reply. Every turn runs
+the same `ConversationService`, so intent routing, retrieval, trust policies,
+claim ingestion and knowledge-gap persistence behave identically to the API.
+
+The text form is a secondary fallback inside a disclosure, for a browser
+without `MediaRecorder` or a denied microphone permission. The public page does
+not present writing as the main way to talk to Memo.
 
 Quick path:
 
 1. `uvicorn app.main:app --reload`
-2. Open <http://localhost:8000/chat>
-3. Write a message and press **Enviar**; the reply renders below, and the
-   transcript keeps growing across turns.
+2. Configure `MEMO_STT_*` and `MEMO_TTS_*` (OpenAI-compatible) for the full
+   spoken round trip.
+3. Open <http://localhost:8000/chat>
+4. Press **Hablar**, accept the first-use voice consent, speak, and press
+   **Terminar**. The transcript and answer render below; **Repetir** replays
+   the latest spoken answer.
 
 Details:
 
 | Concern | Decision |
 |---------|----------|
-| Multi-turn continuity | A session cookie (`memo_chat_conversation`) holds the `conversation_id`; history itself lives in the database |
-| New conversation | The *Empezar otra conversación* button clears the cookie (never deletes stored history) |
-| Pipeline signals | A created gap ("unknown person") and an ambiguous person render as an inline notice above the input; the assistant reply text is still shown as the turn |
-| Errors | Blank messages and persistence failures flash on the page; nothing is silently swallowed |
+| Multi-turn continuity | A signed ownership cookie (`memo_chat_session`) plus a `memo_chat_conversation` pointer cookie select the conversation; both the text fallback and the voice endpoint set them |
+| Voice consent | Explicit first-use dialog before any audio leaves the browser; the choice is remembered locally |
+| Raw audio | Never persisted server-side; bytes are passed straight to the configured STT provider and discarded |
+| Push-to-talk | One press starts capture, a second press or **Detener** stops it; recording auto-stops after 60 seconds |
+| Accessible states | `role="status"`/`aria-live` announcements for listening, processing, speaking, errors and microphone availability |
+| Errors | STT failure, TTS failure, unsupported format and oversized audio produce safe user-facing messages; provider details and secrets are not exposed |
+| New conversation | The *Empezar otra conversación* button clears the pointer cookie (never deletes stored history) |
+| Pipeline signals | A created gap ("unknown person") and an ambiguous person render as an inline notice; the assistant reply text is still shown as the turn |
 
 Accepted limitations for this slice: the transcript shows both sides of every
 stored turn for the current conversation but no per-message timestamps, the
 cookie is HTTP-only and SameSite=Lax but not `Secure` (use TLS in any real
 deployment), and the whole surface speaks to whatever person is at the device
-(a conversation can be shared; the reset button starts a clean thread).
+(a conversation can be shared; the reset button starts a clean thread). Browser
+audio capture depends on `MediaRecorder`; iOS Safari may still choose a
+different container, which the backend accepts when it normalizes to an
+allowed media type.
 
 ## Query pipeline ("Who was Paco?" / "¿Viene María hoy?")
 
@@ -866,8 +903,9 @@ The MVP is feature-complete against the dossier. Implemented and verified:
 - **Knowledge gaps** — auto-created on unknown persons, manual resolution.
 - **Progressive hints** — person answers follow relation → facts → photo →
   memory, plus a metadata-only media slice with primary-media management.
-- **Voice (STT/TTS)** — replaceable OpenAI-compatible seams, text-first by
-  default, graceful text-only degradation.
+- **Voice (STT/TTS)** — replaceable OpenAI-compatible seams, voice-first public
+  page with explicit first-use consent, push-to-talk capture, spoken answers and
+  graceful text-only degradation.
 - **Interfaces** — JSON API, server-rendered admin UI (`/admin`) with minimal
   shared-password auth, and a public conversational chat page (`/chat`).
 
@@ -892,8 +930,9 @@ Deferred by design (dossier phases) and not required for the MVP:
   materialization is the current authority.
 - Real STT/TTS/embedder/LLM providers — configure `MEMO_STT_*`, `MEMO_TTS_*`,
   `MEMO_EMBEDDER_*`, `MEMO_LLM_*` against your OpenAI-compatible backend.
-- Dedicated tablet/touch client (the `/chat` page is the current text surface).
-- Client-side audio capture/playback and streaming.
+- Dedicated tablet/touch client (the `/chat` page is the current pilot surface).
+- Streaming voice, wake-word/VAD modes and barge-in; this slice is deliberately
+  push-to-talk with one complete recording per turn.
 - Media image serving/upload (currently metadata-only).
 
 ## Deploying

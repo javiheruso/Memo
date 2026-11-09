@@ -24,6 +24,7 @@ from app.api.deps import (
     TtsDep,
     get_db,
 )
+from app.core.config import settings
 from app.repositories.conversation import ConversationAccessDenied
 from app.schemas.chat import (
     AmbiguityInfo,
@@ -32,7 +33,15 @@ from app.schemas.chat import (
     SourceRef,
 )
 from app.schemas.voice import VoiceResponse
-from app.security import resolve_chat_session_id, set_chat_session_cookie
+from app.security import (
+    resolve_chat_session_id,
+    set_chat_conversation_cookie,
+    set_chat_session_cookie,
+)
+from app.voice.audio import (
+    is_allowed_audio_content_type,
+    normalize_audio_content_type,
+)
 from app.voice.service import VoiceInputError, VoiceService
 
 router = APIRouter(tags=["voice"])
@@ -63,8 +72,16 @@ async def chat_voice(
     audio_bytes = None
     audio_content_type = None
     if audio is not None:
-        audio_bytes = await audio.read()
-        audio_content_type = audio.content_type
+        audio_content_type = normalize_audio_content_type(audio.content_type)
+        if not is_allowed_audio_content_type(audio_content_type):
+            raise HTTPException(status_code=415, detail="Unsupported audio format")
+        # Read one byte past the limit so an oversized upload is detected
+        # without buffering an unbounded request body.
+        audio_bytes = await audio.read(settings.voice_max_audio_bytes + 1)
+        if not audio_bytes:
+            raise HTTPException(status_code=400, detail="Empty audio upload")
+        if len(audio_bytes) > settings.voice_max_audio_bytes:
+            raise HTTPException(status_code=413, detail="Audio upload too large")
 
     owner_session_id = resolve_chat_session_id(request)
     service = VoiceService(
@@ -91,6 +108,7 @@ async def chat_voice(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     set_chat_session_cookie(response, owner_session_id)
+    set_chat_conversation_cookie(response, result.conversation_id)
 
     ambiguity = None
     if result.ambiguity is not None:

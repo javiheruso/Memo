@@ -218,3 +218,61 @@ async def test_ambiguous_person_surfaces_candidates_and_notice(
     assert "Paco García" in response.text
     assert "Hay varias personas con ese nombre" in response.text
     assert await _cookie_conversation_id(app_client) is not None
+
+
+# --------------------------------------------------------------------------
+# Voice-first surface
+# --------------------------------------------------------------------------
+
+
+async def test_chat_page_presents_voice_as_the_primary_interaction(
+    app_client: AsyncClient,
+) -> None:
+    response = await app_client.get(UI)
+    assert response.status_code == 200
+    text = response.text
+
+    assert 'data-voice-endpoint="/api/v1/chat/voice"' in text
+    assert 'id="voice-mic"' in text
+    assert 'id="voice-stop"' in text
+    assert 'id="voice-replay"' in text
+    assert 'id="voice-consent"' in text
+    assert "consentimiento" in text
+    assert 'aria-live="polite"' in text
+    assert "/static/voice.js" in text
+    assert "/static/voice.css" in text
+
+    # The text form is an explicit secondary fallback, not the primary surface.
+    assert 'class="text-fallback"' in text
+    assert text.index('id="voice-mic"') < text.index('class="text-fallback"')
+
+
+async def test_voice_static_asset_is_vanilla_same_origin_and_consent_aware(
+    app_client: AsyncClient,
+) -> None:
+    response = await app_client.get("/static/voice.js")
+    assert response.status_code == 200
+    script = response.text
+
+    assert "navigator.mediaDevices.getUserMedia" in script
+    assert "MediaRecorder" in script
+    assert "localStorage" in script
+    assert "memo_voice_consent_v1" in script
+    assert 'credentials: "same-origin"' in script
+    assert "https://" not in script
+
+    stylesheet = await app_client.get("/static/voice.css")
+    assert stylesheet.status_code == 200
+    assert ".voice-controls" in stylesheet.text
+
+
+async def test_page_exposes_current_conversation_to_the_voice_client(
+    app_client: AsyncClient,
+) -> None:
+    await app_client.post(UI, data={"message": "Hola"})
+    conversation_id = await _cookie_conversation_id(app_client)
+    assert conversation_id is not None
+
+    response = await app_client.get(UI)
+    assert response.status_code == 200
+    assert f'data-conversation-id="{conversation_id}"' in response.text

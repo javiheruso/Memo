@@ -4,37 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Memo · Conversación</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #f5f3ef; color: #1f2933; }
-  .shell { max-width: 780px; margin: 0 auto; padding: 24px 18px 48px; }
-  header { margin-bottom: 16px; }
-  h1 { font-size: 32px; margin: 0; }
-  header p { margin: 4px 0 0; color: #52606d; font-size: 19px; }
-  .banner { padding: 14px 16px; border-radius: 12px; font-size: 20px; line-height: 1.4; margin-bottom: 18px; }
-  .banner.info { background: #fff7e0; border: 1px solid #e0c25a; color: #5b4a00; }
-  .banner.err { background: #fdecea; border: 1px solid #e8a39c; color: #8f1d16; }
-  .transcript { display: flex; flex-direction: column; gap: 18px; }
-  .empty { background: #fff; border-radius: 16px; text-align: center; color: #52606d; font-size: 22px; line-height: 1.5; padding: 44px 20px; }
-  .turn .who { font-size: 18px; font-weight: 700; margin: 0 0 4px 6px; }
-  .turn.user .who { color: #276749; }
-  .turn.memo .who { color: #24466e; }
-  .bubble { background: #fff; border: 1px solid #d7dde3; border-radius: 14px; padding: 16px 20px; font-size: 24px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: break-word; }
-  .turn.user .bubble { background: #d9f0e1; border-color: #b7ddc6; }
-  .send { background: #fff; border: 1px solid #d7dde3; border-radius: 16px; padding: 16px; margin-top: 26px; }
-  .send label { display: block; font-size: 20px; font-weight: 600; margin-bottom: 8px; }
-  .send textarea { width: 100%; min-height: 96px; font: inherit; font-size: 22px; padding: 12px 14px; border-radius: 10px; border: 1px solid #9aa7b1; resize: vertical; }
-  .send button { width: 100%; margin-top: 12px; font-size: 22px; padding: 14px; font-weight: 700; color: #fff; background: #276749; border: none; border-radius: 10px; cursor: pointer; }
-  .send button:hover { background: #1f5a3f; }
-  .reset { margin-top: 14px; text-align: center; }
-  .reset button { background: none; border: none; padding: 8px 12px; color: #52606d; font-size: 18px; text-decoration: underline; cursor: pointer; }
-</style>
+<link rel="stylesheet" href="/static/voice.css">
 </head>
 <body>
-<div class="shell">
+<div class="shell"
+     data-voice-endpoint="/api/v1/chat/voice"
+     data-conversation-id="{{ conversation_id or '' }}">
   <header>
     <h1>Memo</h1>
-    <p>Tu acompañante con memoria.</p>
+    <p>Tu acompañante con memoria. Háblale con naturalidad.</p>
   </header>
 
   {% if notice == "ambiguous" %}
@@ -42,26 +20,51 @@
   {% elif notice == "unknown_person" %}
   <div class="banner info">Todavía no conozco a esa persona. Lo he anotado para poder averiguarlo.</div>
   {% endif %}
-  {% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+  {% if error %}<div class="banner err" role="alert">{{ error }}</div>{% endif %}
+  <div id="voice-error" class="banner err" role="alert" tabindex="-1" hidden></div>
 
-  {% if messages %}
-  <div class="transcript">
-    {% for message in messages %}
-    <div class="turn {{ 'user' if message.speaker == 'user' else 'memo' }}">
-      <p class="who">{{ 'Tú' if message.speaker == 'user' else 'Memo' }}</p>
-      <div class="bubble">{{ message.text }}</div>
+  <main id="conversation" class="transcript" aria-label="Conversación">
+    {% if messages %}
+      {% for message in messages %}
+      <div class="turn {{ 'user' if message.speaker == 'user' else 'memo' }}">
+        <p class="who">{{ 'Tú' if message.speaker == 'user' else 'Memo' }}</p>
+        <div class="bubble">{{ message.text }}</div>
+      </div>
+      {% endfor %}
+    {% else %}
+    <div id="empty-state" class="empty">Hola, soy Memo. Pulsa «Hablar» y cuéntame lo que quieras o pregúntame por alguna persona.</div>
+    {% endif %}
+    <div id="live-transcript" aria-live="polite" aria-relevant="additions"></div>
+  </main>
+
+  <section class="voice-controls" aria-label="Controles de voz">
+    <p id="voice-status" class="status" role="status" aria-live="polite">Listo para escucharte.</p>
+    <div class="buttons">
+      <button type="button" id="voice-mic" class="voice-button primary"
+              aria-pressed="false" aria-describedby="voice-hint">
+        <svg aria-hidden="true" width="30" height="30" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+          <path d="M19 10v1a7 7 0 0 1-14 0v-1"></path>
+          <path d="M12 18v4"></path>
+          <path d="M8 22h8"></path>
+        </svg>
+        <span class="js-mic-label">Hablar</span>
+      </button>
+      <button type="button" id="voice-stop" class="voice-button secondary" hidden>Detener</button>
+      <button type="button" id="voice-replay" class="voice-button secondary" hidden>Repetir</button>
     </div>
-    {% endfor %}
-  </div>
-  {% else %}
-  <div class="empty">Hola, soy Memo. Escríbeme lo que quieras contarme o pregúntame por alguna persona.</div>
-  {% endif %}
+    <p id="voice-hint" class="hint">Pulsa Hablar, cuenta lo que quieras y vuelve a pulsar para terminar. El audio no se guarda.</p>
+  </section>
 
-  <form class="send" action="/chat" method="post">
-    <label for="message">Escribe tu mensaje</label>
-    <textarea id="message" name="message" autocomplete="off"></textarea>
-    <button type="submit">Enviar</button>
-  </form>
+  <details class="text-fallback">
+    <summary>¿No puedes usar el micrófono? Escribe en su lugar</summary>
+    <form class="send" action="/chat" method="post">
+      <label for="message">Escribe tu mensaje</label>
+      <textarea id="message" name="message" autocomplete="off"></textarea>
+      <button type="submit">Enviar</button>
+    </form>
+  </details>
 
   {% if messages %}
   <div class="reset">
@@ -71,5 +74,21 @@
   </div>
   {% endif %}
 </div>
+
+<dialog id="voice-consent" class="consent"
+        aria-labelledby="voice-consent-title" aria-describedby="voice-consent-body">
+  <h2 id="voice-consent-title">Usar la voz</h2>
+  <p id="voice-consent-body">
+    Para activar la voz necesitamos tu consentimiento. El audio se envía a un
+    servicio de voz en la nube para transcribirlo y la respuesta se convierte
+    en voz. No guardamos las grabaciones. ¿Quieres activar la voz?
+  </p>
+  <div class="consent-actions">
+    <button type="button" id="voice-consent-accept" class="consent-accept">Aceptar y usar el micrófono</button>
+    <button type="button" id="voice-consent-cancel" class="consent-cancel">Ahora no</button>
+  </div>
+</dialog>
+
+<script src="/static/voice.js" defer></script>
 </body>
 </html>

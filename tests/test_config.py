@@ -96,6 +96,17 @@ def test_development_keeps_explicit_fail_open_mode() -> None:
     assert configured.chat_session_secret == ""
 
 
+def test_voice_defaults_to_spanish_and_a_bounded_upload() -> None:
+    configured = Settings()
+    assert configured.stt_language == "es"
+    assert configured.voice_max_audio_bytes == 8 * 1024 * 1024
+
+
+def test_voice_audio_bound_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        Settings(voice_max_audio_bytes=0)
+
+
 async def test_lifespan_refuses_to_start_without_admin_password_outside_development(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

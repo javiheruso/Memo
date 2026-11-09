@@ -16,19 +16,26 @@ from __future__ import annotations
 import httpx
 
 from app.core.config import Settings
+from app.voice.audio import (
+    DEFAULT_AUDIO_CONTENT_TYPE,
+    audio_file_extension,
+    normalize_audio_content_type,
+)
 from app.voice.base import SpeechToText, TextToSpeech
 
-_EXTENSION_BY_CONTENT_TYPE: dict[str, str] = {
-    "audio/mpeg": "mp3",
-    "audio/mp3": "mp3",
-    "audio/mp4": "m4a",
-    "audio/x-m4a": "m4a",
-    "audio/wav": "wav",
-    "audio/x-wav": "wav",
-    "audio/webm": "webm",
-    "audio/ogg": "ogg",
-    "audio/mpga": "mpga",
-}
+_MULTILINGUAL_LANGUAGES_MODEL = "gpt-transcribe"
+
+
+def _uses_multilingual_languages(model: str) -> bool:
+    """Return whether ``model`` expects the ``languages[]`` field.
+
+    ``gpt-transcribe`` (and its dated snapshots) replaced the legacy singular
+    ``language`` hint with a multilingual ``languages[]`` array. Every other
+    OpenAI-compatible model keeps sending the singular field.
+    """
+    return model == _MULTILINGUAL_LANGUAGES_MODEL or model.startswith(
+        f"{_MULTILINGUAL_LANGUAGES_MODEL}-"
+    )
 
 
 class InvalidTranscription(ValueError):
@@ -48,16 +55,20 @@ class OpenAICompatibleSTT(SpeechToText):
         base_url: str,
         model: str,
         api_key: str | None = None,
+        language: str | None = None,
         timeout_seconds: float = 30.0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not base_url:
-            raise ValueError("base_url is required for the OpenAI-compatible STT provider")
+            raise ValueError(
+                "base_url is required for the OpenAI-compatible STT provider"
+            )
         if not model:
             raise ValueError("model is required for the OpenAI-compatible STT provider")
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key = api_key
+        self._language = (language or "").strip()
         self._timeout = timeout_seconds
         self._client = client
 
@@ -67,20 +78,33 @@ class OpenAICompatibleSTT(SpeechToText):
             base_url=settings.stt_base_url,
             model=settings.stt_model,
             api_key=settings.stt_api_key,
+            language=settings.stt_language,
             timeout_seconds=settings.stt_timeout_seconds,
         )
 
-    async def transcribe(
-        self, audio: bytes, *, content_type: str | None = None
-    ) -> str:
+    async def transcribe(self, audio: bytes, *, content_type: str | None = None) -> str:
         url = f"{self._base_url}/audio/transcriptions"
-        filename = _upload_filename(content_type)
-        files = {"file": (filename, audio, content_type or "application/octet-stream")}
+        normalized_content_type = normalize_audio_content_type(content_type)
+        filename = _upload_filename(normalized_content_type)
+        files = {
+            "file": (
+                filename,
+                audio,
+                normalized_content_type or DEFAULT_AUDIO_CONTENT_TYPE,
+            )
+        }
         data = {"model": self._model}
+        if self._language:
+            if _uses_multilingual_languages(self._model):
+                data["languages[]"] = self._language
+            else:
+                data["language"] = self._language
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
         if self._client is not None:
-            response = await self._client.post(url, headers=headers, data=data, files=files)
+            response = await self._client.post(
+                url, headers=headers, data=data, files=files
+            )
         else:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(
@@ -113,7 +137,9 @@ class OpenAICompatibleTTS(TextToSpeech):
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not base_url:
-            raise ValueError("base_url is required for the OpenAI-compatible TTS provider")
+            raise ValueError(
+                "base_url is required for the OpenAI-compatible TTS provider"
+            )
         if not model:
             raise ValueError("model is required for the OpenAI-compatible TTS provider")
         if not voice:
@@ -156,5 +182,5 @@ class OpenAICompatibleTTS(TextToSpeech):
 
 
 def _upload_filename(content_type: str | None) -> str:
-    extension = _EXTENSION_BY_CONTENT_TYPE.get(content_type or "") if content_type else None
+    extension = audio_file_extension(content_type)
     return f"audio.{extension}" if extension else "audio"

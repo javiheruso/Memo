@@ -1,8 +1,10 @@
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -40,6 +42,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.mount(
+    "/static",
+    StaticFiles(directory=Path(__file__).parent / "web" / "static"),
+    name="static",
+)
 app.include_router(api_router, prefix=settings.api_v1_prefix)
 app.include_router(admin_ui_router)
 app.include_router(auth_router)

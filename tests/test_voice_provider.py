@@ -35,6 +35,7 @@ def test_provider_resolves_stt_from_settings(monkeypatch) -> None:
         stt_base_url = "http://local"
         stt_model = "whisper-1"
         stt_api_key = "k"
+        stt_language = "es"
         stt_timeout_seconds = 5.0
 
     monkeypatch.setattr("app.voice.provider.get_settings", lambda: _FakeSettings())
@@ -43,6 +44,7 @@ def test_provider_resolves_stt_from_settings(monkeypatch) -> None:
     assert stt._base_url == "http://local"
     assert stt._model == "whisper-1"
     assert stt._api_key == "k"
+    assert stt._language == "es"
     assert stt._timeout == 5.0
 
 
@@ -72,6 +74,7 @@ def test_provider_ignores_case_and_whitespace(monkeypatch) -> None:
         stt_base_url = "http://local"
         stt_model = "whisper-1"
         stt_api_key = None
+        stt_language = "es"
         stt_timeout_seconds = 30.0
         tts = ""
         tts_base_url = ""

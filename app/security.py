@@ -36,6 +36,7 @@ from app.core.config import settings
 SESSION_COOKIE_NAME = "memo_admin_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 CHAT_SESSION_COOKIE_NAME = "memo_chat_session"
+CHAT_CONVERSATION_COOKIE_NAME = "memo_chat_conversation"
 _DEV_CHAT_SESSION_KEY_ID = "development"
 _DEV_CHAT_SESSION_SECRET = "memo-development-chat-session-secret"
 _LOGIN_URL = "/admin/login"
@@ -196,6 +197,36 @@ def set_chat_session_cookie(response: Response, session_id: uuid.UUID) -> None:
     )
 
 
+def read_chat_conversation_id(value: str | None) -> uuid.UUID | None:
+    """Return the conversation pointer cookie value, or ``None`` when invalid."""
+    if not value:
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        return None
+
+
+def set_chat_conversation_cookie(
+    response: Response, conversation_id: uuid.UUID
+) -> None:
+    """Keep the browser pointed at the conversation it owns.
+
+    The signed session cookie proves ownership; this plain pointer cookie only
+    selects which conversation the public chat surface loads. Both the text
+    fallback and the voice endpoint set it so a spoken turn continues the same
+    thread.
+    """
+    response.set_cookie(
+        CHAT_CONVERSATION_COOKIE_NAME,
+        str(conversation_id),
+        httponly=True,
+        samesite="lax",
+        secure=cookie_secure(),
+        path="/",
+    )
+
+
 def require_admin_ui(request: Request) -> None:
     """Dependency for server-rendered admin pages: fail-open or signed cookie."""
     if not admin_auth_enabled():
@@ -226,6 +257,7 @@ def _unauthorized() -> HTTPException:
 
 
 __all__ = [
+    "CHAT_CONVERSATION_COOKIE_NAME",
     "CHAT_SESSION_COOKIE_NAME",
     "SESSION_COOKIE_NAME",
     "SESSION_TTL_SECONDS",
@@ -234,10 +266,12 @@ __all__ = [
     "cookie_secure",
     "issue_chat_session_cookie",
     "issue_session_cookie",
+    "read_chat_conversation_id",
     "read_chat_session_id",
     "require_admin_api",
     "require_admin_ui",
     "resolve_chat_session_id",
+    "set_chat_conversation_cookie",
     "set_chat_session_cookie",
     "validate_session_cookie",
     "verify_password",

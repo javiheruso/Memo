@@ -89,6 +89,94 @@ async def test_stt_request_targets_transcriptions_with_model_and_auth() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stt_normalizes_media_recorder_mime_parameters() -> None:
+    capture: list[httpx.Request] = []
+    async with _stt_client(payload={"text": "hola"}, capture=capture) as client:
+        await _stt(client).transcribe(
+            b"\x00webm", content_type="Audio/WebM; codecs=opus"
+        )
+    body = capture[0].content
+    assert b'filename="audio.webm"' in body
+    assert b"audio/webm" in body
+    assert b"codecs=opus" not in body
+
+
+@pytest.mark.asyncio
+async def test_stt_unknown_content_type_uses_generic_filename() -> None:
+    capture: list[httpx.Request] = []
+    async with _stt_client(payload={"text": "hola"}, capture=capture) as client:
+        await _stt(client).transcribe(
+            b"\x00raw", content_type="application/octet-stream"
+        )
+    body = capture[0].content
+    assert b'filename="audio"' in body
+    assert b"application/octet-stream" in body
+
+
+@pytest.mark.asyncio
+async def test_stt_sends_configured_language_hint() -> None:
+    capture: list[httpx.Request] = []
+    async with _stt_client(payload={"text": "hola"}, capture=capture) as client:
+        await _stt(client, language="es").transcribe(b"\x00wav")
+    body = capture[0].content
+    assert b'name="language"' in body
+    assert b"\r\n\r\nes\r\n" in body
+
+
+@pytest.mark.asyncio
+async def test_stt_gpt_transcribe_uses_multilingual_languages_field() -> None:
+    capture: list[httpx.Request] = []
+    async with _stt_client(payload={"text": "hola"}, capture=capture) as client:
+        await _stt(client, model="gpt-transcribe", language="es").transcribe(b"\x00wav")
+    body = capture[0].content
+    assert b'name="languages[]"' in body
+    assert b"\r\n\r\nes\r\n" in body
+    assert b'name="language"' not in body
+
+
+@pytest.mark.asyncio
+async def test_stt_gpt_transcribe_snapshot_uses_multilingual_languages_field() -> None:
+    capture: list[httpx.Request] = []
+    async with _stt_client(payload={"text": "hola"}, capture=capture) as client:
+        await _stt(client, model="gpt-transcribe-2026-01-01", language="es").transcribe(
+            b"\x00wav"
+        )
+    body = capture[0].content
+    assert b'name="languages[]"' in body
+    assert b'name="language"' not in body
+
+
+@pytest.mark.asyncio
+async def test_stt_other_models_keep_singular_language_field() -> None:
+    capture: list[httpx.Request] = []
+    async with _stt_client(payload={"text": "hola"}, capture=capture) as client:
+        await _stt(client, model="gpt-4o-transcribe", language="es").transcribe(
+            b"\x00wav"
+        )
+    body = capture[0].content
+    assert b'name="language"' in body
+    assert b'name="languages[]"' not in body
+
+
+@pytest.mark.asyncio
+async def test_stt_gpt_transcribe_omits_empty_language_hint() -> None:
+    capture: list[httpx.Request] = []
+    async with _stt_client(payload={"text": "hola"}, capture=capture) as client:
+        await _stt(client, model="gpt-transcribe").transcribe(b"\x00wav")
+    body = capture[0].content
+    assert b'name="language"' not in body
+    assert b'name="languages[]"' not in body
+
+
+@pytest.mark.asyncio
+async def test_stt_omits_empty_language_hint() -> None:
+    capture: list[httpx.Request] = []
+    async with _stt_client(payload={"text": "hola"}, capture=capture) as client:
+        await _stt(client).transcribe(b"\x00wav")
+    assert b'name="language"' not in capture[0].content
+
+
+@pytest.mark.asyncio
 async def test_stt_strips_surrounding_whitespace() -> None:
     async with _stt_client(payload={"text": "  hola  "}) as client:
         result = await _stt(client).transcribe(b"\x00")
@@ -205,6 +293,7 @@ def test_stt_from_settings_maps_config() -> None:
     assert stt._base_url == "http://local"
     assert stt._model == "whisper-1"
     assert stt._api_key is None
+    assert stt._language == "es"
     assert stt._timeout == 5
 
 

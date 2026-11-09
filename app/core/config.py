@@ -47,7 +47,13 @@ class Settings(BaseSettings):
     stt_base_url: str = ""
     stt_api_key: str | None = None
     stt_model: str = "whisper-1"
+    # Language hint sent to speech-to-text. Spanish is the product default so a
+    # spoken pilot turn does not force the provider to auto-detect the language.
+    stt_language: str = "es"
     stt_timeout_seconds: float = 30.0
+    # Bound the audio accepted at the application boundary. The browser UI also
+    # stops recording after one minute, but a client can always send more bytes.
+    voice_max_audio_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
     tts: str = ""
     tts_base_url: str = ""
     tts_api_key: str | None = None

@@ -1,17 +1,20 @@
-"""Public server-rendered chat surface.
+"""Public voice-first chat surface.
 
 A minimal, large-text conversation page so a human can talk to the companion
-in text mode and exercise the whole pipeline end to end without calling the
-JSON API. It reuses ``ConversationService`` unchanged (the exact class behind
+with natural speech. The primary interaction is a push-to-talk microphone that
+sends one recording to ``POST /api/v1/chat/voice`` through a small vanilla
+JavaScript asset; a text form remains as an explicit secondary fallback. The
+page reuses ``ConversationService`` unchanged (the exact class behind
 ``POST /api/v1/chat``), so intent routing, retrieval, trust policies, claim
 ingestion and knowledge-gap persistence behave identically here.
 
-This surface adds no auth, no STT/TTS, no streaming and no frontend toolchain:
-messages render with Jinja2 and forms post back to this router (POST/redirect/
-GET, like the admin UI). Multi-turn continuity is carried by a session cookie
-that holds the ``conversation_id`` plus a signed owner cookie that proves the
-browser owns that conversation; the conversation itself lives in the database,
-so clearing the cookie never deletes history.
+The server surface adds no auth, no streaming, no STT/TTS implementation and no
+frontend toolchain: history renders with Jinja2 and the fallback form posts back
+to this router (POST/redirect/GET, like the admin UI). Multi-turn continuity is
+carried by a signed owner cookie plus a ``conversation_id`` pointer cookie; the
+conversation itself lives in the database, so clearing the cookie never deletes
+history. The voice endpoint sets both cookies too, so spoken and typed turns
+share one thread.
 
 UI copy is Spanish because the deterministic responder and the product
 audience (older Spanish-speaking adults) are Spanish; code stays in English.
@@ -41,10 +44,12 @@ from app.repositories.conversation import (
     ConversationRepository,
 )
 from app.security import (
+    CHAT_CONVERSATION_COOKIE_NAME,
     CHAT_SESSION_COOKIE_NAME,
-    cookie_secure,
+    read_chat_conversation_id,
     read_chat_session_id,
     resolve_chat_session_id,
+    set_chat_conversation_cookie,
     set_chat_session_cookie,
 )
 from app.services.conversation import ChatResult, ConversationService
@@ -53,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat-ui"], include_in_schema=False)
 
-CONVERSATION_COOKIE = "memo_chat_conversation"
+CONVERSATION_COOKIE = CHAT_CONVERSATION_COOKIE_NAME
 _COOKIE_PATH = "/"
 
 templates = Jinja2Templates(
@@ -64,13 +69,7 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 def _conversation_id_from_cookie(request: Request) -> uuid.UUID | None:
-    raw = request.cookies.get(CONVERSATION_COOKIE)
-    if not raw:
-        return None
-    try:
-        return uuid.UUID(raw)
-    except ValueError:
-        return None
+    return read_chat_conversation_id(request.cookies.get(CONVERSATION_COOKIE))
 
 
 def _back(*, notice: str | None = None, error: str | None = None) -> RedirectResponse:
@@ -97,19 +96,6 @@ def _notice_for(result: ChatResult) -> str | None:
     return None
 
 
-def _set_conversation_cookie(
-    response: RedirectResponse, conversation_id: uuid.UUID
-) -> None:
-    response.set_cookie(
-        CONVERSATION_COOKIE,
-        str(conversation_id),
-        httponly=True,
-        samesite="lax",
-        secure=cookie_secure(),
-        path=_COOKIE_PATH,
-    )
-
-
 @router.get("", response_class=HTMLResponse)
 async def chat_page(request: Request, db: DbSession) -> HTMLResponse:
     conversation_id = _conversation_id_from_cookie(request)
@@ -117,6 +103,7 @@ async def chat_page(request: Request, db: DbSession) -> HTMLResponse:
         request.cookies.get(CHAT_SESSION_COOKIE_NAME)
     )
     messages = []
+    active_conversation_id = ""
     if conversation_id is not None and owner_session_id is not None:
         repository = ConversationRepository(db)
         conversation = await repository.get_owned(
@@ -124,11 +111,13 @@ async def chat_page(request: Request, db: DbSession) -> HTMLResponse:
         )
         if conversation is not None:
             messages = await repository.list_messages(conversation.id)
+            active_conversation_id = str(conversation.id)
     return templates.TemplateResponse(
         request,
         "chat.html",
         {
             "messages": messages,
+            "conversation_id": active_conversation_id,
             "notice": request.query_params.get("notice"),
             "error": request.query_params.get("error"),
         },
@@ -181,7 +170,7 @@ async def chat_send(
                 conversation_id=None,
                 owner_session_id=str(owner_session_id),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - safe UI error path
             await db.rollback()
             logger.error(
                 "chat turn failed (%s, conversation_id=%s)",
@@ -191,7 +180,7 @@ async def chat_send(
             return _back(
                 error="Algo ha ido mal al guardar el mensaje. Inténtalo de nuevo."
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - safe UI error path
         await db.rollback()
         logger.error(
             "chat turn failed (%s, conversation_id=%s)",
@@ -202,7 +191,7 @@ async def chat_send(
 
     response = _back(notice=_notice_for(result))
     set_chat_session_cookie(response, owner_session_id)
-    _set_conversation_cookie(response, result.conversation_id)
+    set_chat_conversation_cookie(response, result.conversation_id)
     return response
 
 
