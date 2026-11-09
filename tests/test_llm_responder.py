@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 
 import httpx
@@ -214,6 +215,75 @@ async def test_timeout_falls_back() -> None:
     ) as client:
         response = await _responder(client).respond(context)
     assert "era amigo de Antonio" in response.text
+
+
+@pytest.mark.asyncio
+async def test_http_fallback_logs_status_without_sensitive_fields(caplog) -> None:
+    context = _person_context(_person(), _verified_relation())
+    marker = "PRIVATE-RESPONSE-BODY-503"
+    caplog.set_level(logging.WARNING, logger="app.llm.openai_compatible")
+    async with _client_for(marker, status=503) as client:
+        response = await _responder(client, api_key="super-secret-api-key").respond(
+            context
+        )
+
+    assert "era amigo de Antonio" in response.text
+    log = caplog.text
+    assert "http_status_error" in log
+    assert "503" in log
+    for forbidden in (
+        marker,
+        "super-secret-api-key",
+        "Authorization",
+        "Bearer",
+        "Francisco",
+    ):
+        assert forbidden not in log
+
+
+@pytest.mark.asyncio
+async def test_invalid_model_output_logs_no_model_content(caplog) -> None:
+    context = _person_context(_person(), _verified_relation())
+    marker = "LEAKED-MODEL-MARKER-987"
+    payload = (
+        '{"answer": "ok", "sources": '
+        f'[{{"entity_type": "person", "entity_id": "{marker}"}}]}}'
+    )
+    caplog.set_level(logging.WARNING, logger="app.llm.openai_compatible")
+    async with _client_for(payload) as client:
+        response = await _responder(client, api_key="super-secret-api-key").respond(
+            context
+        )
+
+    assert "era amigo de Antonio" in response.text
+    log = caplog.text
+    assert "invalid_model_output" in log
+    for forbidden in (marker, "super-secret-api-key", "Authorization", "Bearer"):
+        assert forbidden not in log
+
+
+@pytest.mark.asyncio
+async def test_network_error_logs_only_failure_class(caplog) -> None:
+    context = _person_context(_person(), _verified_relation())
+    marker = "https://user:pass@internal.example/secret?token=leaked"
+    caplog.set_level(logging.WARNING, logger="app.llm.openai_compatible")
+    async with _client_for("ignored", error=httpx.ConnectError(marker)) as client:
+        response = await _responder(client, api_key="super-secret-api-key").respond(
+            context
+        )
+
+    assert "era amigo de Antonio" in response.text
+    log = caplog.text
+    assert "ConnectError" in log
+    for forbidden in (
+        "internal.example",
+        "token=leaked",
+        "user:pass",
+        "super-secret-api-key",
+        "Authorization",
+        "Bearer",
+    ):
+        assert forbidden not in log
 
 
 @pytest.mark.asyncio
