@@ -12,6 +12,7 @@ responder but can never inject an invented source into ``response_sources``.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from typing import Any
@@ -25,9 +26,42 @@ from app.llm.prompt_builder import allowed_sources, build_prompt
 from app.repositories.conversation import ResponseSourceRef
 from app.retrieval.context_builder import AnswerContext
 
+logger = logging.getLogger(__name__)
+
 
 class InvalidModelOutput(ValueError):
     """Raised when model output cannot be turned into a trusted response."""
+
+
+def _log_fallback(exc: Exception) -> None:
+    """Log a safe fallback signal without prompts, bodies, or credentials.
+
+    Only the failure category/class and, when the provider answered with an
+    HTTP error, the status code are recorded. Exception messages are never
+    logged because they may embed model output, provider response text, or
+    request details.
+    """
+    category = (
+        "invalid_model_output"
+        if isinstance(exc, InvalidModelOutput)
+        else "http_status_error"
+        if isinstance(exc, httpx.HTTPStatusError)
+        else type(exc).__name__
+    )
+    status = (
+        exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+    )
+    if status is None:
+        logger.warning(
+            "LLM responder fell back to deterministic (category=%s)",
+            category,
+        )
+    else:
+        logger.warning(
+            "LLM responder fell back to deterministic (category=%s, http_status=%s)",
+            category,
+            status,
+        )
 
 
 class OpenAICompatibleResponder(Responder):
@@ -72,8 +106,9 @@ class OpenAICompatibleResponder(Responder):
             ]
             raw = await self._call_model(messages)
             return self._validate_response(raw, context)
-        except (httpx.HTTPError, InvalidModelOutput):
+        except (httpx.HTTPError, InvalidModelOutput) as exc:
             # Fail closed: the deterministic responder handles this turn.
+            _log_fallback(exc)
             return await self._fallback.respond(context)
 
     async def _call_model(self, messages: list[dict[str, str]]) -> str:
