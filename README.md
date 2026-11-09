@@ -523,7 +523,10 @@ status (`planned` / `confirmed`), never presenting them as already completed.
 `person_query` answers with the first progressive hint that works (dossier
 doc 01): verified relation, then probable relation, then stored facts, then a
 stored photograph, then a shared memory, and only then an honest "no details"
-reply. Facts are quoted exactly as stored and probable facts are marked
+reply. It also recognizes natural request phrasings around a proper name
+("Háblame de Elena", "Cuéntame sobre Miguel", "Dime algo de Elena"), while
+generic requests without a proper name stay in `general_chat`. Facts are quoted
+exactly as stored and probable facts are marked
 "probable"; the photo tier cites stored metadata (approximate year/place) and
 never describes what the image shows — media rows in this slice carry metadata
 only (`/api/v1/admin/media`), with no upload, serving, or content analysis.

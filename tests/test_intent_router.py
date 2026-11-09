@@ -9,6 +9,79 @@ def test_routes_spanish_person_question():
     assert result.term == "Paco"
 
 
+def test_routes_hablame_de_person_as_person_query():
+    result = IntentRouter().route("Háblame de Elena")
+    assert result.intent == Intent.person_query
+    assert result.term == "Elena"
+
+
+def test_routes_cuentame_sobre_person_as_person_query():
+    result = IntentRouter().route("Cuéntame sobre Miguel")
+    assert result.intent == Intent.person_query
+    assert result.term == "Miguel"
+
+
+def test_routes_person_about_request_variants():
+    cases = [
+        ("Háblame sobre Elena", "Elena"),
+        ("Háblame acerca de Elena", "Elena"),
+        ("Cuéntame de Miguel", "Miguel"),
+        ("Cuéntame algo sobre Miguel", "Miguel"),
+        ("Dime algo de Elena", "Elena"),
+        ("Háblame de Paco García", "Paco García"),
+        ("Háblame de Elena, por favor", "Elena"),
+    ]
+    for phrase, expected_term in cases:
+        result = IntentRouter().route(phrase)
+        assert result.intent == Intent.person_query, phrase
+        assert result.term == expected_term, phrase
+
+
+def test_routes_describe_person_request_as_person_query():
+    result = IntentRouter().route("Descríbeme a Elena")
+    assert result.intent == Intent.person_query
+    assert result.term == "Elena"
+
+
+def test_routes_polite_person_request_as_person_query():
+    cases = [
+        ("¿Me puedes contar sobre Elena?", "Elena"),
+        ("¿Puedes contarme sobre Elena?", "Elena"),
+        ("¿Podrías decirme algo sobre Elena?", "Elena"),
+    ]
+    for phrase, expected_term in cases:
+        result = IntentRouter().route(phrase)
+        assert result.intent == Intent.person_query, phrase
+        assert result.term == expected_term, phrase
+
+
+def test_person_request_without_proper_name_stays_general_chat():
+    for phrase in [
+        "Háblame de la vida",
+        "Háblame de ti",
+        "Háblame de elena",
+        "Cuéntame un chiste",
+        "Cuéntame sobre lo que pasó",
+        "Cuéntame sobre el viaje",
+        "Dime algo bonito",
+        "Descríbeme la casa",
+    ]:
+        result = IntentRouter().route(phrase)
+        assert result.intent == Intent.general_chat, phrase
+        assert result.term is None, phrase
+
+
+def test_person_request_does_not_steal_memory_recall():
+    result = IntentRouter().route("¿Te acuerdas de cuando venía María?")
+    assert result.intent == Intent.memory_query
+
+
+def test_person_request_does_not_steal_fact_question():
+    result = IntentRouter().route("¿Qué le gusta a Elena?")
+    assert result.intent == Intent.fact_query
+    assert result.term == "Elena"
+
+
 def test_routes_english_person_question():
     result = IntentRouter().route("Who was Paco?")
     assert result.intent == Intent.person_query

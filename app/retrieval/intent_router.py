@@ -4,9 +4,41 @@ from dataclasses import dataclass
 from app.domain.enums import Intent
 from app.retrieval.fact_topics import FactTopic, classify_fact_question
 
+_NAME = r"[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ-]*"
+_NAME_PHRASE = rf"{_NAME}(?:\s+{_NAME})*"
+
 _PERSON_QUESTION = re.compile(
     r"(?:quién|quien|who)\s+(?:es|era|fue|is|was)\s+([^?¿]+?)\s*[?¿]*$",
     re.IGNORECASE,
+)
+# Natural Spanish ways to ask about a person: "Háblame de Elena",
+# "Cuéntame sobre Miguel", "Dime algo de Elena". A proper-name subject is
+# required (capitalized, like `_NAME_PHRASE`) and the phrase must end after the
+# name, so generic requests ("Cuéntame un chiste", "Háblame de la vida") stay
+# general chat. The trailing courtesy clause is optional: "Háblame de Elena,
+# por favor".
+_PERSON_REQUEST_SUFFIX = (
+    rf"(?P<name>(?-i:{_NAME_PHRASE}))\s*(?:,\s*por\s+favor)?\s*[?.!¿¡]*$"
+)
+_PERSON_ABOUT_REQUEST = re.compile(
+    rf"^\s*[¿¡]?\s*(?:h[áa]blame|cu[ée]ntame|dime)\s+(?:algo\s+)?"
+    rf"(?:de|sobre|acerca\s+de)\s+{_PERSON_REQUEST_SUFFIX}",
+    re.IGNORECASE,
+)
+_PERSON_DESCRIBE_REQUEST = re.compile(
+    rf"^\s*[¿¡]?\s*descr[íi]beme\s+(?:a\s+)?{_PERSON_REQUEST_SUFFIX}",
+    re.IGNORECASE,
+)
+_PERSON_POLITE_REQUEST = re.compile(
+    rf"^\s*[¿¡]?\s*(?:me\s+)?(?:puedes|podr[íi]as|puede|podr[íi]a)\s+"
+    rf"(?:hablar(?:me)?|contar(?:me)?|decir(?:me)?)\s+(?:algo\s+)?"
+    rf"(?:de|sobre|acerca\s+de)\s+{_PERSON_REQUEST_SUFFIX}",
+    re.IGNORECASE,
+)
+_PERSON_REQUEST_PATTERNS = (
+    _PERSON_ABOUT_REQUEST,
+    _PERSON_DESCRIBE_REQUEST,
+    _PERSON_POLITE_REQUEST,
 )
 # "¿Te acuerdas de cuando íbamos a bailar?" / "Do you remember when we went
 # dancing?" -> semantic memory retrieval. Checked before event markers so a
@@ -20,7 +52,6 @@ _EVENT_MARKERS = re.compile(
     r"\b(viene|vendrá|vienen|vendrán|cuándo|evento|eventos|quedada)\b",
     re.IGNORECASE,
 )
-_NAME = r"[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ-]*"
 _EVENT_PERSON = re.compile(
     rf"(?:viene|vienen|vendrá|vendrán)\s+(?P<arrival>{_NAME})"
     rf"|(?:evento|eventos|quedada)\b[^?¿]*?\b(?:tiene|hay|habrá|tendrá|es|son)\s+(?P<owner>{_NAME})",
@@ -71,7 +102,6 @@ _FACT_QUESTION = re.compile(
 # question about the assistant ("¿Qué música te gusta?") is never attached to
 # the previous fact subject.
 _FACT_FOLLOW_UP = re.compile(r"^\s*[¿]?\s*(?:y|and)\b", re.IGNORECASE)
-_NAME_PHRASE = rf"{_NAME}(?:\s+{_NAME})*"
 _FACT_SUBJECT_PREPOSITION = re.compile(
     rf"\b(?i:a|de|para|sobre)\s+(?P<name>{_NAME_PHRASE})"
 )
@@ -121,7 +151,9 @@ class IntentRouter:
     ``event_query`` > ``orientation_query`` > ``general_chat``. Orientation
     patterns are end-anchored so "¿Qué día viene María?" stays an event query.
     Fact questions are checked before event markers so "¿Cuándo nació Elena?"
-    asks for a stored fact instead of an event.
+    asks for a stored fact instead of an event. Natural request phrasings
+    ("Háblame de Elena", "Cuéntame sobre Miguel") are person queries, but they
+    require a proper-name subject so generic chat is not widened.
     """
 
     def route(self, text: str) -> RouteResult:
@@ -134,6 +166,17 @@ class IntentRouter:
             term = match.group(1).strip()
             if term:
                 return RouteResult(intent=Intent.person_query, term=term)
+
+        # Natural request phrasings join the same top-priority person query
+        # bucket. They require a capitalized proper name, so they never steal
+        # generic chat ("Cuéntame un chiste") or memory recall ("¿Te acuerdas
+        # de cuando venía María?").
+        for pattern in _PERSON_REQUEST_PATTERNS:
+            match = pattern.search(normalized)
+            if match:
+                term = match.group("name").strip()
+                if term:
+                    return RouteResult(intent=Intent.person_query, term=term)
 
         if _MEMORY_MARKERS.search(normalized):
             return RouteResult(intent=Intent.memory_query)
