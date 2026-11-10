@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Memo · Conversación</title>
-<link rel="stylesheet" href="/static/voice.css">
+<link rel="stylesheet" href="{{ asset_url('voice.css') }}">
 </head>
 <body>
 <div class="shell"
@@ -90,7 +90,7 @@
   </div>
 </dialog>
 
-<script src="/static/voice-silence.js" defer></script>
-<script src="/static/voice.js" defer></script>
+<script src="{{ asset_url('voice-silence.js') }}" defer></script>
+<script src="{{ asset_url('voice.js') }}" defer></script>
 </body>
 </html>

@@ -54,6 +54,7 @@ from app.security import (
     set_chat_session_cookie,
 )
 from app.services.conversation import ChatResult, ConversationService
+from app.web.assets import asset_url
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ _COOKIE_PATH = "/"
 templates = Jinja2Templates(
     directory=os.path.join(os.path.dirname(__file__), "templates")
 )
+templates.env.globals["asset_url"] = asset_url
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
