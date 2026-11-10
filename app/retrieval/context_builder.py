@@ -90,12 +90,15 @@ class AnswerContext:
     Events keep their own status so a planned or confirmed event is never
     phrased as a completed one. ``now`` is a code-provided clock (UTC) so any
     day/date/time statement is grounded in the application's time, never the
-    model's or the responder's own knowledge.
+    model's or the responder's own knowledge. ``follow_up_topic`` is set only
+    when a possessive follow-up carried the previous person forward; it holds
+    a natural Spanish noun phrase for an honest "no data about that yet" reply.
     """
 
     intent: Intent
     term: str | None = None
     resolution: ResolutionKind | None = None
+    follow_up_topic: str | None = None
     candidates: list[PersonCandidate] = field(default_factory=list)
     person: PersonCandidate | None = None
     verified_relations: list[RelationshipItem] = field(default_factory=list)

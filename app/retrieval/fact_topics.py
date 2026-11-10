@@ -27,6 +27,7 @@ class FactTopic(StrEnum):
     dislike = "dislike"
     hobby = "hobby"
     food = "food"
+    childhood = "childhood"
     drink = "drink"
     music = "music"
     place = "place"
@@ -79,6 +80,10 @@ _QUERY_RULES: tuple[tuple[FactTopic, re.Pattern[str]], ...] = (
             r"\b(?:aficion\w*|hobb\w*|interes\w*|"
             r"tiempo\s+libre|free\s+time)"
         ),
+    ),
+    (
+        FactTopic.childhood,
+        re.compile(r"\b(?:infancia\w*|ninez|childhood\w*|early\s+years?)\b"),
     ),
     (
         FactTopic.place,
@@ -200,6 +205,7 @@ _FACT_TYPES: dict[FactTopic, frozenset[str]] = {
     FactTopic.music: frozenset(
         {"musica", "musical", "cancion", "canciones", "music", "song"}
     ),
+    FactTopic.childhood: frozenset({"infancia", "ninez", "childhood", "early_years"}),
     FactTopic.place: frozenset(
         {
             "lugar",

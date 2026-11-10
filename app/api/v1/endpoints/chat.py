@@ -8,6 +8,7 @@ from app.api.deps import (
     ClaimExtractorDep,
     ClaimGrouperDep,
     EmbedderDep,
+    InterpreterDep,
     ResponderDep,
     get_db,
 )
@@ -35,6 +36,7 @@ async def chat(
     db: DbSession,
     responder: ResponderDep,
     embedder: EmbedderDep,
+    interpreter: InterpreterDep,
     claim_extractor: ClaimExtractorDep,
     claim_grouper: ClaimGrouperDep,
     claim_contradiction_detector: ClaimContradictionDetectorDep,
@@ -49,6 +51,7 @@ async def chat(
             claim_extractor=claim_extractor,
             claim_grouper=claim_grouper,
             claim_contradiction_detector=claim_contradiction_detector,
+            interpreter=interpreter,
         ).handle_user_message(
             text=payload.message,
             conversation_id=payload.conversation_id,

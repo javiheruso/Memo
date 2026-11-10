@@ -102,6 +102,65 @@ _FACT_QUESTION = re.compile(
 # question about the assistant ("¿Qué música te gusta?") is never attached to
 # the previous fact subject.
 _FACT_FOLLOW_UP = re.compile(r"^\s*[¿]?\s*(?:y|and)\b", re.IGNORECASE)
+# A possessive follow-up keeps the previous person but names a topic through
+# "su"/"sus" ("Háblame sobre su infancia"). It must be a request/question shape
+# and mention a recognizable fact topic, so unrelated possessive phrases stay
+# general chat. The subject is never extracted here; the caller supplies the
+# immediately previous resolved person.
+_POSSESSIVE_FOLLOW_UP = re.compile(
+    r"^\s*[¿¡]?\s*(?:"
+    r"(?:h[áa]blame|cu[ée]ntame|dime)\s+(?:algo\s+)?(?:de|sobre|acerca\s+de)"
+    r"|(?:qu[ée]|que)\s+(?:sabes|conoces|tienes|hay)\s+(?:de|sobre|acerca\s+de)"
+    r"|(?:c[óo]mo|como)\s+(?:era|fue)"
+    r")\s+(?:sus|su)\s+(?P<topic>[^?.!¿¡]+?)\s*[?.!¿¡]*$",
+    re.IGNORECASE,
+)
+# Natural Spanish labels used when a carried-topic follow-up has no matching
+# data. They are noun phrases so "No sé nada de <label> de <person> todavía"
+# reads naturally without exposing storage or system internals.
+FOLLOW_UP_TOPIC_LABELS: dict[FactTopic, str] = {
+    FactTopic.preference: "los gustos",
+    FactTopic.dislike: "los disgustos",
+    FactTopic.hobby: "las aficiones",
+    FactTopic.food: "la comida",
+    FactTopic.drink: "la bebida",
+    FactTopic.music: "la música",
+    FactTopic.childhood: "la infancia",
+    FactTopic.place: "la residencia",
+    FactTopic.occupation: "el trabajo",
+    FactTopic.habit: "las costumbres",
+    FactTopic.belief: "las opiniones",
+    FactTopic.value: "los valores",
+    FactTopic.conversation: "la forma de hablar",
+    FactTopic.family: "la familia",
+    FactTopic.general: "eso",
+}
+# Pronoun follow-ups keep the previous resolved person without naming it:
+# "¿Y ella?", "¿Qué sabes de él?", "Háblame de ese". The subject is never
+# extracted here; the caller supplies the immediately previous resolved person
+# and refuses when there is none (for example after an ambiguous answer).
+_PRONOUN_REFERENCE = r"(?:él|ella|ellos|ellas|ese|esa)"
+_PRONOUN_FOLLOW_UP_PATTERNS = (
+    re.compile(
+        rf"^\s*[¿¡]?\s*(?:y\s+)?{_PRONOUN_REFERENCE}\s*[?.!¿¡]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"^\s*[¿¡]?\s*(?:qu[ée]|que)\s+(?:sabes|conoces|tienes)\s+"
+        rf"(?:de|sobre|acerca\s+de)\s+{_PRONOUN_REFERENCE}\s*[?.!¿¡]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"^\s*[¿¡]?\s*(?:h[áa]blame|cu[ée]ntame|dime)\s+(?:algo\s+)?"
+        rf"(?:de|sobre|acerca\s+de)\s+{_PRONOUN_REFERENCE}\s*[?.!¿¡]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"^\s*[¿¡]?\s*(?:qui[ée]n|quien)\s+(?:es|era|fue)\s+"
+        rf"{_PRONOUN_REFERENCE}\s*[?.!¿¡]*$",
+        re.IGNORECASE,
+    ),
+)
 _FACT_SUBJECT_PREPOSITION = re.compile(
     rf"\b(?i:a|de|para|sobre)\s+(?P<name>{_NAME_PHRASE})"
 )
@@ -137,6 +196,7 @@ class RouteResult:
     intent: Intent
     term: str | None = None
     fact_topic: FactTopic | None = None
+    follow_up_topic: str | None = None
 
 
 class IntentRouter:
@@ -226,3 +286,49 @@ class IntentRouter:
         if topic is None:
             return None
         return RouteResult(intent=Intent.fact_query, term=None, fact_topic=topic)
+
+    def route_possessive_follow_up(self, text: str) -> RouteResult | None:
+        """Classify a follow-up that names a topic with "su"/"sus".
+
+        Examples: "Háblame sobre su infancia", "cuentame de su ninez",
+        "¿Qué sabes de su familia?". The method extracts only the topic; the
+        caller supplies the immediately previous resolved person. An explicit
+        name in the same phrase is left to :meth:`route`, so this method never
+        overrides a new subject. Returns ``None`` when the text is not a
+        recognizable possessive request or no fact family matches.
+        """
+        normalized = text.strip()
+        if not normalized:
+            return None
+        match = _POSSESSIVE_FOLLOW_UP.search(normalized)
+        if match is None:
+            return None
+        if _extract_fact_subject(normalized) is not None:
+            return None
+        topic_text = match.group("topic").strip()
+        topic = classify_fact_question(topic_text)
+        if topic is None:
+            return None
+        return RouteResult(
+            intent=Intent.fact_query,
+            term=None,
+            fact_topic=topic,
+            follow_up_topic=FOLLOW_UP_TOPIC_LABELS.get(topic),
+        )
+
+    def route_pronoun_follow_up(self, text: str) -> RouteResult | None:
+        """Classify a pronoun-only request for the previous resolved person.
+
+        Examples: "¿Y ella?", "¿Qué sabes de él?", "Háblame de ese". The method
+        returns a ``person_query`` with no term; the caller supplies the
+        immediately previous resolved person or leaves the turn unchanged. An
+        explicit name is never overridden.
+        """
+        normalized = text.strip()
+        if not normalized:
+            return None
+        if _extract_fact_subject(normalized) is not None:
+            return None
+        if any(pattern.match(normalized) for pattern in _PRONOUN_FOLLOW_UP_PATTERNS):
+            return RouteResult(intent=Intent.person_query)
+        return None

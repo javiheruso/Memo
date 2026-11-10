@@ -13,8 +13,11 @@ Events are phrased by their own status: a planned or confirmed event is never
 presented as already completed.
 """
 
+import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
+from app.domain.conversation_context import ConversationStyle, ConversationTurn
 from app.domain.enums import (
     EpistemicKind,
     EventStatus,
@@ -49,6 +52,38 @@ _GENERAL_REPLY = "Estoy aquí para conversar. Cuéntame de qué te apetece habla
 _UNKNOWN_REPLY = "No he entendido bien lo que has dicho. ¿Puedes repetirlo?"
 _EVENT_ASK_WHOSE = "¿De quién quieres saber sus eventos?"
 _FACT_ASK_WHOSE = "¿De quién quieres saber ese dato?"
+
+# Short deterministic acknowledgements for conversational turns. They never
+# mention storage, system internals, or invented data, and the continued-chat
+# reply deliberately avoids greeting or restarting the conversation on every
+# turn when the responder has recent history.
+_AFFIRMATION_REPLY = "Vale."
+_NEGATION_REPLY = "Entiendo."
+_THANKS_REPLY = "De nada."
+_FAREWELL_REPLY = "Hasta luego."
+_PERSONAL_COMMENT_REPLY = "Gracias por contármelo."
+_CONTINUE_REPLY = "Te escucho."
+
+_AFFIRMATION = re.compile(
+    r"^\s*[¡¿]?\s*(?:s[íi]|claro|vale|de acuerdo|perfecto|bueno|ok|okey|ajá|aja)\b",
+    re.IGNORECASE,
+)
+_NEGATION = re.compile(
+    r"^\s*[¡¿]?\s*(?:no|nada|para nada|ni hablar)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+_THANKS = re.compile(r"\b(?:gracias|te lo agradezco)\b", re.IGNORECASE)
+_FAREWELL = re.compile(
+    r"\b(?:adi[oó]s|hasta luego|hasta pronto|nos vemos)\b", re.IGNORECASE
+)
+# A personal comment is a first-person statement the deterministic responder
+# can acknowledge without inventing anything. It is intentionally narrow: a
+# third-person recollection ("Vivíamos en Madrid") stays general chat instead of
+# being acknowledged as a present feeling.
+_PERSONAL_COMMENT = re.compile(
+    r"\b(?:me|mi|mis|estoy|tengo|quiero|siento|creo|necesito|prefiero|he)\b",
+    re.IGNORECASE,
+)
 
 _SOURCE_LABELS: dict[str, str] = {
     SourceType.user.value: "lo que me contó la propia persona",
@@ -87,11 +122,20 @@ _MONTHS = (
 
 
 class DeterministicResponder(Responder):
-    async def respond(self, context: AnswerContext) -> Response:
+    async def respond(
+        self,
+        context: AnswerContext,
+        *,
+        message: str | None = None,
+        history: Sequence[ConversationTurn] = (),
+        style: ConversationStyle | None = None,
+    ) -> Response:
         if context.sensitive_topic_requested is not None:
             return self._sensitive_topic_response(context)
         if context.intent == Intent.general_chat:
-            return Response(text=_GENERAL_REPLY)
+            return self._respond_general_chat(
+                message=message, history=history, style=style
+            )
         if context.intent == Intent.orientation_query:
             return self._respond_orientation_query(context)
         if context.intent == Intent.event_query:
@@ -105,6 +149,39 @@ class DeterministicResponder(Responder):
         if context.intent != Intent.person_query:
             return Response(text=_UNKNOWN_REPLY)
         return self._respond_person_query(context)
+
+    @staticmethod
+    def _respond_general_chat(
+        *,
+        message: str | None,
+        history: Sequence[ConversationTurn],
+        style: ConversationStyle | None,
+    ) -> Response:
+        """Answer a conversational turn briefly and naturally.
+
+        The reply depends only on the current message and whether the
+        conversation already has history. It never greets or restarts the
+        conversation on every turn, never invents data, and never mentions
+        storage or system internals. ``style`` is accepted for parity with the
+        provider responder; the deterministic copy stays short and does not
+        require a configured name.
+        """
+        text = (message or "").strip()
+        if not text:
+            return Response(text=_GENERAL_REPLY)
+        if _AFFIRMATION.search(text):
+            return Response(text=_AFFIRMATION_REPLY)
+        if _NEGATION.search(text):
+            return Response(text=_NEGATION_REPLY)
+        if _THANKS.search(text):
+            return Response(text=_THANKS_REPLY)
+        if _FAREWELL.search(text):
+            return Response(text=_FAREWELL_REPLY)
+        if _PERSONAL_COMMENT.search(text):
+            return Response(text=_PERSONAL_COMMENT_REPLY)
+        if history:
+            return Response(text=_CONTINUE_REPLY)
+        return Response(text=_GENERAL_REPLY)
 
     @staticmethod
     def _sensitive_topic_response(context: AnswerContext) -> Response:
@@ -270,6 +347,13 @@ class DeterministicResponder(Responder):
             and item.epistemic == EpistemicKind.probable_fact
         ]
         if not verified_facts and not probable_facts:
+            if context.follow_up_topic is not None:
+                return Response(
+                    text=(
+                        f"No sé nada de {context.follow_up_topic} de {display} todavía."
+                    ),
+                    sources=[ResponseSourceRef("person", context.person.id, "subject")],
+                )
             return Response(
                 text=f"No tengo guardado ningún dato sobre eso de {display}.",
                 sources=[

@@ -26,12 +26,12 @@ from tests.fixtures.universe import SeedUniverse
 
 
 class RaisingResponder(Responder):
-    async def respond(self, context: AnswerContext) -> Response:
+    async def respond(self, context: AnswerContext, **_kwargs) -> Response:
         raise RuntimeError("responder exploded")
 
 
 class StubResponder(Responder):
-    async def respond(self, context: AnswerContext) -> Response:
+    async def respond(self, context: AnswerContext, **_kwargs) -> Response:
         return Response(text="respuesta de prueba")
 
 

@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "gpt-4o-mini"
     llm_timeout_seconds: float = 30.0
+    # Optional low-confidence routing interpreter. It is disabled by default and
+    # only reuses the LLM endpoint/key when explicitly selected. The history and
+    # input bounds keep the optional network call small and predictable.
+    interpreter: str = ""
+    interpreter_base_url: str = ""
+    interpreter_api_key: str | None = None
+    interpreter_model: str = ""
+    interpreter_timeout_seconds: float = Field(default=10.0, gt=0)
+    interpreter_history_turns: int = Field(default=4, ge=0, le=50)
+    interpreter_max_history_chars: int = Field(default=1200, gt=0, le=8000)
+    interpreter_max_input_chars: int = Field(default=400, gt=0, le=4000)
     embedder_base_url: str = ""
     embedder_api_key: str | None = None
     embedder_model: str = "text-embedding-3-small"

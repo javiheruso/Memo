@@ -38,7 +38,7 @@ class StubResponder(Responder):
     def __init__(self, text: str = "stub answer") -> None:
         self._text = text
 
-    async def respond(self, context: AnswerContext) -> Response:
+    async def respond(self, context: AnswerContext, **_kwargs) -> Response:
         return Response(text=self._text)
 
 

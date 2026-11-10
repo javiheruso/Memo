@@ -15,11 +15,13 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
 
 from app.core.config import Settings
+from app.domain.conversation_context import ConversationStyle, ConversationTurn
 from app.llm.base import Responder, Response
 from app.llm.deterministic import DeterministicResponder
 from app.llm.prompt_builder import allowed_sources, build_prompt
@@ -97,9 +99,18 @@ class OpenAICompatibleResponder(Responder):
             timeout_seconds=settings.llm_timeout_seconds,
         )
 
-    async def respond(self, context: AnswerContext) -> Response:
+    async def respond(
+        self,
+        context: AnswerContext,
+        *,
+        message: str | None = None,
+        history: Sequence[ConversationTurn] = (),
+        style: ConversationStyle | None = None,
+    ) -> Response:
         try:
-            prompt = build_prompt(context)
+            prompt = build_prompt(
+                context, message=message, history=history, style=style
+            )
             messages = [
                 {"role": "system", "content": prompt.system},
                 {"role": "user", "content": prompt.user},
@@ -109,7 +120,9 @@ class OpenAICompatibleResponder(Responder):
         except (httpx.HTTPError, InvalidModelOutput) as exc:
             # Fail closed: the deterministic responder handles this turn.
             _log_fallback(exc)
-            return await self._fallback.respond(context)
+            return await self._fallback.respond(
+                context, message=message, history=history, style=style
+            )
 
     async def _call_model(self, messages: list[dict[str, str]]) -> str:
         url = f"{self._base_url}/chat/completions"

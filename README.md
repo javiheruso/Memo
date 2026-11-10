@@ -210,6 +210,118 @@ How it stays within the trust model:
 The test suite exercises the provider through `httpx.MockTransport` and never
 makes real network calls.
 
+### Optional low-confidence interpreter
+
+An optional routing interpreter can suggest a route when the deterministic
+router and the carry-over rules leave a conversational turn as
+`general_chat`/`unknown`. It is disabled by default and only runs when
+explicitly enabled. It reuses the existing OpenAI-compatible endpoint and key
+unless interpreter-specific values are configured.
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `MEMO_INTERPRETER` | *(empty)* | `openai_compatible`, or unset/`none` to disable |
+| `MEMO_INTERPRETER_BASE_URL` | *(empty)* | Falls back to `MEMO_LLM_BASE_URL` |
+| `MEMO_INTERPRETER_API_KEY` | *(unset)* | Falls back to `MEMO_LLM_API_KEY` |
+| `MEMO_INTERPRETER_MODEL` | *(empty)* | Falls back to `MEMO_LLM_MODEL` |
+| `MEMO_INTERPRETER_TIMEOUT_SECONDS` | `10.0` | HTTP timeout for the interpreter call |
+| `MEMO_INTERPRETER_HISTORY_TURNS` | `4` | Maximum prior turns sent as context |
+| `MEMO_INTERPRETER_MAX_HISTORY_CHARS` | `1200` | Maximum total history characters |
+| `MEMO_INTERPRETER_MAX_INPUT_CHARS` | `400` | Oversized messages skip the interpreter |
+
+How it stays within the trust model:
+
+- It is called at most once per turn, only after deterministic routing and
+  carry-over fail to resolve the turn, and never for an explicitly requested
+  sensitive topic, a resolved carry-over, an empty message, or oversized text.
+- Recent history is current-conversation-only, bounded, re-filtered against the
+  active sensitive-topic policy, and delimited as untrusted JSON. It never
+  includes ids, response sources, embeddings, audio, or internal records.
+- The response is validated with a strict Pydantic schema (`extra="forbid"`) and
+  may only propose an intent, a person term, a `FactTopic`, and a bounded
+  follow-up topic. Answers, source ids, person ids, confidence scores, and
+  arbitrary fields are rejected.
+- The suggested name is resolved through the existing `EntityResolver`. An
+  unknown name is discarded without creating a knowledge gap or a source; an
+  ambiguous name surfaces the existing candidate question and is never picked
+  by the model.
+- Any HTTP, timeout, schema, or verification failure cleanly falls back to the
+  existing deterministic behavior. The network call happens before the turn's
+  write transaction, and no interpreter text is logged.
+
+The test suite mocks the interpreter endpoint through `httpx.MockTransport` and
+never makes real network calls.
+
+### Conversational continuity and responder context
+
+Every chat and voice turn runs the same `ConversationService`. In addition to
+the verified `AnswerContext`, the responder receives:
+
+- the current user message;
+- a bounded recent-conversation snapshot for the *current conversation only*;
+- the active profile's `preferred_name`, `conversational_style`, and
+  `positive_topics` as style guidance.
+
+The conversation snapshot is deliberately separate from the fact, memory,
+event, media and source sections. It carries only `role` and `text`, is
+re-filtered against the active sensitive-topic policy, and is serialized as
+escaped untrusted JSON. A prior turn can therefore never become a fact or a
+citable `response_sources` entry, and a prompt-injection attempt cannot spoof
+the `<untrusted_...>` delimiter tags. The OpenAI-compatible responder still
+validates every returned source id against the context's allowed set.
+
+The deterministic responder now answers affirmations and first-person comments
+with short, natural Spanish copy (`Vale.`, `Entiendo.`, `Gracias por
+contármelo.`, `Te escucho.`, `Hasta luego.`). It only uses the generic
+"Estoy aquí para conversar…" opener on a first conversational turn; with
+history it continues without greeting or restarting. These replies never
+mention storage, databases, or other system internals and never invent data.
+
+Continuity rules are deterministic and intentionally narrow:
+
+- Elliptical fact follow-ups ("¿Y de comer?", "¿Y dónde vivió?") carry the
+  previous resolved `fact_query` subject.
+- Possessive follow-ups ("Háblame sobre su infancia") carry the previous
+  resolved person from a `person_query` or `fact_query`.
+- Pronoun follow-ups ("¿Y ella?", "¿Qué sabes de él?", "Háblame de ese") carry
+  the previous resolved person only when the immediately preceding assistant
+  turn resolved one.
+- A new conversation, an unrelated turn, an unresolved/ambiguous turn, or an
+  explicit new subject resets the carried context. Ambiguity is never silently
+  collapsed and a pronoun after candidates never picks one.
+
+Bounds and call behavior (constants in `app/domain/conversation_context.py`):
+
+| Bound | Value |
+|-------|-------|
+| Recent turns sent to a responder | at most `8` |
+| Total responder history characters | at most `2000` |
+| Interpreter history turns | `4` by default (`MEMO_INTERPRETER_HISTORY_TURNS`) |
+| Total interpreter history characters | `1200` by default (`MEMO_INTERPRETER_MAX_HISTORY_CHARS`) |
+| Interpreter input characters | `400` by default (`MEMO_INTERPRETER_MAX_INPUT_CHARS`) |
+
+Call count per turn: the deterministic and OpenAI-compatible responders make at
+most one responder call; provider calls are `0` for the deterministic responder
+and `1` chat-completion call for the OpenAI-compatible responder. When the
+optional interpreter is enabled and the deterministic route is unresolved, it
+adds at most one more completion call (maximum `2` provider calls in a turn).
+Resolved routes, pending ambiguity, explicit sensitive-topic requests, empty
+messages, oversized messages, and resolved carry-overs skip the interpreter.
+Tests use fake/mocked providers only and make no real network calls.
+
+The history bounds are character-based, so token and monetary cost depend on
+the configured provider and model. As a rough planning bound, `2000` characters
+are approximately `500` tokens and `1200` interpreter-history characters are
+approximately `300` tokens, before the fixed system prompt; no pricing is
+asserted here because provider prices change.
+
+Remaining limitations for this slice: continuity only follows the immediately
+previous resolved turn and does not attempt semantic reference resolution; a
+pronoun refers to the last resolved person, not necessarily the entity a human
+would infer; a generic conversational turn clears pending ambiguity; history is
+read from stored messages rather than a separate window table; and there is no
+cross-conversation memory.
+
 ### Real embeddings provider
 
 Setting `MEMO_EMBEDDER=openai_compatible` switches the semantic memory
@@ -613,6 +725,19 @@ ambiguous fact answer with `candidate` sources, or an explicit subject in the
 follow-up all reset the carried context, so the router never guesses a person.
 Status and provenance rendering are the same as a fresh question because the
 follow-up runs through the same scoped fact retriever and responder.
+
+Possessive follow-ups such as "Háblame sobre su infancia" or "cuentame de su
+familia" reuse the person established by the immediately previous resolved
+person or fact answer. They are recognized from the request shape plus a
+possessive and a known fact topic, so lowercase or accentless speech
+transcripts work. When no verified or probable fact answers the topic, the
+reply is natural and names the person without exposing storage or system
+internals ("No sé nada de la infancia de Elena todavía."). Pronoun follow-ups
+such as "¿Y ella?", "¿Qué sabes de él?" or "Háblame de ese" reuse the same
+immediately previous resolved person when one exists. The same narrow
+continuity rules apply: a new conversation, an unrelated turn, or an ambiguous
+answer never carries the person forward, and a pronoun after ambiguity never
+selects a candidate.
 
 The active sensitive-topic policy runs before and after this path unchanged:
 blocked-topic facts are withheld from the context, an explicit sensitive

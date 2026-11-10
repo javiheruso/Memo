@@ -17,8 +17,11 @@ Memo is a Spanish-first conversational companion for older adults. It works with
 
 ## Implemented
 
-- Public chat and voice endpoints, with conversational retrieval over facts, memories, events, and preferences.
-- Intent routing, entity resolution, ambiguity handling, semantic memory retrieval, and one-turn fact-query follow-ups.
+- Public chat and voice endpoints, with conversational retrieval over facts, memories, events, and preferences. Both paths run the same `ConversationService`.
+- Intent routing, entity resolution, ambiguity handling, semantic memory retrieval, and deterministic continuity across adjacent turns (elliptical fact follow-ups, possessive follow-ups, and pronoun follow-ups such as él/ella/ese).
+- Bounded responder context: the current message, a current-conversation-only untrusted history snapshot, and the active profile style are passed separately from facts and sources; history is policy-filtered and can never become a fact or source.
+- Natural short deterministic replies for affirmations and first-person comments that do not greet or restart every turn and do not expose storage/system language.
+- Optional schema-validated low-confidence interpreter with fail-closed timeout/invalid-output fallback and strict source/person verification.
 - Trust controls for provenance, uncertainty, event status, no invention, and sensitive topics.
 - Protected admin UI/API for curated data, claims, knowledge gaps, profiles, and onboarding.
 - Explicit, consent-gated onboarding activation with transactional materialization and provenance.
@@ -53,6 +56,13 @@ The following are documented as deferred, not current functionality:
 - Keep claim-ingestion failures isolated from the user-facing response.
 - Code and technical documentation are English; user-facing UI copy is Spanish.
 - Run the appropriate SQLite/PostgreSQL and migration checks when changing persistence or retrieval behavior.
+
+## Conversation continuity and provider bounds
+
+- History sent to a responder is capped at 8 turns / 2000 characters; the optional interpreter is capped at 4 turns / 1200 characters (configurable) and 400 input characters.
+- Deterministic mode makes no network calls. An OpenAI-compatible responder makes one completion per turn; the optional interpreter adds at most one completion only for unresolved safe conversational turns (maximum two provider calls).
+- Sensitive-topic turns are removed from provider history even after being stored and shown to the person. History contains only role and text, never ids, sources, embeddings, audio, or stored records.
+- Continuity is limited to the immediately previous resolved turn; there is no semantic reference resolution or cross-conversation memory. A generic conversational turn clears pending ambiguity.
 
 ## Known risks and pending remediation
 

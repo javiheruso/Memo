@@ -2,7 +2,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,9 +13,25 @@ from app.claims.contradiction import (
 )
 from app.claims.deterministic import DeterministicClaimExtractor
 from app.claims.grouping import ClaimGrouper, DeterministicClaimGrouper
+from app.domain.conversation_context import (
+    DEFAULT_RESPONDER_HISTORY_TURNS,
+    DEFAULT_RESPONDER_MAX_HISTORY_CHARS,
+    ConversationStyle,
+    ConversationTurn,
+    bound_conversation_history,
+)
+from app.domain.conversation_window import ConversationWindow
 from app.domain.enums import Intent
 from app.embeddings.base import Embedder
 from app.llm.base import Responder, Response
+from app.llm.interpreter import (
+    DEFAULT_INTERPRETER_HISTORY_TURNS,
+    DEFAULT_INTERPRETER_MAX_HISTORY_CHARS,
+    DEFAULT_INTERPRETER_MAX_INPUT_CHARS,
+    Interpreter,
+    InterpreterHistoryTurn,
+    bound_interpreter_history,
+)
 from app.models import ConversationProfile, KnowledgeGap, Person
 from app.policies.sensitive_topics import (
     SPONTANEOUS_SUPPRESSION_REPLY,
@@ -24,8 +40,10 @@ from app.policies.sensitive_topics import (
     answer_leaks_blocked_topic,
     apply_to_context,
     evaluate,
+    matches_topic,
 )
 from app.repositories.conversation import (
+    ConversationAccessDenied,
     ConversationRepository,
     ResponseSourceRef,
 )
@@ -41,12 +59,24 @@ from app.retrieval.context_builder import AnswerContext, ContextBuilder
 from app.retrieval.disambiguation import DisambiguationResolver
 from app.retrieval.entity_resolver import EntityResolver, Resolution, ResolutionKind
 from app.retrieval.fact_topics import FactTopic
-from app.retrieval.intent_router import IntentRouter
+from app.retrieval.intent_router import IntentRouter, RouteResult
+from app.retrieval.interpreter_verifier import (
+    InterpreterVerifier,
+    VerifiedInterpreterRoute,
+)
 from app.retrieval.semantic_retriever import SemanticRetriever
 from app.retrieval.structured_retriever import StructuredRetriever
 from app.services.claim_ingestion import ClaimIngestionService
 
 logger = logging.getLogger(__name__)
+
+
+def _log_interpreter_failure(exc: Exception) -> None:
+    """Log only the failure category; never conversation or model text."""
+    logger.warning(
+        "interpreter verification failed; keeping deterministic routing (category=%s)",
+        type(exc).__name__,
+    )
 
 
 def _topics_from_profile(
@@ -62,6 +92,20 @@ def _topics_from_profile(
         )
         for topic in profile.sensitive_topics
     )
+
+
+def _style_from_profile(
+    profile: ConversationProfile | None,
+) -> ConversationStyle | None:
+    """Return only the verified profile style sent to a responder."""
+    if profile is None:
+        return None
+    return ConversationStyle(
+        preferred_name=profile.preferred_name,
+        conversational_style=profile.conversational_style,
+        positive_topics=tuple(profile.positive_topics or ()),
+    )
+
 
 # Only conversational turns can contribute candidate claims. Retrieval intents
 # (person/memory/event/orientation queries) ask the system for information; the
@@ -99,6 +143,7 @@ class ConversationService:
         claim_extractor: ClaimExtractor | None = None,
         claim_grouper: ClaimGrouper | None = None,
         claim_contradiction_detector: ContradictionDetector | None = None,
+        interpreter: Interpreter | None = None,
     ) -> None:
         self._session = session
         self._router = IntentRouter()
@@ -123,6 +168,8 @@ class ConversationService:
         self._disambiguation = DisambiguationResolver(PersonRepository(session))
         self._gaps = KnowledgeGapRepository(session)
         self._profiles = ConversationProfileRepository(session)
+        self._interpreter = interpreter
+        self._interpreter_verifier = InterpreterVerifier(self._resolver)
         self._claim_extractor = claim_extractor or DeterministicClaimExtractor()
         self._claim_ingestion = ClaimIngestionService(
             session,
@@ -166,16 +213,27 @@ class ConversationService:
             tuple(profile.positive_topics or ()) if profile is not None else ()
         )
 
+        # Load the bounded continuity snapshot before the write unit. This keeps
+        # the optional interpreter network call outside the turn transaction,
+        # and every later continuity decision derives from this same snapshot.
+        window = await self._load_turn_window(conversation_id, owner_session_id)
+        responder_history = self._responder_history(window, sensitive_topics)
+        style = _style_from_profile(profile)
+
+        interpreter_route: VerifiedInterpreterRoute | None = None
+        if self._should_interpret(text, route, window, sensitive_evaluation):
+            interpreter_route = await self._interpret(text, window, sensitive_topics)
+
         async with self._turn_transaction():
             conversation = await self._conversations.get_or_create(
                 conversation_id,
                 owner_session_id=owner_session_id,
                 commit=False,
             )
+            if window is None:
+                window = ConversationWindow(conversation_id=conversation.id)
 
-            pending = await self._conversations.last_assistant_candidates(
-                conversation.id
-            )
+            pending = window.pending_person_candidates()
             if pending:
                 person = await self._disambiguation.resolve(text, pending)
                 if person is not None:
@@ -185,6 +243,8 @@ class ConversationService:
                         person,
                         sensitive_evaluation,
                         positive_topics,
+                        history=responder_history,
+                        style=style,
                     )
 
             # Elliptical follow-ups ("¿Y de comer?", "¿Y dónde vivió?") keep the
@@ -193,12 +253,12 @@ class ConversationService:
             # an ambiguous answer, so this never guesses after unrelated turns
             # or multiple candidate persons.
             follow_up_resolution: Resolution | None = None
+            follow_up_topic: str | None = None
+            interpreter_applied = False
             if route.intent in (Intent.general_chat, Intent.event_query):
                 follow_up_route = self._router.route_fact_follow_up(text)
                 if follow_up_route is not None:
-                    subject_id = await self._conversations.last_fact_subject(
-                        conversation.id
-                    )
+                    subject_id = window.last_fact_subject()
                     if subject_id is not None:
                         subject = await self._people.get(subject_id)
                         if subject is not None:
@@ -206,6 +266,51 @@ class ConversationService:
                                 subject.display_name, [subject]
                             )
                             route = follow_up_route
+                else:
+                    # Possessive follow-ups ("Háblame sobre su infancia") keep
+                    # the immediately previous resolved person, whether that
+                    # answer was a person or fact query. The repository returns
+                    # None after unrelated or ambiguous turns, so no subject
+                    # leaks into a new topic.
+                    possessive_route = self._router.route_possessive_follow_up(text)
+                    if possessive_route is not None:
+                        subject_id = window.last_resolved_person()
+                        if subject_id is not None:
+                            subject = await self._people.get(subject_id)
+                            if subject is not None:
+                                follow_up_resolution = Resolution.from_people(
+                                    subject.display_name, [subject]
+                                )
+                                follow_up_topic = possessive_route.follow_up_topic
+                                route = possessive_route
+                    else:
+                        # Pronoun follow-ups ("¿Y ella?", "¿Qué sabes de él?")
+                        # also need an immediately previous resolved person.
+                        # After an ambiguous or unrelated turn there is none, so
+                        # the turn stays conversational and nothing leaks.
+                        pronoun_route = self._router.route_pronoun_follow_up(text)
+                        if pronoun_route is not None:
+                            subject_id = window.last_resolved_person()
+                            if subject_id is not None:
+                                subject = await self._people.get(subject_id)
+                                if subject is not None:
+                                    follow_up_resolution = Resolution.from_people(
+                                        subject.display_name, [subject]
+                                    )
+                                    route = pronoun_route
+
+            # Only a turn the deterministic router and carry-over rules left
+            # unresolved may use the verified interpreter route. The explicit
+            # follow-up above always wins.
+            if (
+                interpreter_route is not None
+                and follow_up_resolution is None
+                and route.intent in (Intent.general_chat, Intent.unknown)
+            ):
+                route = interpreter_route.route
+                follow_up_resolution = interpreter_route.resolution
+                follow_up_topic = interpreter_route.route.follow_up_topic
+                interpreter_applied = True
 
             resolution: Resolution | None = None
             context: AnswerContext
@@ -242,11 +347,19 @@ class ConversationService:
             else:
                 context = AnswerContext(intent=route.intent, term=route.term)
 
+            if follow_up_topic is not None:
+                context = replace(context, follow_up_topic=follow_up_topic)
+
             context = apply_to_context(
                 context, sensitive_evaluation, positive_topics=positive_topics
             )
             answer = await self._respond(
-                context, sensitive_evaluation, conversation.id
+                context,
+                sensitive_evaluation,
+                conversation.id,
+                message=text,
+                history=responder_history,
+                style=style,
             )
 
             user_message = await self._conversations.add_message(
@@ -271,7 +384,14 @@ class ConversationService:
 
             gap: KnowledgeGap | None = None
             gap_created = False
-            if context.resolution == ResolutionKind.not_found and route.term:
+            # A verified interpreter route never reaches ``not_found`` (unknown
+            # names are discarded), and this guard makes that invariant explicit:
+            # an interpreter suggestion can never open a knowledge gap.
+            if (
+                not interpreter_applied
+                and context.resolution == ResolutionKind.not_found
+                and route.term
+            ):
                 gap, gap_created = await self._gaps.upsert(
                     gap_type="person_unknown",
                     canonical_reference=route.term.lower(),
@@ -300,6 +420,154 @@ class ConversationService:
             gap_created=gap_created,
         )
 
+    async def _load_turn_window(
+        self,
+        conversation_id: uuid.UUID | None,
+        owner_session_id: str | None,
+    ) -> ConversationWindow | None:
+        """Load the bounded continuity snapshot before the write unit.
+
+        ``None`` means there is no existing conversation to read: either a new
+        conversation was requested, or a non-owned/missing id will be handled by
+        ``get_or_create`` exactly as before. A foreign conversation raises the
+        same access error as the existing ownership checks.
+        """
+        if conversation_id is None:
+            return None
+        window = await self._conversations.load_window(
+            conversation_id, owner_session_id=owner_session_id
+        )
+        if window is None and owner_session_id is not None:
+            raise ConversationAccessDenied
+        return window
+
+    def _should_interpret(
+        self,
+        text: str,
+        route: RouteResult,
+        window: ConversationWindow | None,
+        sensitive_evaluation: SensitiveTopicEvaluation,
+    ) -> bool:
+        """True only for an unresolved, safe, bounded conversational turn.
+
+        Already-resolved deterministic routes, pending ambiguity, resolved
+        carry-over, configured sensitive-topic requests, and empty or oversized
+        text never reach the optional network call.
+        """
+        if self._interpreter is None:
+            return False
+        if route.intent not in (Intent.general_chat, Intent.unknown):
+            return False
+        max_input_chars = getattr(
+            self._interpreter,
+            "max_input_chars",
+            DEFAULT_INTERPRETER_MAX_INPUT_CHARS,
+        )
+        normalized = text.strip()
+        if not normalized or len(normalized) > max_input_chars:
+            return False
+        if sensitive_evaluation.requested is not None:
+            return False
+        if window is None:
+            return True
+        if window.pending_person_candidates():
+            return False
+
+        follow_up = self._router.route_fact_follow_up(normalized)
+        if follow_up is not None:
+            return window.last_fact_subject() is None
+        possessive = self._router.route_possessive_follow_up(normalized)
+        if possessive is not None:
+            return window.last_resolved_person() is None
+        return True
+
+    def _responder_history(
+        self,
+        window: ConversationWindow | None,
+        sensitive_topics: tuple[SensitiveTopic, ...],
+    ) -> tuple[ConversationTurn, ...]:
+        """Build a bounded, current-conversation-only, re-filtered history.
+
+        Only role and text are carried. Turns matching any configured sensitive
+        topic are dropped so a blocked topic never reaches a responder through
+        conversational context, even though the transcript was already shown to
+        the person. The snapshot never includes ids, sources or stored records,
+        so no history item can become a fact or a source.
+        """
+        if window is None:
+            return ()
+        turns = [
+            ConversationTurn(role=turn.speaker, text=turn.text)
+            for turn in window.turns
+            if turn.speaker in ("user", "assistant")
+            and not any(matches_topic(turn.text, topic) for topic in sensitive_topics)
+        ]
+        return bound_conversation_history(
+            turns,
+            max_turns=DEFAULT_RESPONDER_HISTORY_TURNS,
+            max_chars=DEFAULT_RESPONDER_MAX_HISTORY_CHARS,
+        )
+
+    def _interpreter_history(
+        self,
+        window: ConversationWindow | None,
+        sensitive_topics: tuple[SensitiveTopic, ...],
+    ) -> tuple[InterpreterHistoryTurn, ...]:
+        """Build a bounded, current-conversation-only, re-filtered history.
+
+        Only role and text are carried. Turns matching any configured sensitive
+        topic are dropped again here, even though the transcript was already
+        shown to the user.
+        """
+        if window is None or self._interpreter is None:
+            return ()
+        turns = [
+            InterpreterHistoryTurn(role=turn.speaker, text=turn.text)
+            for turn in window.turns
+            if turn.speaker in ("user", "assistant")
+            and not any(matches_topic(turn.text, topic) for topic in sensitive_topics)
+        ]
+        return bound_interpreter_history(
+            turns,
+            max_turns=getattr(
+                self._interpreter,
+                "history_turns",
+                DEFAULT_INTERPRETER_HISTORY_TURNS,
+            ),
+            max_chars=getattr(
+                self._interpreter,
+                "max_history_chars",
+                DEFAULT_INTERPRETER_MAX_HISTORY_CHARS,
+            ),
+        )
+
+    async def _interpret(
+        self,
+        text: str,
+        window: ConversationWindow | None,
+        sensitive_topics: tuple[SensitiveTopic, ...],
+    ) -> VerifiedInterpreterRoute | None:
+        """Ask the interpreter once and verify its suggestion.
+
+        Any provider, schema or verification failure returns ``None`` so the
+        deterministic route handles the turn unchanged.
+        """
+        if self._interpreter is None:
+            return None
+        history = self._interpreter_history(window, sensitive_topics)
+        try:
+            suggestion = await self._interpreter.suggest(text.strip(), history=history)
+        except Exception as exc:  # noqa: BLE001 - optional feature must fail closed
+            _log_interpreter_failure(exc)
+            return None
+        if suggestion is None:
+            return None
+        try:
+            return await self._interpreter_verifier.verify(suggestion)
+        except Exception as exc:  # noqa: BLE001 - verification must fail closed
+            _log_interpreter_failure(exc)
+            return None
+
     async def _disambiguation_turn(
         self,
         conversation_id: uuid.UUID,
@@ -307,6 +575,9 @@ class ConversationService:
         person: Person,
         sensitive_evaluation: SensitiveTopicEvaluation,
         positive_topics: tuple[str, ...],
+        *,
+        history: tuple[ConversationTurn, ...] = (),
+        style: ConversationStyle | None = None,
     ) -> ChatResult:
         """Answer a follow-up that selected one pending ambiguity candidate.
 
@@ -330,7 +601,14 @@ class ConversationService:
         context = apply_to_context(
             context, sensitive_evaluation, positive_topics=positive_topics
         )
-        answer = await self._respond(context, sensitive_evaluation, conversation_id)
+        answer = await self._respond(
+            context,
+            sensitive_evaluation,
+            conversation_id,
+            message=text,
+            history=history,
+            style=style,
+        )
         assistant_message = await self._conversations.add_message(
             conversation_id,
             speaker="assistant",
@@ -354,6 +632,10 @@ class ConversationService:
         context: AnswerContext,
         sensitive_evaluation: SensitiveTopicEvaluation,
         conversation_id: uuid.UUID,
+        *,
+        message: str | None = None,
+        history: tuple[ConversationTurn, ...] = (),
+        style: ConversationStyle | None = None,
     ) -> Response:
         """Run the responder and enforce non-initiation on its output.
 
@@ -361,9 +643,12 @@ class ConversationService:
         spontaneous turn. This final guard handles a responder that ignores the
         context or the prompt: if its text mentions a blocked topic anyway, the
         answer is replaced with a safe generic reply and its sources are
-        dropped, so no trace of the topic reaches the person.
+        dropped, so no trace of the topic reaches the person. Conversation
+        history is passed separately from the facts/sources in ``context``.
         """
-        answer = await self._responder.respond(context)
+        answer = await self._responder.respond(
+            context, message=message, history=history, style=style
+        )
         if answer_leaks_blocked_topic(answer.text, sensitive_evaluation):
             logger.warning(
                 "responder output in conversation %s mentioned a blocked "

@@ -5,9 +5,20 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.domain.conversation_window import (
+    ConversationWindow,
+    SourceSnapshot,
+    TurnSnapshot,
+)
 from app.domain.enums import Intent
 from app.models import Conversation, Message, ResponseSource
 from app.repositories.base import SQLRepository
+
+# A turn context only needs the most recent interaction, but a bounded window
+# keeps room for the existing narrow continuity rules without loading an
+# arbitrarily long conversation on every request.
+DEFAULT_CONVERSATION_WINDOW_LIMIT = 50
+MAX_CONVERSATION_WINDOW_LIMIT = 200
 
 
 @dataclass(frozen=True)
@@ -127,6 +138,87 @@ class ConversationRepository(SQLRepository[Conversation]):
         """Roll back a failed turn so no partial message/source pair remains."""
         await self._session.rollback()
 
+    async def load_window(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        limit: int = DEFAULT_CONVERSATION_WINDOW_LIMIT,
+        owner_session_id: str | None = None,
+    ) -> ConversationWindow | None:
+        """Load the most recent messages of one conversation as a window.
+
+        The result is read-only, ordered oldest to newest, and bounded by
+        ``limit`` (clamped to :data:`MAX_CONVERSATION_WINDOW_LIMIT`). Messages
+        and sources from any other conversation are never included.
+
+        When ``owner_session_id`` is given, a conversation owned by a different
+        session returns ``None``, so callers cannot derive continuity from a
+        conversation they do not own. ``None`` also means the conversation does
+        not exist.
+        """
+        if limit < 1:
+            raise ValueError("limit must be a positive integer")
+        bounded_limit = min(limit, MAX_CONVERSATION_WINDOW_LIMIT)
+
+        conversation = await self.get(conversation_id)
+        if conversation is None:
+            return None
+        if (
+            owner_session_id is not None
+            and conversation.owner_session_id != owner_session_id
+        ):
+            return None
+
+        messages = list(
+            (
+                await self._session.execute(
+                    select(Message)
+                    .where(Message.conversation_id == conversation_id)
+                    .order_by(Message.created_at.desc(), Message.id.desc())
+                    .limit(bounded_limit)
+                )
+            ).scalars()
+        )
+        messages.reverse()
+        if not messages:
+            return ConversationWindow(conversation_id=conversation_id)
+
+        sources_by_message: dict[uuid.UUID, list[SourceSnapshot]] = {
+            message.id: [] for message in messages
+        }
+        source_rows = (
+            await self._session.execute(
+                select(ResponseSource)
+                .where(
+                    ResponseSource.message_id.in_([message.id for message in messages])
+                )
+                .order_by(ResponseSource.created_at, ResponseSource.id)
+            )
+        ).scalars()
+        for source in source_rows:
+            sources_by_message[source.message_id].append(
+                SourceSnapshot(
+                    entity_type=source.source_entity_type,
+                    entity_id=source.source_entity_id,
+                    usage_type=source.usage_type,
+                )
+            )
+
+        return ConversationWindow(
+            conversation_id=conversation_id,
+            turns=tuple(
+                TurnSnapshot(
+                    message_id=message.id,
+                    speaker=message.speaker,
+                    text=message.text,
+                    intent=message.intent,
+                    created_at=message.created_at,
+                    sources=tuple(sources_by_message[message.id]),
+                )
+                for message in messages
+            ),
+        )
+
     async def last_assistant_candidates(
         self, conversation_id: uuid.UUID
     ) -> list[uuid.UUID]:
@@ -173,6 +265,30 @@ class ConversationRepository(SQLRepository[Conversation]):
         any other intent returns ``None``, so a subject is never carried across
         unrelated turns or an unresolved ambiguity.
         """
+        return await self._last_subject_person(
+            conversation_id, intents={Intent.fact_query.value}
+        )
+
+    async def last_resolved_person(
+        self, conversation_id: uuid.UUID
+    ) -> uuid.UUID | None:
+        """Return the person of the immediately previous resolved answer.
+
+        Possessive follow-ups ("Háblame sobre su infancia") can refer to a
+        person already established by a person or fact answer. Continuity stays
+        narrow: the latest assistant turn must be one of those intents, carry
+        exactly one ``subject`` person source, and expose no ``candidate``
+        rows. A new conversation, an unrelated turn, or an ambiguous answer
+        therefore never carries a subject forward.
+        """
+        return await self._last_subject_person(
+            conversation_id,
+            intents={Intent.person_query.value, Intent.fact_query.value},
+        )
+
+    async def _last_subject_person(
+        self, conversation_id: uuid.UUID, *, intents: set[str]
+    ) -> uuid.UUID | None:
         latest = (
             await self._session.execute(
                 select(Message)
@@ -184,7 +300,7 @@ class ConversationRepository(SQLRepository[Conversation]):
                 .limit(1)
             )
         ).scalar_one_or_none()
-        if latest is None or latest.intent != Intent.fact_query.value:
+        if latest is None or latest.intent not in intents:
             return None
         rows = list(
             (

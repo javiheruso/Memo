@@ -19,6 +19,7 @@ from app.api.deps import (
     ClaimExtractorDep,
     ClaimGrouperDep,
     EmbedderDep,
+    InterpreterDep,
     ResponderDep,
     SttDep,
     TtsDep,
@@ -60,6 +61,7 @@ async def chat_voice(
     db: DbSession,
     responder: ResponderDep,
     embedder: EmbedderDep,
+    interpreter: InterpreterDep,
     claim_extractor: ClaimExtractorDep,
     claim_grouper: ClaimGrouperDep,
     claim_contradiction_detector: ClaimContradictionDetectorDep,
@@ -91,6 +93,7 @@ async def chat_voice(
         claim_extractor=claim_extractor,
         claim_grouper=claim_grouper,
         claim_contradiction_detector=claim_contradiction_detector,
+        interpreter=interpreter,
         stt=stt,
         tts=tts,
     )

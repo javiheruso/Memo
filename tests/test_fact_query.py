@@ -295,7 +295,7 @@ async def test_leaky_fact_responder_cannot_bypass_blocked_topic(
     await _import_document(db_session)
 
     class LeakyResponder(Responder):
-        async def respond(self, context: AnswerContext) -> Response:
+        async def respond(self, context: AnswerContext, **_kwargs) -> Response:
             return Response(text="Miguel murió en 1998.")
 
     result = await _service(db_session, LeakyResponder()).handle_user_message(
@@ -479,6 +479,119 @@ async def test_follow_up_with_event_marker_stays_a_fact_query(
 
     assert follow.intent == Intent.fact_query
     assert "Santa Pola" in follow.answer
+
+
+async def test_person_query_then_possessive_follow_up_names_person(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("Háblame de Elena")
+    assert first.intent == Intent.person_query
+
+    follow = await service.handle_user_message(
+        "Háblame sobre su infancia", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.fact_query
+    assert follow.answer == "No sé nada de la infancia de Elena Martínez todavía."
+    assert "Estoy aquí para conversar" not in follow.answer
+    assert "guardado" not in follow.answer
+
+
+async def test_lowercase_unaccented_possessive_follow_up_keeps_subject(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("Háblame de Elena")
+    follow = await service.handle_user_message(
+        "hablame sobre su infancia", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.fact_query
+    assert follow.answer == "No sé nada de la infancia de Elena Martínez todavía."
+
+
+async def test_possessive_follow_up_uses_matching_topic_fact(
+    db_session: AsyncSession, seed
+) -> None:
+    await FactRepository(db_session).create(
+        FactCreate(
+            subject_person_id=seed.person_ids["antonio"],
+            fact_type="infancia",
+            value_text="Creció en Guardamar",
+            status=FactStatus.verified,
+            source_id=seed.source_ids["family_records"],
+        )
+    )
+    service = _service(db_session)
+
+    first = await service.handle_user_message("Háblame de Antonio")
+    assert first.intent == Intent.person_query
+
+    follow = await service.handle_user_message(
+        "Háblame sobre su infancia", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.fact_query
+    assert "Creció en Guardamar" in follow.answer
+    assert "infancia" not in follow.answer
+
+
+async def test_possessive_follow_up_after_unrelated_turn_does_not_leak_subject(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("Háblame de Elena")
+    unrelated = await service.handle_user_message(
+        "Hoy hace buen día para pasear", conversation_id=first.conversation_id
+    )
+    assert unrelated.intent == Intent.general_chat
+
+    follow = await service.handle_user_message(
+        "Háblame sobre su infancia", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.general_chat
+    assert "Elena" not in follow.answer
+    assert "infancia" not in follow.answer
+
+
+async def test_possessive_follow_up_after_ambiguous_turn_does_not_guess(
+    db_session: AsyncSession, seed
+) -> None:
+    service = _service(db_session)
+
+    first = await service.handle_user_message("Háblame de Paco")
+    assert first.ambiguity is not None
+
+    follow = await service.handle_user_message(
+        "Háblame sobre su infancia", conversation_id=first.conversation_id
+    )
+
+    assert follow.intent == Intent.general_chat
+    assert follow.ambiguity is None
+    assert "Paco" not in follow.answer
+    assert "Francisco" not in follow.answer
+
+
+async def test_possessive_follow_up_in_new_conversation_does_not_carry_subject(
+    db_session: AsyncSession,
+) -> None:
+    await _import_document(db_session)
+    service = _service(db_session)
+
+    first = await service.handle_user_message("Háblame de Elena")
+    follow = await service.handle_user_message("Háblame sobre su infancia")
+
+    assert follow.conversation_id != first.conversation_id
+    assert follow.intent == Intent.general_chat
+    assert "Elena" not in follow.answer
 
 
 async def test_pending_and_rejected_facts_never_reach_the_answer(

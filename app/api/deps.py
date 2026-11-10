@@ -14,11 +14,13 @@ from app.db.session import get_db
 from app.embeddings.base import Embedder
 from app.embeddings.provider import get_embedder
 from app.llm.base import Responder
-from app.llm.provider import get_responder
+from app.llm.interpreter import Interpreter
+from app.llm.provider import get_interpreter, get_responder
 from app.voice.base import SpeechToText, TextToSpeech
 from app.voice.provider import get_speech_to_text, get_text_to_speech
 
 ResponderDep = Annotated[Responder, Depends(get_responder)]
+InterpreterDep = Annotated[Interpreter | None, Depends(get_interpreter)]
 EmbedderDep = Annotated[Embedder, Depends(get_embedder)]
 ClaimExtractorDep = Annotated[ClaimExtractor, Depends(get_claim_extractor)]
 ClaimGrouperDep = Annotated[ClaimGrouper, Depends(get_claim_grouper)]
@@ -33,6 +35,7 @@ __all__ = [
     "ClaimExtractorDep",
     "ClaimGrouperDep",
     "EmbedderDep",
+    "InterpreterDep",
     "ResponderDep",
     "SttDep",
     "TtsDep",

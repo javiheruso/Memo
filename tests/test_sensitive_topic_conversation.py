@@ -121,7 +121,7 @@ async def test_explicit_topic_does_not_bypass_high_sensitivity_filter(
         def __init__(self) -> None:
             self.context: AnswerContext | None = None
 
-        async def respond(self, context: AnswerContext) -> Response:
+        async def respond(self, context: AnswerContext, **_kwargs) -> Response:
             self.context = context
             return Response(text="respuesta segura")
 
@@ -148,7 +148,7 @@ async def test_service_suppresses_responder_that_initiates_blocked_topic(
     await _seed_family_memories(db_session)
 
     class LeakyResponder(Responder):
-        async def respond(self, context: AnswerContext) -> Response:
+        async def respond(self, context: AnswerContext, **_kwargs) -> Response:
             return Response(text="El fallecimiento de Miguel fue en 1998.")
 
     service = ConversationService(

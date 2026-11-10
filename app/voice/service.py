@@ -32,6 +32,7 @@ from app.claims.grouping import ClaimGrouper
 from app.domain.enums import Intent
 from app.embeddings.base import Embedder
 from app.llm.base import Responder
+from app.llm.interpreter import Interpreter
 from app.models import KnowledgeGap
 from app.repositories.conversation import ResponseSourceRef
 from app.retrieval.entity_resolver import Resolution
@@ -77,6 +78,7 @@ class VoiceService:
         claim_extractor: ClaimExtractor | None = None,
         claim_grouper: ClaimGrouper | None = None,
         claim_contradiction_detector: ContradictionDetector | None = None,
+        interpreter: Interpreter | None = None,
         stt: SpeechToText | None = None,
         tts: TextToSpeech | None = None,
     ) -> None:
@@ -87,6 +89,7 @@ class VoiceService:
             claim_extractor=claim_extractor,
             claim_grouper=claim_grouper,
             claim_contradiction_detector=claim_contradiction_detector,
+            interpreter=interpreter,
         )
         self._stt = stt
         self._tts = tts
@@ -142,7 +145,9 @@ class VoiceService:
         if not audio or self._stt is None:
             return None
         try:
-            return (await self._stt.transcribe(audio, content_type=content_type)).strip()
+            return (
+                await self._stt.transcribe(audio, content_type=content_type)
+            ).strip()
         except _VOICE_PROVIDER_ERRORS as exc:
             logger.warning(
                 "STT transcription failed (%s); degrading this turn to text input",

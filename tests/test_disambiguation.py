@@ -13,8 +13,6 @@ from tests.fixtures.universe import SeedUniverse
 
 API = "/api/v1/chat"
 
-_GENERAL_REPLY = "Estoy aquí para conversar. Cuéntame de qué te apetece hablar."
-
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -218,7 +216,7 @@ async def test_unrelated_follow_up_routes_normally(
 
     follow = await _chat(app_client, "hola", first["conversation_id"])
     assert follow["intent"] == "general_chat"
-    assert follow["answer"] == _GENERAL_REPLY
+    assert follow["answer"] == "Te escucho."
     assert follow["ambiguity"] is None
     assert follow["gap"] is None
     assert follow["sources"] == []

@@ -21,6 +21,7 @@ UI = "/chat"
 COOKIE = "memo_chat_conversation"
 
 _GENERAL_REPLY = "Estoy aquí para conversar. Cuéntame de qué te apetece hablar."
+_PERSONAL_COMMENT_REPLY = "Gracias por contármelo."
 
 
 async def _cookie_conversation_id(client: AsyncClient) -> uuid.UUID | None:
@@ -78,7 +79,7 @@ async def test_page_shows_stored_history(app_client: AsyncClient) -> None:
     response = await app_client.get(UI)
     assert response.status_code == 200
     assert "Me encanta la tortilla de patatas" in response.text
-    assert _GENERAL_REPLY in response.text
+    assert _PERSONAL_COMMENT_REPLY in response.text
     assert "Tú" in response.text
     assert "Memo" in response.text
 
@@ -103,7 +104,7 @@ async def test_message_submission_runs_conversation_service(
     messages = await _stored_messages(db_session, conversation_id)
     assert [message.speaker for message in messages] == ["user", "assistant"]
     assert messages[0].text == "Me encanta la tortilla de patatas"
-    assert messages[1].text == _GENERAL_REPLY
+    assert messages[1].text == _PERSONAL_COMMENT_REPLY
 
 
 async def test_blank_message_is_refused(app_client: AsyncClient) -> None:

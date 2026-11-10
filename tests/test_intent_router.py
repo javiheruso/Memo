@@ -277,3 +277,39 @@ def test_follow_up_with_explicit_subject_is_not_elliptical():
 
 def test_follow_up_without_fact_topic_returns_none():
     assert IntentRouter().route_fact_follow_up("¿Y tú?") is None
+
+
+def test_routes_possessive_childhood_follow_up():
+    result = IntentRouter().route_possessive_follow_up("Háblame sobre su infancia")
+    assert result is not None
+    assert result.intent == Intent.fact_query
+    assert result.term is None
+    assert result.fact_topic == FactTopic.childhood
+    assert result.follow_up_topic == "la infancia"
+
+
+def test_routes_lowercase_unaccented_possessive_follow_up():
+    result = IntentRouter().route_possessive_follow_up("hablame sobre su infancia")
+    assert result is not None
+    assert result.intent == Intent.fact_query
+    assert result.fact_topic == FactTopic.childhood
+
+
+def test_routes_possessive_family_follow_up():
+    result = IntentRouter().route_possessive_follow_up("Cuéntame de su familia")
+    assert result is not None
+    assert result.intent == Intent.fact_query
+    assert result.fact_topic == FactTopic.family
+    assert result.follow_up_topic == "la familia"
+
+
+def test_possessive_follow_up_ignores_explicit_subject():
+    assert (
+        IntentRouter().route_possessive_follow_up("Háblame sobre su infancia de Miguel")
+        is None
+    )
+
+
+def test_possessive_follow_up_requires_recognizable_topic():
+    assert IntentRouter().route_possessive_follow_up("Háblame sobre su casa") is None
+    assert IntentRouter().route_possessive_follow_up("Hola") is None
