@@ -3,6 +3,10 @@ from dataclasses import dataclass
 
 from app.domain.enums import Intent
 from app.retrieval.fact_topics import FactTopic, classify_fact_question
+from app.retrieval.relationship_roles import (
+    RelationshipRoleQuery,
+    parse_relationship_role_query,
+)
 
 _NAME = r"[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ-]*"
 _NAME_PHRASE = rf"{_NAME}(?:\s+{_NAME})*"
@@ -197,6 +201,7 @@ class RouteResult:
     term: str | None = None
     fact_topic: FactTopic | None = None
     follow_up_topic: str | None = None
+    relationship_role: RelationshipRoleQuery | None = None
 
 
 class IntentRouter:
@@ -220,6 +225,16 @@ class IntentRouter:
         normalized = text.strip()
         if not normalized:
             return RouteResult(intent=Intent.unknown)
+
+        # An explicit relationship role ("mi marido", "¿Y mi pareja?") is an
+        # explicit person query, but the subject comes from the conversation's
+        # active resolved person rather than from the role words themselves.
+        relationship_role = parse_relationship_role_query(normalized)
+        if relationship_role is not None:
+            return RouteResult(
+                intent=Intent.person_query,
+                relationship_role=relationship_role,
+            )
 
         match = _PERSON_QUESTION.search(normalized)
         if match:

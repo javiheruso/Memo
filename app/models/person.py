@@ -1,5 +1,6 @@
 import uuid
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
@@ -15,6 +16,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.db.types import UTCDateTime
 from app.domain.enums import RelationshipStatus, RelationshipType
+
+if TYPE_CHECKING:
+    from app.models.media import Media
+    from app.models.source import Source
 
 
 class Person(Base):
@@ -89,3 +94,4 @@ class Relationship(Base):
 
     person_a: Mapped["Person"] = relationship(foreign_keys=[person_a_id])
     person_b: Mapped["Person"] = relationship(foreign_keys=[person_b_id])
+    source: Mapped["Source | None"] = relationship()

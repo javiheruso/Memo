@@ -16,6 +16,7 @@ class RelationshipRepository(SQLRepository[Relationship]):
     load_options = (
         selectinload(Relationship.person_a),
         selectinload(Relationship.person_b),
+        selectinload(Relationship.source),
     )
 
     async def create(
@@ -76,6 +77,7 @@ class RelationshipRepository(SQLRepository[Relationship]):
             .options(
                 selectinload(Relationship.person_a),
                 selectinload(Relationship.person_b),
+                selectinload(Relationship.source),
             )
             .order_by(Relationship.created_at)
         )

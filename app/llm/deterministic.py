@@ -209,6 +209,9 @@ class DeterministicResponder(Responder):
         return Response(text=text)
 
     def _respond_person_query(self, context: AnswerContext) -> Response:
+        if context.relationship_role is not None:
+            return self._respond_relationship_query(context)
+
         if context.resolution == ResolutionKind.not_found:
             return Response(text=f"No tengo guardado quién era {context.term}.")
 
@@ -313,6 +316,109 @@ class DeterministicResponder(Responder):
             text=f"Tengo guardado a {display}, pero todavía no tengo detalles.",
             sources=[ResponseSourceRef("person", context.person.id, "subject")],
         )
+
+    def _respond_relationship_query(self, context: AnswerContext) -> Response:
+        """Answer an explicit role question about the active person.
+
+        The related person is only named from stored relationships. A probable
+        link is always phrased as uncertain; several distinct related people are
+        reported as ambiguous instead of choosing one. Pending and rejected
+        rows never reach this method.
+        """
+        role = context.relationship_role
+        if context.person is None:
+            return Response(text="Antes de responder, dime de quién estamos hablando.")
+
+        verified = [
+            item
+            for item in context.verified_relations
+            if is_answerable_relationship_status(item.status)
+        ]
+        probable = [
+            item
+            for item in context.probable_relations
+            if is_answerable_relationship_status(item.status)
+        ]
+        if not verified and not probable:
+            return Response(
+                text=f"No tengo guardado quién es tu {role}.",
+                sources=[ResponseSourceRef("person", context.person.id, "subject")],
+            )
+
+        if verified:
+            return self._relationship_answer(context, role, verified, confirmed=True)
+        return self._relationship_answer(context, role, probable, confirmed=False)
+
+    @classmethod
+    def _relationship_answer(
+        cls,
+        context: AnswerContext,
+        role: str,
+        items,
+        *,
+        confirmed: bool,
+    ) -> Response:
+        names: list[str] = []
+        for item in items:
+            if item.other_display_name not in names:
+                names.append(item.other_display_name)
+
+        sources = cls._relationship_query_sources(context, items)
+        if len(names) > 1:
+            listed = ", ".join(names)
+            if confirmed:
+                text = (
+                    f"Tengo guardadas varias personas como tu {role}: {listed}. "
+                    "No sé cuál es."
+                )
+            else:
+                text = (
+                    f"Tengo anotadas varias personas posibles como tu {role}: "
+                    f"{listed}, pero ninguna está confirmada."
+                )
+            return Response(text=text, sources=sources)
+
+        item = items[0]
+        suffix = _source_suffix(item.source_type)
+        if confirmed:
+            text = f"Tu {role} es {item.other_display_name}{suffix}."
+        else:
+            text = (
+                f"Creo que tu {role} es {item.other_display_name}, "
+                f"pero no está confirmado{suffix}."
+            )
+        return Response(text=text, sources=sources)
+
+    @staticmethod
+    def _relationship_query_sources(
+        context: AnswerContext, items
+    ) -> list[ResponseSourceRef]:
+        sources = [ResponseSourceRef("person", context.person.id, "subject")]
+        seen: set[tuple[str, object, str | None]] = set()
+        for item in items:
+            candidates = [
+                (
+                    "person",
+                    item.related_person_id,
+                    "related",
+                ),
+                (
+                    "relationship",
+                    item.entity_id,
+                    item.epistemic.value,
+                ),
+            ]
+            if item.source_id is not None:
+                candidates.append(("source", item.source_id, "provenance"))
+            for entity_type, entity_id, usage_type in candidates:
+                if entity_id is None:
+                    continue
+                key = (entity_type, entity_id, usage_type)
+                if key in seen:
+                    continue
+                seen.add(key)
+                sources.append(ResponseSourceRef(entity_type, entity_id, usage_type))
+        return sources
 
     def _respond_fact_query(self, context: AnswerContext) -> Response:
         """Answer a scoped fact/preference question from stored facts only.

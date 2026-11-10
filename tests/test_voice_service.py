@@ -171,3 +171,20 @@ async def test_tts_failure_keeps_text_reply_without_audio(
     result = await service.process(text="¿Quién era Eustaquio?")
     assert result.audio is None
     assert result.answer == "No tengo guardado quién era Eustaquio."
+
+
+async def test_unexpected_tts_error_keeps_persisted_text_turn(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    class ExplodingTTS:
+        async def synthesize(self, text: str) -> bytes:
+            raise RuntimeError("unexpected provider bug")
+
+    service = _service(db_session, tts=ExplodingTTS())
+    result = await service.process(text="¿Quién era Eustaquio?")
+
+    assert result.audio is None
+    assert result.answer == "No tengo guardado quién era Eustaquio."
+    assert await _user_message_text(db_session, result.conversation_id) == [
+        "¿Quién era Eustaquio?"
+    ]

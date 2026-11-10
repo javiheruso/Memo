@@ -11,7 +11,7 @@ from app.domain.enums import (
     RelationshipStatus,
     RelationshipType,
 )
-from app.models import Event, Fact, Relationship
+from app.models import Event, Fact, Person, Relationship
 from app.policies.trust import (
     epistemic_kind_for_fact,
     epistemic_kind_for_relationship,
@@ -31,6 +31,9 @@ class RelationshipItem:
     relationship_type: RelationshipType
     status: RelationshipStatus
     epistemic: EpistemicKind
+    related_person_id: uuid.UUID | None = None
+    source_id: uuid.UUID | None = None
+    source_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,7 @@ class AnswerContext:
     term: str | None = None
     resolution: ResolutionKind | None = None
     follow_up_topic: str | None = None
+    relationship_role: str | None = None
     candidates: list[PersonCandidate] = field(default_factory=list)
     person: PersonCandidate | None = None
     verified_relations: list[RelationshipItem] = field(default_factory=list)
@@ -225,6 +229,56 @@ class ContextBuilder:
             policies=policies,
         )
 
+    def build_from_relationship_query(
+        self,
+        person: Person | None,
+        role: str,
+        relationships: list[Relationship],
+    ) -> AnswerContext:
+        """Build a context for an explicit role question about an active person.
+
+        Only verified and probable relationships are answerable; pending or
+        rejected rows are withheld exactly like any other relationship answer.
+        ``person`` is the resolved subject from the current conversation, and
+        ``None`` means no safe subject exists, so the responder must not guess.
+        """
+        verified_relations: list[RelationshipItem] = []
+        probable_relations: list[RelationshipItem] = []
+        withheld: list[Relationship] = []
+        if person is not None:
+            for relationship in relationships:
+                if not is_answerable_relationship_status(relationship.status):
+                    withheld.append(relationship)
+                    continue
+                item = self._relationship_item(relationship, person.id)
+                if item.epistemic == EpistemicKind.verified_fact:
+                    verified_relations.append(item)
+                else:
+                    probable_relations.append(item)
+
+        policies: list[str] = []
+        if withheld:
+            policies.extend(
+                self._withheld_status_policies(
+                    facts=[],
+                    relationships=withheld,
+                )
+            )
+        return AnswerContext(
+            intent=Intent.person_query,
+            term=role,
+            resolution=(ResolutionKind.resolved if person is not None else None),
+            person=(
+                PersonCandidate(id=person.id, display_name=person.display_name)
+                if person is not None
+                else None
+            ),
+            verified_relations=verified_relations,
+            probable_relations=probable_relations,
+            policies=policies,
+            relationship_role=role,
+        )
+
     def build_from_semantic_memories(
         self,
         result: SemanticSearchResult,
@@ -320,6 +374,13 @@ class ContextBuilder:
             relationship_type=relationship_type,
             status=relationship.status,
             epistemic=epistemic_kind_for_relationship(relationship.status),
+            related_person_id=other.id if other else None,
+            source_id=relationship.source_id,
+            source_type=(
+                relationship.source.source_type.value
+                if relationship.source is not None
+                else None
+            ),
         )
 
     @classmethod

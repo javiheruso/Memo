@@ -21,7 +21,7 @@ zero-config default and is exercised by the same tests as ``POST /chat``.
 
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,7 +94,7 @@ class VoiceService:
         self._stt = stt
         self._tts = tts
 
-    async def process(
+    async def persist_turn(
         self,
         *,
         text: str | None = None,
@@ -103,6 +103,13 @@ class VoiceService:
         conversation_id: uuid.UUID | None = None,
         owner_session_id: str | None = None,
     ) -> VoiceResult:
+        """Run one voice turn up to its persisted conversation reply.
+
+        The returned result already carries the committed ``conversation_id``,
+        so callers can point the browser at the conversation before optional
+        speech synthesis runs. This keeps a slow or failing TTS provider from
+        hiding a turn that was already stored.
+        """
         text_input = text.strip() if text and text.strip() else None
 
         transcript = await self._transcribe(audio, audio_content_type)
@@ -118,7 +125,6 @@ class VoiceService:
             conversation_id=conversation_id,
             owner_session_id=owner_session_id,
         )
-        audio_bytes = await self._synthesize(result.answer)
 
         return VoiceResult(
             conversation_id=result.conversation_id,
@@ -127,11 +133,38 @@ class VoiceService:
             text=text_input,
             answer=result.answer,
             sources=result.sources,
-            audio=audio_bytes,
             ambiguity=result.ambiguity,
             gap=result.gap,
             gap_created=result.gap_created,
         )
+
+    async def process(
+        self,
+        *,
+        text: str | None = None,
+        audio: bytes | None = None,
+        audio_content_type: str | None = None,
+        conversation_id: uuid.UUID | None = None,
+        owner_session_id: str | None = None,
+    ) -> VoiceResult:
+        """Persist one voice turn and then layer optional speech on it."""
+        result = await self.persist_turn(
+            text=text,
+            audio=audio,
+            audio_content_type=audio_content_type,
+            conversation_id=conversation_id,
+            owner_session_id=owner_session_id,
+        )
+        audio_bytes = await self.synthesize_answer(result.answer)
+        return replace(result, audio=audio_bytes)
+
+    async def synthesize_answer(self, answer: str) -> bytes | None:
+        """Return synthesized audio for an already persisted reply, or ``None``.
+
+        Synthesis is strictly optional and post-persistence, so every provider
+        failure degrades the turn to its text reply instead of failing it.
+        """
+        return await self._synthesize(answer)
 
     async def _transcribe(
         self, audio: bytes | None, content_type: str | None
@@ -159,13 +192,16 @@ class VoiceService:
         """Synthesize the reply when a TTS provider is configured.
 
         Returns ``None`` when no provider is configured or when the provider
-        cannot be trusted for this turn, so the reply stays text-only.
+        cannot be trusted for this turn, so the reply stays text-only. Any
+        unexpected provider error is caught too: the conversation turn has
+        already been persisted by this point and must never be lost because
+        optional speech failed.
         """
         if self._tts is None:
             return None
         try:
             return await self._tts.synthesize(answer)
-        except _VOICE_PROVIDER_ERRORS as exc:
+        except Exception as exc:  # noqa: BLE001 - optional speech must fail safe
             logger.warning(
                 "TTS synthesis failed (%s); returning the text reply without audio",
                 type(exc).__name__,

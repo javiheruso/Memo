@@ -41,6 +41,13 @@ class FakeTTS:
         return self._audio
 
 
+class ExplodingTTS:
+    """Provider that fails unexpectedly after the turn was persisted."""
+
+    async def synthesize(self, text: str) -> bytes:
+        raise RuntimeError("unexpected TTS failure")
+
+
 async def test_text_only_voice_call_degrades_to_chat(
     app_client: AsyncClient,
 ) -> None:
@@ -234,3 +241,117 @@ async def test_voice_turn_does_not_persist_raw_audio(
     )
     assert messages
     assert all(message.audio_path is None for message in messages)
+
+
+async def test_voice_turn_then_chat_page_renders_new_messages(
+    app_client: AsyncClient, seed: SeedUniverse
+) -> None:
+    """A committed voice turn is visible on the server-rendered chat page."""
+    app.dependency_overrides[get_speech_to_text] = lambda: FakeSTT(
+        "¿Quién era Francisco?"
+    )
+    try:
+        voice = await app_client.post(
+            API,
+            files={"audio": ("voice.wav", b"\x00wav", "audio/wav")},
+        )
+    finally:
+        app.dependency_overrides.pop(get_speech_to_text, None)
+
+    assert voice.status_code == 200
+    conversation_id = voice.json()["conversation_id"]
+    assert app_client.cookies.get("memo_chat_session") is not None
+    assert app_client.cookies.get("memo_chat_conversation") == conversation_id
+
+    page = await app_client.get("/chat")
+    assert page.status_code == 200
+    assert "¿Quién era Francisco?" in page.text
+    assert "amigo de Antonio" in page.text
+
+
+async def test_tts_failure_keeps_cookies_and_turn_visible(
+    app_client: AsyncClient,
+) -> None:
+    """An unexpected TTS failure still returns the stored text turn."""
+    app.dependency_overrides[get_speech_to_text] = lambda: FakeSTT("Hola")
+    app.dependency_overrides[get_text_to_speech] = lambda: ExplodingTTS()
+    try:
+        voice = await app_client.post(
+            API,
+            files={"audio": ("voice.wav", b"\x00wav", "audio/wav")},
+        )
+    finally:
+        app.dependency_overrides.pop(get_speech_to_text, None)
+        app.dependency_overrides.pop(get_text_to_speech, None)
+
+    assert voice.status_code == 200
+    body = voice.json()
+    assert body["answer"]
+    assert body["audio"] is None
+    assert body["audio_content_type"] is None
+    conversation_id = body["conversation_id"]
+    assert app_client.cookies.get("memo_chat_session") is not None
+    assert app_client.cookies.get("memo_chat_conversation") == conversation_id
+
+    page = await app_client.get("/chat")
+    assert page.status_code == 200
+    assert "Hola" in page.text
+    assert body["answer"] in page.text
+
+
+async def test_voice_relationship_role_uses_active_person(
+    app_client: AsyncClient, seed: SeedUniverse
+) -> None:
+    """A voice role question resolves through the same conversation pipeline."""
+    app.dependency_overrides[get_speech_to_text] = lambda: FakeSTT("¿Quién era Carmen?")
+    try:
+        first = await app_client.post(
+            API,
+            files={"audio": ("voice.wav", b"\x00wav", "audio/wav")},
+        )
+    finally:
+        app.dependency_overrides.pop(get_speech_to_text, None)
+
+    assert first.status_code == 200
+    conversation_id = first.json()["conversation_id"]
+
+    second = await app_client.post(
+        API,
+        data={"text": "¿Quién es mi marido?", "conversation_id": conversation_id},
+    )
+    assert second.status_code == 200
+    body = second.json()
+    assert "Antonio" in body["answer"]
+    assert "marido" in body["answer"]
+
+
+async def test_unexpected_post_persistence_error_keeps_turn_visible(
+    app_client: AsyncClient, monkeypatch
+) -> None:
+    """A response-assembly bug after commit must not hide the stored turn."""
+    from app.api.v1.endpoints import voice as voice_endpoint
+
+    def _broken_response(*_args, **_kwargs):
+        raise RuntimeError("unexpected response assembly failure")
+
+    monkeypatch.setattr(voice_endpoint, "_voice_response", _broken_response)
+    app.dependency_overrides[get_speech_to_text] = lambda: FakeSTT("Hola")
+    try:
+        voice = await app_client.post(
+            API,
+            files={"audio": ("voice.wav", b"\x00wav", "audio/wav")},
+        )
+    finally:
+        app.dependency_overrides.pop(get_speech_to_text, None)
+
+    assert voice.status_code == 200
+    body = voice.json()
+    assert body["answer"]
+    conversation_id = body["conversation_id"]
+    assert app_client.cookies.get("memo_chat_session") is not None
+    assert app_client.cookies.get("memo_chat_conversation") == conversation_id
+
+    page = await app_client.get("/chat")
+    assert page.status_code == 200
+    assert "Hola" in page.text
+    assert body["answer"] in page.text

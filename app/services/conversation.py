@@ -64,6 +64,7 @@ from app.retrieval.interpreter_verifier import (
     InterpreterVerifier,
     VerifiedInterpreterRoute,
 )
+from app.retrieval.relationship_roles import RelationshipRoleQuery
 from app.retrieval.semantic_retriever import SemanticRetriever
 from app.retrieval.structured_retriever import StructuredRetriever
 from app.services.claim_ingestion import ClaimIngestionService
@@ -150,9 +151,10 @@ class ConversationService:
         self._people = PersonRepository(session)
         self._resolver = EntityResolver(self._people)
         self._memory_repo = MemoryRepository(session)
+        self._relationships = RelationshipRepository(session)
         self._structured_retriever = StructuredRetriever(
             person_repo=self._people,
-            relationship_repo=RelationshipRepository(session),
+            relationship_repo=self._relationships,
             fact_repo=FactRepository(session),
             memory_repo=self._memory_repo,
             event_repo=EventRepository(session),
@@ -314,7 +316,11 @@ class ConversationService:
 
             resolution: Resolution | None = None
             context: AnswerContext
-            if route.intent == Intent.memory_query:
+            if route.relationship_role is not None:
+                context = await self._relationship_query_context(
+                    route.relationship_role, window
+                )
+            elif route.intent == Intent.memory_query:
                 semantic = await self._semantic_retriever.search(text)
                 context = self._context_builder.build_from_semantic_memories(
                     semantic, term=route.term
@@ -388,7 +394,8 @@ class ConversationService:
             # names are discarded), and this guard makes that invariant explicit:
             # an interpreter suggestion can never open a knowledge gap.
             if (
-                not interpreter_applied
+                route.relationship_role is None
+                and not interpreter_applied
                 and context.resolution == ResolutionKind.not_found
                 and route.term
             ):
@@ -440,6 +447,41 @@ class ConversationService:
         if window is None and owner_session_id is not None:
             raise ConversationAccessDenied
         return window
+
+    async def _relationship_query_context(
+        self,
+        role_query: RelationshipRoleQuery,
+        window: ConversationWindow | None,
+    ) -> AnswerContext:
+        """Answer an explicit role question from the current active person.
+
+        The active person is the subject of the immediately previous resolved
+        person/fact turn. When there is none, the context has no subject and
+        the responder explicitly avoids guessing. Relationships come from one
+        person's stored rows only; rejected rows are filtered by the repository
+        and pending rows are withheld by the context builder.
+        """
+        active_person_id = window.last_resolved_person() if window is not None else None
+        if active_person_id is None:
+            return self._context_builder.build_from_relationship_query(
+                None, role_query.role, []
+            )
+
+        active_person = await self._people.get(active_person_id)
+        if active_person is None:
+            return self._context_builder.build_from_relationship_query(
+                None, role_query.role, []
+            )
+
+        relationships = await self._relationships.for_person(active_person.id)
+        matching = [
+            relationship
+            for relationship in relationships
+            if relationship.relationship_type in role_query.relationship_types
+        ]
+        return self._context_builder.build_from_relationship_query(
+            active_person, role_query.role, matching
+        )
 
     def _should_interpret(
         self,
