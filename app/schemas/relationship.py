@@ -16,6 +16,20 @@ class RelationshipCreate(BaseModel):
     valid_to: date | None = None
 
 
+class RelationshipStatusUpdate(BaseModel):
+    """Change only a relationship's trust status.
+
+    Extra fields are rejected on purpose: provenance (``source_id``), validity
+    dates, relationship type and endpoints are immutable through this update.
+    The status enum is validated by Pydantic, so an unknown value fails before
+    any database write.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: RelationshipStatus
+
+
 class RelationshipRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -240,8 +240,11 @@ async def test_chat_page_presents_voice_as_the_primary_interaction(
     assert 'id="voice-consent"' in text
     assert "consentimiento" in text
     assert 'aria-live="polite"' in text
+    assert "/static/voice-silence.js" in text
     assert "/static/voice.js" in text
     assert "/static/voice.css" in text
+    assert "dejará de escuchar cuando hagas una pausa" in text
+    assert "también puedes pulsar Detener" in text
 
     # The text form is an explicit secondary fallback, not the primary surface.
     assert 'class="text-fallback"' in text
@@ -261,10 +264,25 @@ async def test_voice_static_asset_is_vanilla_same_origin_and_consent_aware(
     assert "memo_voice_consent_v1" in script
     assert 'credentials: "same-origin"' in script
     assert "https://" not in script
+    assert "AudioContext" in script
+    assert "createAnalyser" in script
+    assert "getFloatTimeDomainData" in script
+    assert "startSilenceMonitor" in script
+    assert "stopRecording" in script
+
+    detector = await app_client.get("/static/voice-silence.js")
+    assert detector.status_code == 200
+    detector_script = detector.text
+    assert "createSilenceDetector" in detector_script
+    assert "initialGraceMs" in detector_script
+    assert "silenceDurationMs" in detector_script
+    assert "maxRecordingMs" in detector_script
+    assert "https://" not in detector_script
 
     stylesheet = await app_client.get("/static/voice.css")
     assert stylesheet.status_code == 200
     assert ".voice-controls" in stylesheet.text
+    assert ".is-listening" in stylesheet.text
 
 
 async def test_page_exposes_current_conversation_to_the_voice_client(

@@ -32,7 +32,7 @@
       </div>
       {% endfor %}
     {% else %}
-    <div id="empty-state" class="empty">Hola, soy Memo. Pulsa «Hablar» y cuéntame lo que quieras o pregúntame por alguna persona.</div>
+    <div id="empty-state" class="empty">Hola, soy Memo. Pulsa «Hablar» una vez y cuéntame lo que quieras. Memo dejará de escuchar cuando hagas una pausa.</div>
     {% endif %}
     <div id="live-transcript" aria-live="polite" aria-relevant="additions"></div>
   </main>
@@ -54,7 +54,7 @@
       <button type="button" id="voice-stop" class="voice-button secondary" hidden>Detener</button>
       <button type="button" id="voice-replay" class="voice-button secondary" hidden>Repetir</button>
     </div>
-    <p id="voice-hint" class="hint">Pulsa Hablar, cuenta lo que quieras y vuelve a pulsar para terminar. El audio no se guarda.</p>
+    <p id="voice-hint" class="hint">Pulsa Hablar una vez y empieza a contar lo que quieras. Memo dejará de escuchar cuando hagas una pausa; también puedes pulsar Detener. El audio no se guarda.</p>
   </section>
 
   <details class="text-fallback">
@@ -81,7 +81,8 @@
   <p id="voice-consent-body">
     Para activar la voz necesitamos tu consentimiento. El audio se envía a un
     servicio de voz en la nube para transcribirlo y la respuesta se convierte
-    en voz. No guardamos las grabaciones. ¿Quieres activar la voz?
+    en voz. El navegador detecta el silencio localmente para parar la
+    grabación. No guardamos las grabaciones. ¿Quieres activar la voz?
   </p>
   <div class="consent-actions">
     <button type="button" id="voice-consent-accept" class="consent-accept">Aceptar y usar el micrófono</button>
@@ -89,6 +90,7 @@
   </div>
 </dialog>
 
+<script src="/static/voice-silence.js" defer></script>
 <script src="/static/voice.js" defer></script>
 </body>
 </html>

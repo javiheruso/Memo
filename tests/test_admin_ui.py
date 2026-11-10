@@ -23,6 +23,7 @@ from app.models import (
     Media,
     Memory,
     Person,
+    Relationship,
     Source,
 )
 from app.repositories.conversation import ConversationRepository
@@ -55,6 +56,31 @@ async def _gap(db_session: AsyncSession, *, reference: str = "eustaquio") -> Kno
         description=f"User asked about unknown person '{reference}'.",
     )
     return gap
+
+
+async def _relationship(app_client: AsyncClient, *, status: str = "probable") -> dict:
+    carmen = (
+        await app_client.post(f"{API}/persons", json={"first_name": "Carmen"})
+    ).json()
+    antonio = (
+        await app_client.post(f"{API}/persons", json={"first_name": "Antonio"})
+    ).json()
+    source = (
+        await app_client.post(f"{API}/sources", json={"source_type": "family_member"})
+    ).json()
+    response = await app_client.post(
+        f"{API}/relationships",
+        json={
+            "person_a_id": carmen["id"],
+            "person_b_id": antonio["id"],
+            "relationship_type": "spouse_of",
+            "status": status,
+            "source_id": source["id"],
+            "valid_from": "1960-05-01",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()
 
 
 # --------------------------------------------------------------------------
@@ -219,7 +245,15 @@ async def test_claim_group_merge_form_flow(
 
 
 async def test_entity_pages_render(app_client: AsyncClient) -> None:
-    for path in ("/sources", "/persons", "/media", "/facts", "/memories", "/embeddings"):
+    for path in (
+        "/sources",
+        "/persons",
+        "/relationships",
+        "/media",
+        "/facts",
+        "/memories",
+        "/embeddings",
+    ):
         response = await app_client.get(f"{UI}{path}")
         assert response.status_code == 200, path
 
@@ -520,6 +554,82 @@ async def test_persons_page_sets_and_clears_primary_media(
 
     await db_session.refresh(stored)
     assert stored.primary_media_id is None
+
+
+async def test_relationships_page_lists_rows_and_explains_statuses(
+    app_client: AsyncClient,
+) -> None:
+    created = await _relationship(app_client)
+
+    response = await app_client.get(f"{UI}/relationships")
+    assert response.status_code == 200
+    text = response.text
+    assert "Carmen" in text
+    assert "Antonio" in text
+    assert created["id"] in text
+    assert "verificada: se usa como hecho confirmado" in text
+    assert "pendiente: no se usa hasta revisión" in text
+    assert "rechazada: nunca se usa en respuestas" in text
+    for status in ("verified", "probable", "pending", "rejected"):
+        assert f'value="{status}"' in text
+
+
+async def test_relationship_status_form_promotes_without_duplicate(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    created = await _relationship(app_client, status="probable")
+    assert (
+        await db_session.execute(select(func.count()).select_from(Relationship))
+    ).scalar_one() == 1
+
+    response = await app_client.post(
+        f"{UI}/relationships/{created['id']}/status",
+        data={"status": "verified"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert "se ha actualizado a verified" in response.text
+
+    rows = list((await db_session.execute(select(Relationship))).scalars())
+    assert len(rows) == 1
+    stored = rows[0]
+    assert str(stored.id) == created["id"]
+    assert stored.status.value == "verified"
+    assert str(stored.source_id) == created["source_id"]
+    assert stored.valid_from.isoformat() == "1960-05-01"
+
+
+async def test_relationship_status_form_rejects_unknown_status(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    created = await _relationship(app_client, status="probable")
+
+    response = await app_client.post(
+        f"{UI}/relationships/{created['id']}/status",
+        data={"status": "confirmed"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert "status" in response.text
+
+    stored = (
+        await db_session.execute(
+            select(Relationship).where(Relationship.id == uuid.UUID(created["id"]))
+        )
+    ).scalar_one()
+    assert stored.status.value == "probable"
+
+
+async def test_relationship_status_form_unknown_id_flashes_error(
+    app_client: AsyncClient,
+) -> None:
+    response = await app_client.post(
+        f"{UI}/relationships/{uuid.uuid4()}/status",
+        data={"status": "verified"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert "Relación no encontrada" in response.text
 
 
 async def test_facts_create_form_defaults_to_pending(

@@ -1,15 +1,32 @@
 /* Voice-first public chat interaction.
  *
- * Push-to-talk only: one microphone press starts a MediaRecorder, a second
- * press (or Detener) stops it, and the recorded blob is sent to the same-origin
- * voice endpoint. There is no wake word, VAD, or streaming. Raw audio is kept
- * in memory just long enough to upload it; the app never stores it.
+ * One tap starts a MediaRecorder. A local Web Audio AnalyserNode watches the
+ * microphone level; after speech has been detected and a sustained pause
+ * follows, the client stops recording and uploads the turn automatically. A
+ * visible Detener button remains available, and a hard maximum recording time
+ * bounds every listening session.
+ *
+ * There is no wake word, no audio streaming and no dependency: the recorded
+ * blob is sent once to the same-origin voice endpoint. Raw audio is kept in
+ * memory just long enough to upload it; the app never stores it.
  */
 (function () {
   "use strict";
 
   var CONSENT_KEY = "memo_voice_consent_v1";
-  var MAX_RECORDING_MS = 60000;
+  var FALLBACK_CONFIG = {
+    maxRecordingMs: 60000,
+    initialGraceMs: 2500,
+    silenceDurationMs: 1600,
+    silenceRmsThreshold: 0.012,
+    analyserFftSize: 2048,
+    pollIntervalMs: 100
+  };
+  var silenceApi =
+    window.MemoVoiceSilence &&
+    typeof window.MemoVoiceSilence.createSilenceDetector === "function"
+      ? window.MemoVoiceSilence
+      : null;
   var root = document.querySelector("[data-voice-endpoint]");
   if (!root) {
     return;
@@ -30,13 +47,47 @@
     return;
   }
 
+  var config = voiceConfig();
   var mediaRecorder = null;
   var mediaStream = null;
+  var audioContext = null;
+  var mediaSource = null;
+  var analyser = null;
+  var analyserBuffer = null;
+  var detector = null;
+  var silenceTimer = null;
+  var maxTimer = null;
   var chunks = [];
-  var autoStopTimer = null;
+  var stopping = false;
+  var manualStopOnly = false;
+  var currentPhase = "idle";
   var playback = null;
   var lastAudioUrl = null;
   var busy = false;
+
+  function voiceConfig() {
+    var defaults =
+      (silenceApi && silenceApi.DEFAULT_CONFIG) || FALLBACK_CONFIG;
+    var overrides =
+      window.MEMO_VOICE_CONFIG && typeof window.MEMO_VOICE_CONFIG === "object"
+        ? window.MEMO_VOICE_CONFIG
+        : {};
+    var merged = Object.assign({}, defaults, overrides);
+    if (silenceApi && typeof silenceApi.normalizeConfig === "function") {
+      return silenceApi.normalizeConfig(merged);
+    }
+    return merged;
+  }
+
+  function nowMs() {
+    if (
+      window.performance &&
+      typeof window.performance.now === "function"
+    ) {
+      return window.performance.now();
+    }
+    return Date.now();
+  }
 
   function setStatus(message) {
     statusEl.textContent = message;
@@ -127,6 +178,26 @@
     return "";
   }
 
+  function setPhase(phase, message) {
+    currentPhase = phase;
+    root.classList.toggle("is-listening", phase === "listening");
+    root.classList.toggle("is-processing", phase === "thinking");
+    root.classList.toggle("is-speaking", phase === "speaking");
+    root.setAttribute("data-voice-state", phase);
+    micButton.setAttribute(
+      "aria-pressed",
+      phase === "listening" ? "true" : "false"
+    );
+    var label = micButton.querySelector(".js-mic-label");
+    if (label) {
+      label.textContent = phase === "listening" ? "Escuchando…" : "Hablar";
+    }
+    if (message) {
+      setStatus(message);
+    }
+    updateStopButton();
+  }
+
   function releaseStream() {
     if (!mediaStream) {
       return;
@@ -141,19 +212,11 @@
     if (!stopButton) {
       return;
     }
-    var recording =
-      mediaRecorder !== null && mediaRecorder.state === "recording";
-    stopButton.hidden = !(recording || playback !== null);
-  }
-
-  function updateRecordingUi(active) {
-    root.classList.toggle("is-recording", active);
-    micButton.setAttribute("aria-pressed", active ? "true" : "false");
-    var label = micButton.querySelector(".js-mic-label");
-    if (label) {
-      label.textContent = active ? "Terminar" : "Hablar";
-    }
-    updateStopButton();
+    var listening =
+      currentPhase === "listening" &&
+      mediaRecorder !== null &&
+      mediaRecorder.state === "recording";
+    stopButton.hidden = !(listening || playback !== null);
   }
 
   function stopPlayback() {
@@ -207,19 +270,20 @@
     playback = new Audio(lastAudioUrl);
     playback.addEventListener("ended", function () {
       playback = null;
-      updateStopButton();
-      setStatus("Listo para escucharte.");
+      setPhase("idle", "Listo para escucharte.");
     });
     playback.addEventListener("error", function () {
       playback = null;
-      updateStopButton();
-      setStatus("La voz no está disponible. Puedes leer la respuesta.");
+      setPhase(
+        "idle",
+        "La voz no está disponible. Puedes leer la respuesta."
+      );
     });
-    setStatus("Memo está respondiendo…");
+    setPhase("speaking", "Memo está respondiendo…");
     var started = playback.play();
     if (started && typeof started.catch === "function") {
       started.catch(function () {
-        setStatus("Pulsa Repetir para escuchar la respuesta.");
+        setPhase("idle", "Pulsa Repetir para escuchar la respuesta.");
       });
     }
     updateStopButton();
@@ -264,7 +328,8 @@
     if (payload.audio) {
       playAnswer();
     } else {
-      setStatus(
+      setPhase(
+        "idle",
         "Respuesta lista. La voz no está disponible ahora mismo; puedes leerla."
       );
     }
@@ -272,35 +337,36 @@
 
   function showHttpError(status) {
     if (status === 400) {
-      showError(
+      setPhase(
+        "idle",
         "No he podido entenderte. Prueba a hablar más cerca del micrófono."
       );
-      setStatus("No se ha entendido el audio.");
+      showError("No se ha entendido el audio.");
       return;
     }
     if (status === 413) {
+      setPhase("idle", "La grabación es demasiado larga.");
       showError(
         "La grabación es demasiado larga. Prueba con una frase más corta."
       );
-      setStatus("La grabación es demasiado larga.");
       return;
     }
     if (status === 415) {
+      setPhase("idle", "Formato de audio no compatible.");
       showError(
         "Este navegador usa un formato de audio no compatible. Prueba con otro navegador."
       );
-      setStatus("Formato de audio no compatible.");
       return;
     }
     if (status === 404) {
+      setPhase("idle", "Conversación nueva.");
       showError(
         "No he podido recuperar esta conversación. Empezamos una conversación nueva."
       );
-      setStatus("Conversación nueva.");
       return;
     }
+    setPhase("idle", "No se ha podido completar la respuesta.");
     showError("Algo ha ido mal. Inténtalo de nuevo.");
-    setStatus("No se ha podido completar la respuesta.");
   }
 
   function buildForm(blob, includeConversation) {
@@ -335,9 +401,8 @@
       return;
     }
     busy = true;
-    root.classList.add("is-processing");
     clearError();
-    setStatus("Procesando lo que has dicho…");
+    setPhase("thinking", "Procesando lo que has dicho…");
     try {
       var hadConversation =
         Boolean(root.getAttribute("data-conversation-id"));
@@ -354,25 +419,142 @@
       var payload = await response.json();
       renderResult(payload);
     } catch (error) {
+      setPhase("idle", "Sin conexión.");
       showError("No he podido conectar con Memo. Inténtalo otra vez.");
-      setStatus("Sin conexión.");
     } finally {
       busy = false;
-      root.classList.remove("is-processing");
     }
   }
 
-  function stopRecording() {
-    if (autoStopTimer !== null) {
-      window.clearTimeout(autoStopTimer);
-      autoStopTimer = null;
+  function clearMaxTimer() {
+    if (maxTimer !== null) {
+      window.clearTimeout(maxTimer);
+      maxTimer = null;
     }
+  }
+
+  function stopSilenceMonitor() {
+    if (silenceTimer !== null) {
+      window.clearInterval(silenceTimer);
+      silenceTimer = null;
+    }
+    detector = null;
+    analyser = null;
+    analyserBuffer = null;
+    mediaSource = null;
+    if (audioContext) {
+      try {
+        var closed = audioContext.close();
+        if (closed && typeof closed.catch === "function") {
+          closed.catch(function () {
+            /* The context may already be closed. */
+          });
+        }
+      } catch (error) {
+        /* Ignore a context that cannot be closed twice. */
+      }
+      audioContext = null;
+    }
+  }
+
+  function sampleSilence() {
+    if (!analyser || !detector || stopping || !silenceApi) {
+      return;
+    }
+    try {
+      var rms;
+      if (typeof analyser.getFloatTimeDomainData === "function") {
+        if (!analyserBuffer || analyserBuffer.length !== analyser.fftSize) {
+          analyserBuffer = new Float32Array(analyser.fftSize);
+        }
+        analyser.getFloatTimeDomainData(analyserBuffer);
+        rms = silenceApi.rmsFromFloatSamples(analyserBuffer);
+      } else if (typeof analyser.getByteTimeDomainData === "function") {
+        if (!analyserBuffer || analyserBuffer.length !== analyser.fftSize) {
+          analyserBuffer = new Uint8Array(analyser.fftSize);
+        }
+        analyser.getByteTimeDomainData(analyserBuffer);
+        rms = silenceApi.rmsFromByteSamples(analyserBuffer);
+      } else {
+        manualStopOnly = true;
+        stopSilenceMonitor();
+        setStatus("Te escucho. Pulsa Detener cuando acabes.");
+        return;
+      }
+
+      var decision = detector.observe({ nowMs: nowMs(), rms: rms });
+      if (decision.shouldStop) {
+        stopRecording("silence");
+      }
+    } catch (error) {
+      // An analyser that cannot be read must not leave the microphone
+      // listening without a local stop path. Fall back to manual Detener.
+      manualStopOnly = true;
+      stopSilenceMonitor();
+      setStatus(
+        "Te escucho. Este navegador no puede detectar pausas; pulsa Detener cuando acabes."
+      );
+    }
+  }
+
+  function startSilenceMonitor() {
+    if (!silenceApi || !mediaStream) {
+      return false;
+    }
+    var AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) {
+      return false;
+    }
+    try {
+      audioContext = new AudioCtor();
+      mediaSource = audioContext.createMediaStreamSource(mediaStream);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = config.analyserFftSize;
+      analyser.smoothingTimeConstant = 0.2;
+      mediaSource.connect(analyser);
+      detector = silenceApi.createSilenceDetector(config);
+      detector.reset(nowMs());
+      silenceTimer = window.setInterval(
+        sampleSilence,
+        config.pollIntervalMs
+      );
+      if (
+        audioContext.state === "suspended" &&
+        typeof audioContext.resume === "function"
+      ) {
+        var resumed = audioContext.resume();
+        if (resumed && typeof resumed.catch === "function") {
+          resumed.catch(function () {
+            /* Manual Stop remains available if resume is blocked. */
+          });
+        }
+      }
+      return true;
+    } catch (error) {
+      stopSilenceMonitor();
+      return false;
+    }
+  }
+
+  function stopRecording(reason) {
+    if (stopping) {
+      return;
+    }
+    stopping = true;
+    clearMaxTimer();
+    stopSilenceMonitor();
     if (mediaRecorder && mediaRecorder.state === "recording") {
       mediaRecorder.stop();
     }
     releaseStream();
-    updateRecordingUi(false);
-    setStatus("Procesando lo que has dicho…");
+    setPhase("thinking", "Procesando lo que has dicho…");
+    if (reason === "max") {
+      setStatus(
+        "Se ha alcanzado el tiempo máximo de grabación. Procesando…"
+      );
+    } else if (reason === "silence" && !manualStopOnly) {
+      setStatus("Te he escuchado. Procesando…");
+    }
   }
 
   function onRecordingStopped() {
@@ -382,9 +564,10 @@
     var blob = new Blob(chunks, { type: mimeType });
     chunks = [];
     mediaRecorder = null;
+    stopping = false;
     updateStopButton();
     if (!blob.size) {
-      setStatus("No se ha grabado audio. Inténtalo otra vez.");
+      setPhase("idle", "No se ha grabado audio. Inténtalo otra vez.");
       return;
     }
     sendAudio(blob);
@@ -402,12 +585,14 @@
       showError(
         "Este navegador no puede grabar audio. Puedes escribir tu mensaje en la opción de abajo."
       );
-      setStatus("Micrófono no disponible.");
+      setPhase("idle", "Micrófono no disponible.");
       return;
     }
 
     clearError();
     stopPlayback();
+    stopping = false;
+    manualStopOnly = false;
     setStatus("Pidiendo permiso para el micrófono…");
 
     try {
@@ -428,30 +613,39 @@
       });
       mediaRecorder.start();
 
-      updateRecordingUi(true);
-      setStatus("Te escucho. Pulsa Terminar o Detener cuando acabes.");
-      autoStopTimer = window.setTimeout(function () {
+      var automatic = startSilenceMonitor();
+      manualStopOnly = !automatic;
+      setPhase("listening");
+      if (automatic) {
+        setStatus(
+          "Te escucho. Habla con naturalidad; pararé cuando hagas una pausa."
+        );
+      } else {
+        setStatus(
+          "Te escucho. Este navegador no puede detectar pausas; pulsa Detener cuando acabes."
+        );
+      }
+      maxTimer = window.setTimeout(function () {
         if (mediaRecorder && mediaRecorder.state === "recording") {
-          stopRecording();
-          setStatus(
-            "Se ha alcanzado el tiempo máximo de grabación. Procesando…"
-          );
+          stopRecording("max");
         }
-      }, MAX_RECORDING_MS);
+      }, config.maxRecordingMs);
     } catch (error) {
+      clearMaxTimer();
+      stopSilenceMonitor();
       releaseStream();
       mediaRecorder = null;
-      updateRecordingUi(false);
+      stopping = false;
+      setPhase("idle", "Micrófono no disponible.");
       showError(
         "No he podido usar el micrófono. Revisa el permiso del navegador o usa la opción de escribir."
       );
-      setStatus("Micrófono no disponible.");
     }
   }
 
   micButton.addEventListener("click", function () {
     if (mediaRecorder && mediaRecorder.state === "recording") {
-      stopRecording();
+      stopRecording("manual");
     } else {
       startRecording();
     }
@@ -460,11 +654,11 @@
   if (stopButton) {
     stopButton.addEventListener("click", function () {
       if (mediaRecorder && mediaRecorder.state === "recording") {
-        stopRecording();
+        stopRecording("manual");
         return;
       }
       stopPlayback();
-      setStatus("Listo para escucharte.");
+      setPhase("idle", "Listo para escucharte.");
     });
   }
 
@@ -492,6 +686,8 @@
   }
 
   window.addEventListener("beforeunload", function () {
+    clearMaxTimer();
+    stopSilenceMonitor();
     releaseStream();
     stopPlayback();
     clearLastAudio();

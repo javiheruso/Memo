@@ -350,10 +350,12 @@ the recognized `transcript`, the explicit `text`, the `answer`, the response
 `sources`/`ambiguity`/`gap` fields and, when synthesized, the audio as base64
 in `audio` (`audio_content_type` is `audio/mpeg`).
 
-The public `/chat` page is the voice-first pilot surface: press **Hablar**,
-speak, press **Terminar** (or **Detener**), and the browser sends the recording
-to the same-origin endpoint, shows the transcript with the spoken answer and
-offers **Repetir**. There is no wake word, VAD or streaming. On first use the
+The public `/chat` page is the voice-first pilot surface: tap **Hablar** once,
+speak, and the browser stops recording after a sustained pause, then sends the
+recording to the same-origin endpoint, shows the transcript with the spoken
+answer and offers **Repetir**. A visible **Detener** button stops immediately.
+There is no wake word, no server-side VAD and no streaming: the silence detector
+runs locally in the browser with a Web Audio `AnalyserNode`. On first use the
 page asks for explicit consent before sending audio to the cloud STT/TTS
 providers, and raw audio is never persisted: it lives in the browser only long
 enough to upload it and the backend passes the bytes straight to the provider.
@@ -416,6 +418,15 @@ cleared with `PATCH /persons/{id}/primary-media` (`{"media_id": "<uuid>"}` or
 `null` to clear); the media row must exist but needs no `media_people` link.
 Trust-model defaults are conservative: new facts default to `pending` and new
 memories to `candidate`; relationships default to `verified`.
+
+An existing relationship can be promoted or reclassified in place with
+`PATCH /relationships/{id}` and a strict body such as `{"status": "verified"}`.
+Unknown ids return `404`, unknown status values return `422`, and unknown body
+fields are rejected. The update changes only the status: provenance
+(`source_id`), validity dates, relationship type and both endpoints are
+preserved, and no duplicate relationship row is created. The protected admin UI
+at `/admin/relationships` lists existing relationships and exposes the same
+status change as one deliberate action instead of a create form.
 
 ## Fictional onboarding-demo importer
 
@@ -599,14 +610,15 @@ surface, not an authorization system.
 ## Public chat page
 
 Open <http://localhost:8000/chat> to talk to the companion with no auth. It is
-a plain FastAPI + Jinja2 surface with a small vanilla JavaScript asset (no
+a plain FastAPI + Jinja2 surface with small vanilla JavaScript assets (no
 frontend framework, no build step, no streaming) and a large-text layout sized
 for the older-adult audience. The primary interaction is spoken conversation:
-press **Hablar**, speak, then press **Terminar** or **Detener**. The browser
-sends the recording to `POST /api/v1/chat/voice`, shows the recognized
-transcript with the answer, and plays the synthesized reply. Every turn runs
-the same `ConversationService`, so intent routing, retrieval, trust policies,
-claim ingestion and knowledge-gap persistence behave identically to the API.
+tap **Hablar** once, speak, and the browser stops recording on a local silence
+detection, then sends the recording to `POST /api/v1/chat/voice`, shows the
+recognized transcript with the answer, and plays the synthesized reply. Every
+turn runs the same `ConversationService`, so intent routing, retrieval, trust
+policies, claim ingestion and knowledge-gap persistence behave identically to
+the API.
 
 The text form is a secondary fallback inside a disclosure, for a browser
 without `MediaRecorder` or a denied microphone permission. The public page does
@@ -618,9 +630,10 @@ Quick path:
 2. Configure `MEMO_STT_*` and `MEMO_TTS_*` (OpenAI-compatible) for the full
    spoken round trip.
 3. Open <http://localhost:8000/chat>
-4. Press **Hablar**, accept the first-use voice consent, speak, and press
-   **Terminar**. The transcript and answer render below; **Repetir** replays
-   the latest spoken answer.
+4. Tap **Hablar**, accept the first-use voice consent, and speak. After a short
+   pause the turn is sent automatically; **Detener** stops immediately. The
+   transcript and answer render below; **Repetir** replays the latest spoken
+   answer.
 
 Details:
 
@@ -629,13 +642,21 @@ Details:
 | Multi-turn continuity | A signed ownership cookie (`memo_chat_session`) plus a `memo_chat_conversation` pointer cookie select the conversation; both the text fallback and the voice endpoint set them |
 | Voice consent | Explicit first-use dialog before any audio leaves the browser; the choice is remembered locally |
 | Raw audio | Never persisted server-side; bytes are passed straight to the configured STT provider and discarded |
-| Push-to-talk | One press starts capture, a second press or **Detener** stops it; recording auto-stops after 60 seconds |
-| Accessible states | `role="status"`/`aria-live` announcements for listening, processing, speaking, errors and microphone availability |
+| Tap-to-talk | One tap starts capture. Local silence detection stops it after speech plus a sustained pause; **Detener** is always available |
+| Silence detection | Web Audio `AnalyserNode` RMS sampled every 100 ms, all in the browser; no audio is streamed or analyzed server-side |
+| Grace and bounds | No auto-stop during the first 2.5 s of a recording; stop needs 1.6 s of sustained silence after speech; every recording is hard-stopped at 60 s |
+| Client configuration | `window.MEMO_VOICE_CONFIG` may override the documented defaults (`maxRecordingMs`, `initialGraceMs`, `silenceDurationMs`, `silenceRmsThreshold`, `analyserFftSize`, `pollIntervalMs`) before the voice script loads |
+| Fallback | Without `AudioContext`/`AnalyserNode` the page keeps working with manual **Detener**; without `MediaRecorder` the text form remains |
+| Accessible states | `role="status"`/`aria-live` announcements and visible `is-listening`/`is-processing`/`is-speaking` states for listening, thinking, speaking, errors and microphone availability |
 | Errors | STT failure, TTS failure, unsupported format and oversized audio produce safe user-facing messages; provider details and secrets are not exposed |
 | New conversation | The *Empezar otra conversación* button clears the pointer cookie (never deletes stored history) |
 | Pipeline signals | A created gap ("unknown person") and an ambiguous person render as an inline notice; the assistant reply text is still shown as the turn |
 
-Accepted limitations for this slice: the transcript shows both sides of every
+Accepted limitations for this slice: silence detection is a simple loudness
+threshold, not speaker-aware VAD, so a noisy room may require raising
+`silenceRmsThreshold` and a very quiet speaker may need the manual **Detener**
+button. Background-tab throttling can delay the 100 ms sampler, but the hard
+60 s timer still bounds the session. The transcript shows both sides of every
 stored turn for the current conversation but no per-message timestamps, the
 cookie is HTTP-only and SameSite=Lax but not `Secure` (use TLS in any real
 deployment), and the whole surface speaks to whatever person is at the device
@@ -1056,8 +1077,8 @@ Deferred by design (dossier phases) and not required for the MVP:
 - Real STT/TTS/embedder/LLM providers — configure `MEMO_STT_*`, `MEMO_TTS_*`,
   `MEMO_EMBEDDER_*`, `MEMO_LLM_*` against your OpenAI-compatible backend.
 - Dedicated tablet/touch client (the `/chat` page is the current pilot surface).
-- Streaming voice, wake-word/VAD modes and barge-in; this slice is deliberately
-  push-to-talk with one complete recording per turn.
+- Streaming voice, wake-word/server-side VAD and barge-in; this slice uses
+  local silence detection and sends one complete recording per turn.
 - Media image serving/upload (currently metadata-only).
 
 ## Deploying

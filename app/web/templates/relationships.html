@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Memo Admin · Relaciones{% endblock %}
+{% block content %}
+<h1>Relaciones</h1>
+
+<p class="muted">
+  El estado decide si una relación puede usarse al responder. Esta pantalla solo
+  cambia el estado de una relación existente: no crea filas nuevas.
+</p>
+
+<ul class="muted">
+  <li><strong>verified</strong> — verificada: se usa como hecho confirmado.</li>
+  <li><strong>probable</strong> — probable: se usa indicando incertidumbre.</li>
+  <li><strong>pending</strong> — pendiente: no se usa hasta revisión.</li>
+  <li><strong>rejected</strong> — rechazada: nunca se usa en respuestas.</li>
+</ul>
+
+<table>
+  <thead>
+    <tr>
+      <th>Persona A</th>
+      <th>Persona B</th>
+      <th>Tipo</th>
+      <th>Estado actual</th>
+      <th>Fuente</th>
+      <th>Vigencia</th>
+      <th>Cambiar estado</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for relationship in relationships %}
+    <tr>
+      <td>{{ person_names.get(relationship.person_a_id, "—") }}</td>
+      <td>{{ person_names.get(relationship.person_b_id, "—") }}</td>
+      <td>{{ relationship.relationship_type.value }}</td>
+      <td><span class="badge">{{ relationship.status.value }}</span></td>
+      <td>{{ source_labels.get(relationship.source_id, "—") if relationship.source_id else "—" }}</td>
+      <td>
+        {{ relationship.valid_from or "—" }}
+        {% if relationship.valid_to %} → {{ relationship.valid_to }}{% endif %}
+      </td>
+      <td>
+        <form method="post" action="/admin/relationships/{{ relationship.id }}/status">
+          <label for="relationship-status-{{ relationship.id }}">Nuevo estado</label>
+          <select id="relationship-status-{{ relationship.id }}" name="status" required>
+            {% for item in relationship_status_options %}
+            <option value="{{ item.value }}" {% if item == relationship.status %}selected{% endif %}>{{ item.value }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit">Guardar estado</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="muted">Aún no hay relaciones.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

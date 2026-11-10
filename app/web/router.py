@@ -46,6 +46,7 @@ from app.repositories.knowledge_gap import KnowledgeGapRepository
 from app.repositories.media import MediaRepository
 from app.repositories.memory import MemoryRepository, UnsupportedVectorSearch
 from app.repositories.person import PersonRepository
+from app.repositories.relationship import RelationshipRepository
 from app.repositories.source import SourceRepository
 from app.schemas.claim import ClaimGroupResolve
 from app.schemas.fact import FactCreate
@@ -68,6 +69,7 @@ from app.schemas.onboarding import (
 )
 from app.schemas.person import PersonCreate
 from app.schemas.profile import SensitiveTopicCreate
+from app.schemas.relationship import RelationshipStatusUpdate
 from app.schemas.source import SourceCreate
 from app.security import (
     SESSION_COOKIE_NAME,
@@ -1114,6 +1116,50 @@ async def persons_set_primary_media(
     return _back(
         "/admin/persons",
         message=f"Se ha actualizado la multimedia principal de {person.display_name}",
+    )
+
+
+@router.get("/relationships", response_class=HTMLResponse)
+async def relationships_page(request: Request, db: DbSession) -> HTMLResponse:
+    """List existing relationships and expose one status-update action.
+
+    There is deliberately no create form here: the admin surface can only
+    change the trust status of an existing row, so one tap can never add a
+    duplicate relationship.
+    """
+    relationships = await RelationshipRepository(db).list(limit=200)
+    return templates.TemplateResponse(
+        request,
+        "relationships.html",
+        _ctx(
+            request,
+            relationships=relationships,
+            person_names=await _person_names(db),
+            source_labels=await _source_labels(db),
+            relationship_status_options=RelationshipStatus,
+        ),
+    )
+
+
+@router.post("/relationships/{relationship_id}/status")
+async def relationship_set_status(
+    request: Request, db: DbSession, relationship_id: uuid.UUID
+) -> RedirectResponse:
+    form = await request.form()
+    try:
+        payload = RelationshipStatusUpdate(status=_text(form, "status"))
+    except ValidationError as exc:
+        return _back("/admin/relationships", error=_error_text(exc))
+    updated = await RelationshipRepository(db).set_status(
+        relationship_id, payload.status
+    )
+    if updated is None:
+        return _back("/admin/relationships", error="Relación no encontrada")
+    return _back(
+        "/admin/relationships",
+        message=(
+            f"El estado de la relación se ha actualizado a {payload.status.value}"
+        ),
     )
 
 

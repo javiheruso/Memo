@@ -57,7 +57,11 @@ from app.schemas.onboarding import (
 )
 from app.schemas.person import PersonCreate, PersonPrimaryMediaUpdate, PersonRead
 from app.schemas.profile import ConversationProfileCreate, ConversationProfileRead
-from app.schemas.relationship import RelationshipCreate, RelationshipRead
+from app.schemas.relationship import (
+    RelationshipCreate,
+    RelationshipRead,
+    RelationshipStatusUpdate,
+)
 from app.schemas.seed import SeedSummaryRead
 from app.schemas.source import SourceCreate, SourceRead
 from app.security import require_admin_api
@@ -336,6 +340,26 @@ async def list_relationships(
     db: DbSession, limit: int = Query(default=100, ge=1, le=500)
 ) -> list[Relationship]:
     return await RelationshipRepository(db).list(limit=limit)
+
+
+@router.patch("/relationships/{relationship_id}", response_model=RelationshipRead)
+async def update_relationship_status(
+    db: DbSession,
+    relationship_id: uuid.UUID,
+    payload: RelationshipStatusUpdate,
+) -> Relationship:
+    """Promote or reclassify an existing relationship's trust status.
+
+    This is an update, never an insert: no duplicate relationship row is
+    created. The strict request schema rejects unknown fields, so provenance,
+    validity dates, relationship type and endpoints cannot be changed here.
+    """
+    relationship = await RelationshipRepository(db).set_status(
+        relationship_id, payload.status
+    )
+    if relationship is None:
+        raise HTTPException(status_code=404, detail="Relationship not found")
+    return relationship
 
 
 @router.post("/facts", response_model=FactRead, status_code=201)
