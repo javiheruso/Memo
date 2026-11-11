@@ -209,6 +209,13 @@ def test_system_instructions_enforce_trust_model() -> None:
     assert "present a planned or confirmed event as already completed" in system
     assert "candidates" in system
     assert "JSON" in system
+    # The follow-up example must not seed the model with a concrete person
+    # name that is absent from CONTEXT; a real demo answer copied it verbatim.
+    assert "Elena" not in system
+    assert "Never use a name that is not in CONTEXT" in system
+    # Person/fact answers must keep their verified subject citable so a
+    # pronoun follow-up stays grounded in the real-LLM path.
+    assert "always include the subject person id" in system
 
 
 def test_prompt_exposes_no_db_mechanism() -> None:
