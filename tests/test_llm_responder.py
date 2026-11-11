@@ -384,3 +384,39 @@ async def test_chat_api_falls_back_closed_on_invented_sources(
         and source["entity_id"] == str(seed.person_ids["paco_navarro"])
         for source in body["sources"]
     )
+
+
+@pytest.mark.asyncio
+async def test_general_chat_follow_up_prompt_is_bounded_and_source_free() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    capture: list[httpx.Request] = []
+    async with _client_for(
+        '{"answer": "¿Qué te apetece hacer hoy?", "sources": []}',
+        capture=capture,
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Hola, hoy hace un día precioso."
+        )
+
+    body = json.loads(capture[0].content)
+    combined = body["messages"][0]["content"] + "\n" + body["messages"][1]["content"]
+    assert "at most one brief, generic follow-up question" in combined
+    assert "Stored data available this turn: none" in combined
+    assert response.text == "¿Qué te apetece hacer hoy?"
+    assert response.sources == []
+
+
+@pytest.mark.asyncio
+async def test_general_chat_invented_source_still_falls_back_closed() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    invented = uuid.uuid4()
+    payload = (
+        '{"answer": "Claro, lo recuerdo perfectamente.", "sources": '
+        f'[{{"entity_type": "memory", "entity_id": "{invented}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(context, message="Hola")
+
+    assert response.text == "Estoy aquí para conversar. Cuéntame de qué te apetece hablar."
+    assert response.sources == []
+    assert all(str(source.entity_id) != str(invented) for source in response.sources)

@@ -197,6 +197,8 @@ def test_unknown_person_allows_no_sources() -> None:
     assert "Eustaquio" in prompt.user
     assert allowed_sources(context) == {}
     assert "never invent" in prompt.system
+    # The no-data follow-up rule is limited to general_chat/unknown turns.
+    assert "Stored data available this turn: none" not in prompt.user
 
 
 def test_system_instructions_enforce_trust_model() -> None:
@@ -290,3 +292,37 @@ def test_prompt_keeps_untrusted_history_separate_from_facts_and_sources() -> Non
         ("person", str(person.id)),
         ("fact", str(fact.entity_id)),
     }
+
+
+def test_general_chat_without_data_allows_one_generic_follow_up() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    prompt = build_prompt(context, message="Hola, hoy hace un día precioso.")
+
+    assert "Stored data available this turn: none" in prompt.user
+    assert "at most one brief, generic follow-up question" in prompt.system
+    assert "general_chat or unknown turn" in prompt.system
+    assert "Never imply, recall, or invent a personal fact" in prompt.system
+    assert "shared experience" in prompt.system
+    assert allowed_sources(context) == {}
+
+
+def test_general_chat_prompt_does_not_mark_stored_data_when_context_has_memory() -> None:
+    context = AnswerContext(
+        intent=Intent.general_chat,
+        term=None,
+        memories=[_memory()],
+    )
+    prompt = build_prompt(context)
+
+    assert "Stored data available this turn: none" not in prompt.user
+    assert allowed_sources(context) == {
+        ("memory", str(context.memories[0].entity_id)): "memory"
+    }
+
+
+def test_unknown_turn_without_data_allows_the_same_bounded_follow_up() -> None:
+    context = AnswerContext(intent=Intent.unknown, term=None)
+    prompt = build_prompt(context, message="No sé qué decir.")
+
+    assert "Stored data available this turn: none" in prompt.user
+    assert "at most one brief, generic follow-up question" in prompt.system

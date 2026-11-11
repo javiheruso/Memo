@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.domain.conversation_context import ConversationStyle, ConversationTurn
+from app.domain.enums import Intent
 from app.llm.untrusted import untrusted_json
 from app.retrieval.context_builder import AnswerContext
 
@@ -34,6 +35,7 @@ Rules:
 - If there is no stored data about the person, say you do not have details stored and never invent any.
 - If a stored photograph is referenced, only ever mention its stored metadata (type, title, date, place). Never describe what the photograph shows or invent visual details.
 - Never initiate a configured sensitive topic. Only discuss one when the person explicitly raises it; then do not invent details and gently redirect to a safer subject.
+- On a general_chat or unknown turn where CONTEXT says there is no stored data, you may ask at most one brief, generic follow-up question to keep the conversation going. Keep it open and topic-neutral. Never imply, recall, or invent a personal fact, person, memory, event, source, or shared experience, and never claim to remember something.
 - Keep replies natural and short. When recent conversation exists, do not greet or restart the conversation on every turn.
 - The user speaks Spanish. Reply in Spanish, naturally and with warmth.
 
@@ -47,6 +49,20 @@ Include in "sources" only the ids listed under "Allowed source ids" that your an
 class BuiltPrompt:
     system: str
     user: str
+
+
+def _has_stored_data(context: AnswerContext) -> bool:
+    """True when the context carries any stored entity the model may cite."""
+    return bool(
+        context.person
+        or context.candidates
+        or context.verified_relations
+        or context.probable_relations
+        or context.facts
+        or context.memories
+        or context.events
+        or context.media
+    )
 
 
 def build_prompt(
@@ -77,6 +93,14 @@ def build_prompt(
         )
     if context.resolution is not None:
         lines.append(f"- Resolution: {context.resolution.value}")
+    if (
+        context.intent in (Intent.general_chat, Intent.unknown)
+        and not _has_stored_data(context)
+    ):
+        lines.append(
+            "- Stored data available this turn: none (do not imply personal "
+            "knowledge or a shared history)"
+        )
 
     if style is not None:
         if style.preferred_name:
