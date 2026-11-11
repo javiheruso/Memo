@@ -298,6 +298,7 @@ async def test_request_targets_chat_completions_with_model_and_auth() -> None:
     body = json.loads(request.content)
     assert body["model"] == "test-model"
     assert body["temperature"] == 0
+    assert body["response_format"] == {"type": "json_object"}
     assert request.headers["Authorization"] == "Bearer secret"
 
 

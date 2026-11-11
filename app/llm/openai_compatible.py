@@ -130,6 +130,10 @@ class OpenAICompatibleResponder(Responder):
             "model": self._model,
             "messages": messages,
             "temperature": 0,
+            # Ask OpenAI-compatible servers for a JSON object so the model does
+            # not wrap or pad the required ``{answer, sources}`` contract. This
+            # only shapes output; every field is still validated fail-closed.
+            "response_format": {"type": "json_object"},
         }
         headers = {"Content-Type": "application/json"}
         if self._api_key:
