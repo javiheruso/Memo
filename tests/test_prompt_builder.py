@@ -333,3 +333,20 @@ def test_unknown_turn_without_data_allows_the_same_bounded_follow_up() -> None:
 
     assert "Stored data available this turn: none" in prompt.user
     assert "at most one brief, generic follow-up question" in prompt.system
+
+
+def test_positive_topics_are_withheld_when_not_offerable() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    prompt = build_prompt(
+        context,
+        message="Prefiero hablar de mi familia.",
+        style=ConversationStyle(
+            positive_topics=("la costura", "la playa"),
+            offer_positive_topics=False,
+        ),
+    )
+
+    assert "Do not offer or mention profile positive topics this turn" in prompt.user
+    assert "Positive topics that may be offered gently" not in prompt.user
+    assert "la costura" not in prompt.user
+    assert "la playa" not in prompt.user

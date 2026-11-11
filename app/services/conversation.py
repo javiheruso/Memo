@@ -34,6 +34,11 @@ from app.llm.interpreter import (
     bound_interpreter_history,
 )
 from app.models import ConversationProfile, KnowledgeGap, Person
+from app.policies.positive_topics import (
+    context_topic_grounding,
+    may_offer_positive_topics,
+    positive_topic_violation,
+)
 from app.policies.sensitive_topics import (
     SPONTANEOUS_SUPPRESSION_REPLY,
     SensitiveTopic,
@@ -181,6 +186,8 @@ def _topics_from_profile(
 
 def _style_from_profile(
     profile: ConversationProfile | None,
+    *,
+    offer_positive_topics: bool,
 ) -> ConversationStyle | None:
     """Return only the verified profile style sent to a responder."""
     if profile is None:
@@ -189,6 +196,22 @@ def _style_from_profile(
         preferred_name=profile.preferred_name,
         conversational_style=profile.conversational_style,
         positive_topics=tuple(profile.positive_topics or ()),
+        offer_positive_topics=offer_positive_topics,
+    )
+
+
+def _may_offer_profile_topics(
+    positive_topics: tuple[str, ...],
+    message: str,
+    window: ConversationWindow | None,
+    intent: Intent,
+) -> bool:
+    prior_turn_texts = tuple(turn.text for turn in window.turns) if window else ()
+    return may_offer_positive_topics(
+        topics=positive_topics,
+        message=message,
+        prior_turn_texts=prior_turn_texts,
+        intent=intent,
     )
 
 
@@ -328,7 +351,8 @@ class ConversationService:
         # and every later continuity decision derives from this same snapshot.
         window = await self._load_turn_window(conversation_id, owner_session_id)
         responder_history = self._responder_history(window, sensitive_topics)
-        style = _style_from_profile(profile)
+        # A disambiguation turn is a person query, never an offer opportunity.
+        style = _style_from_profile(profile, offer_positive_topics=False)
 
         interpreter_route: VerifiedInterpreterRoute | None = None
         if self._should_interpret(text, route, window, sensitive_evaluation):
@@ -494,6 +518,12 @@ class ConversationService:
                 # turn a baseless offer into a repeated offer/acceptance loop.
                 answer = Response(text=_NO_STORED_CONTINUATION_REPLY)
             else:
+                style = _style_from_profile(
+                    profile,
+                    offer_positive_topics=_may_offer_profile_topics(
+                        positive_topics, text, window, route.intent
+                    ),
+                )
                 answer = await self._respond(
                     context,
                     sensitive_evaluation,
@@ -988,6 +1018,24 @@ class ConversationService:
             logger.warning(
                 "responder output in conversation %s mentioned a blocked "
                 "sensitive topic; replacing it with a safe reply",
+                conversation_id,
+            )
+            return Response(text=SPONTANEOUS_SUPPRESSION_REPLY)
+        if (
+            style is not None
+            and style.positive_topics
+            and context.sensitive_topic_requested is None
+            and positive_topic_violation(
+                answer=answer.text,
+                message=message or "",
+                topics=style.positive_topics,
+                offer_allowed=style.offer_positive_topics,
+                grounded_text=context_topic_grounding(context),
+            )
+        ):
+            logger.warning(
+                "responder output in conversation %s broke the bounded "
+                "positive-topic policy; replacing it with a safe reply",
                 conversation_id,
             )
             return Response(text=SPONTANEOUS_SUPPRESSION_REPLY)

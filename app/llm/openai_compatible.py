@@ -27,6 +27,10 @@ from app.domain.enums import Intent
 from app.llm.base import Responder, Response
 from app.llm.deterministic import DeterministicResponder
 from app.llm.prompt_builder import allowed_sources, build_prompt
+from app.policies.positive_topics import (
+    context_topic_grounding,
+    positive_topic_violation,
+)
 from app.repositories.conversation import ResponseSourceRef
 from app.retrieval.context_builder import AnswerContext
 
@@ -123,6 +127,28 @@ class OpenAICompatibleResponder(Responder):
             if has_stored_data and not response.sources:
                 raise InvalidModelOutput(
                     "model cited no context source although stored data exists"
+                )
+            if (
+                style is not None
+                and context.sensitive_topic_requested is None
+                and positive_topic_violation(
+                    answer=response.text,
+                    message=message or "",
+                    topics=style.positive_topics,
+                    offer_allowed=style.offer_positive_topics,
+                    grounded_text=context_topic_grounding(context),
+                )
+            ):
+                raise InvalidModelOutput(
+                    "model broke the bounded positive-topic suggestion policy"
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and _NO_STORED_DATA_RECORD_CLAIM.search(response.text)
+            ):
+                raise InvalidModelOutput(
+                    "model claimed stored records although no stored data exists"
                 )
             if (
                 not has_stored_data
@@ -354,6 +380,14 @@ def _repeats_offer_or_question(
 _MEMORY_NO_DATA_OFFER = re.compile(
     r"\b(?:podemos|puedo|quieres|quiere|te\s+gustar[íi]a|te\s+apetece|"
     r"te\s+interesa|si\s+quieres|te\s+cuento|hablamos\s+de)\b",
+    re.IGNORECASE,
+)
+
+# A spontaneous turn with no stored data must never imply that Memo holds the
+# person's projects, memories, records, or archives. This is deliberately
+# generic: it protects the trust boundary without naming any profile topic.
+_NO_STORED_DATA_RECORD_CLAIM = re.compile(
+    r"\b(?:proyect\w*|recuerd\w*|memori\w*|registr\w*|archiv\w*|guardad\w*)\b",
     re.IGNORECASE,
 )
 

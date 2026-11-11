@@ -260,7 +260,11 @@ the verified `AnswerContext`, the responder receives:
 - the current user message;
 - a bounded recent-conversation snapshot for the *current conversation only*;
 - the active profile's `preferred_name`, `conversational_style`, and
-  `positive_topics` as style guidance.
+  `positive_topics` as style guidance. Positive topics are optional bounded
+  suggestions: at most one per conversation, only on a spontaneous turn with
+  no topic of its own, and never after the person ignores, rejects, or changes
+  topic. They never become facts, memories, projects, or sources, and the
+  current message always wins.
 
 The conversation snapshot is deliberately separate from the fact, memory,
 event, media and source sections. It carries only `role` and `text`, is

@@ -38,6 +38,10 @@ class ConversationStyle:
     preferred_name: str | None = None
     conversational_style: str | None = None
     positive_topics: tuple[str, ...] = ()
+    # Positive topics are optional style hints, never facts. The service may
+    # allow one bounded suggestion per conversation; when this is false the
+    # prompt must not offer them and any responder mention is rejected.
+    offer_positive_topics: bool = True
 
 
 def bound_conversation_history(

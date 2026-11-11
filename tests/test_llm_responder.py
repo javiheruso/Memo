@@ -5,6 +5,7 @@ import uuid
 import httpx
 import pytest
 
+from app.domain.conversation_context import ConversationStyle
 from app.domain.enums import (
     EpistemicKind,
     Intent,
@@ -421,3 +422,71 @@ async def test_general_chat_invented_source_still_falls_back_closed() -> None:
     assert response.text == "Estoy aquí para conversar. Cuéntame de qué te apetece hablar."
     assert response.sources == []
     assert all(str(source.entity_id) != str(invented) for source in response.sources)
+
+
+@pytest.mark.asyncio
+async def test_positive_topic_offer_is_rejected_when_not_allowed() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    style = ConversationStyle(
+        positive_topics=("la costura", "la playa"),
+        offer_positive_topics=False,
+    )
+    async with _client_for(
+        '{"answer": "Claro, ¿te apetece hablar de la costura?", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="No me apetece hablar de costura.", style=style
+        )
+
+    assert "costura" not in response.text
+    assert "playa" not in response.text
+    assert response.sources == []
+
+
+@pytest.mark.asyncio
+async def test_positive_topic_offer_is_bounded_to_one_topic() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    style = ConversationStyle(
+        positive_topics=("la costura", "la playa"),
+        offer_positive_topics=True,
+    )
+    async with _client_for(
+        '{"answer": "¿Te apetece hablar de la costura o la playa?", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Hola", style=style
+        )
+
+    assert "costura" not in response.text
+    assert "playa" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_single_allowed_positive_topic_offer_is_accepted() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    style = ConversationStyle(
+        positive_topics=("la costura", "la playa"),
+        offer_positive_topics=True,
+    )
+    async with _client_for(
+        '{"answer": "¿Te apetece hablar de la costura?", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Hola", style=style
+        )
+
+    assert response.text == "¿Te apetece hablar de la costura?"
+    assert response.sources == []
+
+
+@pytest.mark.asyncio
+async def test_no_data_model_cannot_claim_stored_projects_or_memories() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        '{"answer": "Tengo tus proyectos y recuerdos guardados.", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(context, message="Hola")
+
+    assert "proyectos" not in response.text
+    assert "recuerdos" not in response.text
+    assert response.sources == []

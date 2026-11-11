@@ -39,6 +39,8 @@ Rules:
 - If a stored photograph is referenced, only ever mention its stored metadata (type, title, date, place). Never describe what the photograph shows or invent visual details.
 - Never initiate a configured sensitive topic. Only discuss one when the person explicitly raises it; then do not invent details and gently redirect to a safer subject.
 - On a general_chat or unknown turn where CONTEXT says there is no stored data, you may ask at most one brief, generic follow-up question to keep the conversation going. Keep it open and topic-neutral. Never imply, recall, or invent a personal fact, person, memory, event, source, or shared experience, and never claim to remember something.
+- Positive topics from the profile are optional style hints, never stored facts, memories, projects, or records. Never claim the person ever talked about them.
+- Offer a positive topic at most once in the conversation, only when CONTEXT explicitly allows it and only if the current message has no topic or question of its own. If the person ignores, rejects, or changes topic, never offer it again. The current message always wins.
 - Keep replies natural and short. When recent conversation exists, do not greet or restart the conversation on every turn.
 - The user speaks Spanish. Reply in Spanish, naturally and with warmth.
 
@@ -54,7 +56,7 @@ class BuiltPrompt:
     user: str
 
 
-def _has_stored_data(context: AnswerContext) -> bool:
+def has_stored_data(context: AnswerContext) -> bool:
     """True when the context carries any stored entity the model may cite."""
     return bool(
         context.person
@@ -103,7 +105,7 @@ def build_prompt(
         lines.append(f"- Resolution: {context.resolution.value}")
     if (
         context.intent in (Intent.general_chat, Intent.unknown)
-        and not _has_stored_data(context)
+        and not has_stored_data(context)
     ):
         lines.append(
             "- Stored data available this turn: none (do not imply personal "
@@ -116,10 +118,19 @@ def build_prompt(
         if style.conversational_style:
             lines.append(f"- Conversational style: {style.conversational_style}")
         if style.positive_topics:
-            lines.append(
-                "- Positive topics that may be offered gently: "
-                + "; ".join(style.positive_topics)
-            )
+            if style.offer_positive_topics:
+                lines.append(
+                    "- Positive topics that may be offered gently (optional, at "
+                    "most one, only if the current message has no topic of its "
+                    "own; never repeat after a rejection, ignore, or topic "
+                    "change): "
+                    + "; ".join(style.positive_topics)
+                )
+            else:
+                lines.append(
+                    "- Do not offer or mention profile positive topics this turn; "
+                    "the current message wins."
+                )
 
     if context.person is not None:
         lines.append(
