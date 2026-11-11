@@ -25,6 +25,7 @@ from app.llm.base import Responder, Response
 from app.llm.deterministic import DeterministicResponder
 from app.llm.interpreter import OpenAICompatibleInterpreter
 from app.models import Message, ResponseSource
+from app.repositories.conversation import ResponseSourceRef
 from app.repositories.profile import ConversationProfileRepository
 from app.retrieval.context_builder import AnswerContext
 from app.schemas.profile import ConversationProfileCreate, SensitiveTopicCreate
@@ -101,6 +102,40 @@ class CapturingResponder(Responder):
         return await self._inner.respond(
             context, message=message, history=history, style=style
         )
+
+
+class SubjectOmittingResponder(Responder):
+    """Simulate a model that cites a relation/memory but not the person."""
+
+    async def respond(
+        self,
+        context: AnswerContext,
+        *,
+        message: str | None = None,
+        history=(),
+        style=None,
+    ) -> Response:
+        if context.verified_relations:
+            item = context.verified_relations[0]
+            sources = [
+                ResponseSourceRef(
+                    entity_type="relationship",
+                    entity_id=item.entity_id,
+                    usage_type=item.epistemic.value,
+                )
+            ]
+        elif context.memories:
+            item = context.memories[0]
+            sources = [
+                ResponseSourceRef(
+                    entity_type="memory",
+                    entity_id=item.entity_id,
+                    usage_type="memory",
+                )
+            ]
+        else:
+            sources = []
+        return Response(text="Carmen es una persona muy querida.", sources=sources)
 
 
 class ScriptedSTT:
@@ -493,6 +528,28 @@ async def test_interpreter_invalid_response_falls_back_without_inventing(
 # --------------------------------------------------------------------------
 # Voice shares the conversation service
 # --------------------------------------------------------------------------
+
+
+async def test_person_answer_keeps_subject_source_for_pronoun_follow_up(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    """A model that omits the subject source must not break "¿Y ella?".
+
+    The real local model cited a relation/memory but not the person, so the
+    next pronoun turn fell back to general chat. The verified subject from the
+    resolved context is persisted even when the responder forgets to cite it.
+    """
+    service = _service(db_session, SubjectOmittingResponder())
+
+    first = await service.handle_user_message("Háblame de Carmen")
+    assert first.intent == Intent.person_query
+    assert ("person", str(seed.person_ids["carmen"])) in _connection_sources(first)
+
+    follow = await service.handle_user_message(
+        "¿Y ella?", conversation_id=first.conversation_id
+    )
+    assert follow.intent == Intent.person_query
+    assert "Carmen" in follow.answer
 
 
 async def test_voice_and_text_share_continuity_and_natural_replies(

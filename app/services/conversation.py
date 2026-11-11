@@ -92,6 +92,39 @@ _OFFER_MARKERS = re.compile(
 )
 
 
+def _with_grounded_subject(
+    context: AnswerContext, sources: list[ResponseSourceRef]
+) -> list[ResponseSourceRef]:
+    """Keep the verified answer subject citable for pronoun continuity.
+
+    A generative responder may cite the relation, fact or memory it paraphrased
+    and forget the person the answer is about. A later "¿Y él?"/"¿Y ella?"
+    resolves the person from the previous assistant turn's ``subject`` source,
+    so a person/fact answer must always carry its verified subject even when the
+    model omitted it. The subject is part of the answer, so this stays truthful;
+    it is never invented, because it comes from the resolved ``AnswerContext``.
+    """
+    person = context.person
+    if person is None or not sources or context.intent not in (
+        Intent.person_query,
+        Intent.fact_query,
+    ):
+        return sources
+    if any(
+        source.entity_type == "person" and source.entity_id == person.id
+        for source in sources
+    ):
+        return sources
+    return [
+        *sources,
+        ResponseSourceRef(
+            entity_type="person",
+            entity_id=person.id,
+            usage_type="subject",
+        ),
+    ]
+
+
 def _turn_is_offer(text: str) -> bool:
     """True when an assistant turn asked or offered something.
 
@@ -469,6 +502,9 @@ class ConversationService:
                     history=responder_history,
                     style=style,
                 )
+            answer = replace(
+                answer, sources=_with_grounded_subject(context, answer.sources)
+            )
 
             user_message = await self._conversations.add_message(
                 conversation.id,
@@ -904,6 +940,9 @@ class ConversationService:
             message=text,
             history=history,
             style=style,
+        )
+        answer = replace(
+            answer, sources=_with_grounded_subject(context, answer.sources)
         )
         assistant_message = await self._conversations.add_message(
             conversation_id,
