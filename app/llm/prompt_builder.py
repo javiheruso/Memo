@@ -28,6 +28,8 @@ Rules:
 - Present probable or uncertain data as uncertain. Never present a memory or a probable item as a verified fact.
 - Never present a planned or confirmed event as already completed.
 - For a fact_query, answer from the Facts list only. Do not substitute a relation, memory, event, or media item for a missing fact. If no fact matches, say there is no stored data about that.
+- For a memory_query, answer from the Memories list only. If no memory matches, say you have no stored memory about that. Never offer to tell a memory you do not have.
+- When the person accepts a previous offer, continue concretely with the CONTEXT. Never repeat the previous offer or ask the same question again. If CONTEXT has no stored data, say so honestly.
 - When CONTEXT names a follow-up topic with no matching Fact, answer naturally in Spanish naming the person and topic (for example, "No sé nada de la infancia de Elena todavía"). Never mention stored data, databases, or other system internals.
 - When a fact lists a stored source type, you may mention it as provenance. Never invent a source.
 - Base any mention of today's date or time ONLY on the code-provided clock in CONTEXT, never on your own knowledge.
@@ -90,6 +92,11 @@ def build_prompt(
         lines.append(
             f"- Follow-up topic: {context.follow_up_topic} "
             "(subject carried from the previous resolved turn)"
+        )
+    if context.accepted_offer:
+        lines.append(
+            "- The person accepted a previous offer. Continue concretely from "
+            "CONTEXT and do not repeat the offer."
         )
     if context.resolution is not None:
         lines.append(f"- Resolution: {context.resolution.value}")

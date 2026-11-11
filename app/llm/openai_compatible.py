@@ -11,6 +11,7 @@ responder but can never inject an invented source into ``response_sources``.
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
@@ -22,6 +23,7 @@ import httpx
 
 from app.core.config import Settings
 from app.domain.conversation_context import ConversationStyle, ConversationTurn
+from app.domain.enums import Intent
 from app.llm.base import Responder, Response
 from app.llm.deterministic import DeterministicResponder
 from app.llm.prompt_builder import allowed_sources, build_prompt
@@ -116,7 +118,47 @@ class OpenAICompatibleResponder(Responder):
                 {"role": "user", "content": prompt.user},
             ]
             raw = await self._call_model(messages)
-            return self._validate_response(raw, context)
+            response = self._validate_response(raw, context)
+            has_stored_data = bool(allowed_sources(context))
+            if has_stored_data and not response.sources:
+                raise InvalidModelOutput(
+                    "model cited no context source although stored data exists"
+                )
+            if (
+                not has_stored_data
+                and _similar_to_previous(response.text, history)
+            ):
+                raise InvalidModelOutput(
+                    "model repeated the previous answer with no stored data"
+                )
+            if context.accepted_offer and _repeats_offer_or_question(
+                response.text, history
+            ):
+                raise InvalidModelOutput(
+                    "model repeated the offer or asked again after acceptance"
+                )
+            if (
+                context.intent == Intent.memory_query
+                and not context.memories
+                and (
+                    response.text.strip().endswith(("?", "¿"))
+                    or _MEMORY_NO_DATA_OFFER.search(response.text)
+                )
+            ):
+                raise InvalidModelOutput(
+                    "model offered or asked a question with no stored memory"
+                )
+            if (
+                context.intent == Intent.memory_query
+                and context.memories
+                and not _memory_answer_is_grounded(
+                    response.text, context.memories
+                )
+            ):
+                raise InvalidModelOutput(
+                    "model memory answer added details absent from the source"
+                )
+            return response
         except (httpx.HTTPError, InvalidModelOutput) as exc:
             # Fail closed: the deterministic responder handles this turn.
             _log_fallback(exc)
@@ -198,6 +240,122 @@ class OpenAICompatibleResponder(Responder):
                 )
             )
         return Response(text=answer.strip(), sources=sources)
+
+
+_GROUNDING_TOKEN = re.compile(r"[a-záéíóúñü0-9]+")
+_GROUNDING_STOPWORDS = frozenset(
+    {
+        "a",
+        "al",
+        "algo",
+        "como",
+        "con",
+        "de",
+        "del",
+        "el",
+        "ella",
+        "en",
+        "era",
+        "es",
+        "esta",
+        "este",
+        "fue",
+        "ha",
+        "la",
+        "las",
+        "lo",
+        "los",
+        "más",
+        "mas",
+        "me",
+        "mi",
+        "mis",
+        "que",
+        "qué",
+        "se",
+        "sin",
+        "sobre",
+        "son",
+        "su",
+        "sus",
+        "te",
+        "tu",
+        "tus",
+        "un",
+        "una",
+        "y",
+        "ya",
+    }
+)
+
+
+def _content_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in _GROUNDING_TOKEN.findall(text.lower())
+        if len(token) >= 2 and token not in _GROUNDING_STOPWORDS
+    }
+
+
+def _memory_answer_is_grounded(answer: str, memories) -> bool:
+    """True when the answer adds no content absent from the memory texts.
+
+    Memory narratives are exact stored text. A model that embellishes them
+    (for example, inventing a detail that is not in the narrative) is rejected
+    and the deterministic renderer answers instead.
+    """
+    allowed: set[str] = set()
+    for memory in memories:
+        allowed |= _content_tokens(f"{memory.title or ''} {memory.narrative}")
+    return _content_tokens(answer) <= allowed
+
+
+def _normalize_reply(text: str) -> str:
+    return " ".join(text.lower().split()).strip(" .!?¿¡")
+
+
+def _previous_assistant_text(
+    history: Sequence[ConversationTurn],
+) -> str | None:
+    previous = next(
+        (turn for turn in reversed(history) if turn.role == "assistant"),
+        None,
+    )
+    return previous.text if previous is not None else None
+
+
+def _similar_to_previous(answer: str, history: Sequence[ConversationTurn]) -> bool:
+    previous = _previous_assistant_text(history)
+    if previous is None:
+        return False
+    ratio = difflib.SequenceMatcher(
+        None,
+        _normalize_reply(answer),
+        _normalize_reply(previous),
+    ).ratio()
+    return ratio >= 0.9
+
+
+def _repeats_offer_or_question(
+    answer: str, history: Sequence[ConversationTurn]
+) -> bool:
+    """Detect the acceptance-loop failure in a model answer.
+
+    After the person accepts, a new question or a near-copy of the previous
+    assistant offer is not a continuation. The responder falls back to the
+    deterministic, context-grounded answer instead.
+    """
+    stripped = answer.strip()
+    if stripped.endswith(("?", "¿")):
+        return True
+    return _similar_to_previous(answer, history)
+
+
+_MEMORY_NO_DATA_OFFER = re.compile(
+    r"\b(?:podemos|puedo|quieres|quiere|te\s+gustar[íi]a|te\s+apetece|"
+    r"te\s+interesa|si\s+quieres|te\s+cuento|hablamos\s+de)\b",
+    re.IGNORECASE,
+)
 
 
 def _parse_json_payload(raw: str) -> dict[str, Any] | None:

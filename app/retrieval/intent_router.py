@@ -52,6 +52,49 @@ _MEMORY_MARKERS = re.compile(
     r"\b(?:te\s+acuerdas\b|recuerdas\b|do\s+you\s+remember\b|remember\s+when\b)",
     re.IGNORECASE,
 )
+# Questions about the person's own stored knowledge ("¿Tengo algún proyecto?",
+# "¿Qué sabes de mis recuerdos?") are memory questions, not generic chat. The
+# vocabulary names stored-knowledge nouns, never a specific subject, so the
+# same rule works for any topic the person asks about.
+_PERSONAL_KNOWLEDGE_MARKERS = re.compile(
+    r"\b(?:"
+    r"(?:qu[ée]|que|cu[áa]les|cuales)\s+(?:sabes|recuerdas|tienes|conoces|hay)"
+    r"\s+(?:de|sobre|acerca\s+de)\s+(?:mi|mis|m[íi]|lo\s+que)\b"
+    r"|(?:tengo|tenemos|hay)\s+(?:alg[uú]n[oa]?s?|algo)\s+(?:de\s+)?"
+    r"(?:proyect\w*|recuerd\w*|memori\w*|histori\w*|fotograf\w*|foto\w*|"
+    r"document\w*|registr\w*|dato\w*)\b"
+    r"|(?:qu[ée]|que|cu[áa]les|cuales)\s+"
+    r"(?:proyect\w*|recuerd\w*|memori\w*|histori\w*|fotograf\w*|foto\w*|"
+    r"document\w*|registr\w*|dato\w*)\s+(?:tengo|tenemos|hay)\b"
+    r")",
+    re.IGNORECASE,
+)
+# Short replies that accept a previous offer. They are language-level markers,
+# not topic rules: the topic always comes from the immediately previous
+# assistant question, never from this list.
+_ACCEPTANCE = re.compile(
+    r"^\s*[¡¿]?\s*(?:"
+    r"(?:s[íi]|claro(?:\s+que\s+s[íi])?|vale|de\s+acuerdo|perfecto|bueno|"
+    r"ok(?:ey)?|aj[áa]|por\s+supuesto|desde\s+luego|entendido)"
+    r"(?:\s*,?\s*(?:por\s+favor|gracias|claro|"
+    r"cu[ée]nta(?:me|melo|mela|nos)?|dime|adelante|sigue|contin[úu]a))?|"
+    r"cu[ée]nta(?:me|melo|mela|nos)?"
+    r"(?:\s+(?:algo\s+m[áa]s|m[áa]s|eso|esto|lo\s+mismo|"
+    r"eso\s+mismo|esto\s+mismo))?|"
+    r"dime(?:\s+(?:eso|esto|lo\s+mismo|eso\s+mismo|esto\s+mismo|m[áa]s))?|"
+    r"sigue|contin[úu]a|adelante|exacto|correcto|as[íi]\s+es|"
+    r"me\s+interesa|me\s+gustar[íi]a|quiero|"
+    r"(?:eso|esto|esa|ese)\s+mism[oa]|el\s+mismo|la\s+misma|eso|esto|esa|ese"
+    r")\s*[.!]*\s*$",
+    re.IGNORECASE,
+)
+# "Sobre costura", "de música", "hablando de la playa": a topic selection in
+# answer to the previous offer. It is only used when the previous assistant
+# turn asked a question, so it never hijacks an unrelated topic switch.
+_TOPIC_SELECTION = re.compile(
+    r"^\s*[¿¡]?\s*(?:sobre|de|hablando\s+de|acerca\s+de)\s+\S.*$",
+    re.IGNORECASE,
+)
 _EVENT_MARKERS = re.compile(
     r"\b(viene|vendrá|vienen|vendrán|cuándo|evento|eventos|quedada)\b",
     re.IGNORECASE,
@@ -194,6 +237,21 @@ _FACT_SUBJECT_PATTERNS = (
 )
 
 
+def _is_question_like(text: str) -> bool:
+    normalized = text.strip()
+    return (
+        "?" in normalized
+        or "¿" in normalized
+        or re.match(
+            r"^(?:qu[ée]|que|cu[áa]l|cu[áa]les|cual|cuales|dime|"
+            r"cu[ée]ntame|h[áa]blame)\b",
+            normalized,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
 def is_explicit_pronoun_question(text: str) -> bool:
     """True for a Spanish pronoun-only person question.
 
@@ -281,6 +339,11 @@ class IntentRouter:
         if _MEMORY_MARKERS.search(normalized):
             return RouteResult(intent=Intent.memory_query)
 
+        if _PERSONAL_KNOWLEDGE_MARKERS.search(normalized) and _is_question_like(
+            normalized
+        ):
+            return RouteResult(intent=Intent.memory_query)
+
         fact_topic = classify_fact_question(normalized)
         if fact_topic is not None and _FACT_QUESTION.search(normalized):
             term = _extract_fact_subject(normalized)
@@ -303,6 +366,28 @@ class IntentRouter:
                 return RouteResult(intent=Intent.orientation_query)
 
         return RouteResult(intent=Intent.general_chat)
+
+    def is_acceptance(self, text: str) -> bool:
+        """True for a short acceptance/continuation reply.
+
+        The caller must still verify that the immediately previous assistant
+        turn was an offer or question; this method only classifies the reply's
+        language shape.
+        """
+        return _ACCEPTANCE.match(text.strip()) is not None
+
+    def is_topic_selection(self, text: str) -> bool:
+        """True for "sobre X" / "de X" after an offer.
+
+        Like :meth:`is_acceptance`, the caller supplies the previous-turn
+        requirement. The topic itself is extracted by retrieval, never by the
+        router.
+        """
+        return _TOPIC_SELECTION.match(text.strip()) is not None
+
+    def is_continuation_reply(self, text: str) -> bool:
+        """True when ``text`` accepts or selects from a previous offer."""
+        return self.is_acceptance(text) or self.is_topic_selection(text)
 
     def route_fact_follow_up(self, text: str) -> RouteResult | None:
         """Classify an elliptical fact follow-up, without choosing a subject.

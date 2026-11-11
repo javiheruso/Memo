@@ -1,4 +1,5 @@
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -42,6 +43,10 @@ from app.policies.sensitive_topics import (
     evaluate,
     matches_topic,
 )
+from app.policies.trust import (
+    filter_sensitive_memories,
+    is_answerable_fact_status,
+)
 from app.repositories.conversation import (
     ConversationAccessDenied,
     ConversationRepository,
@@ -66,7 +71,7 @@ from app.retrieval.interpreter_verifier import (
 )
 from app.retrieval.relationship_roles import RelationshipRoleQuery
 from app.retrieval.semantic_retriever import SemanticRetriever
-from app.retrieval.structured_retriever import StructuredRetriever
+from app.retrieval.structured_retriever import PersonData, StructuredRetriever
 from app.services.claim_ingestion import ClaimIngestionService
 
 logger = logging.getLogger(__name__)
@@ -77,6 +82,52 @@ def _log_interpreter_failure(exc: Exception) -> None:
     logger.warning(
         "interpreter verification failed; keeping deterministic routing (category=%s)",
         type(exc).__name__,
+    )
+
+
+_OFFER_MARKERS = re.compile(
+    r"\b(?:podemos|puedo|quieres|quiere|te\s+gustar[íi]a|te\s+apetece|"
+    r"te\s+interesa|si\s+quieres|te\s+cuento|hablamos\s+de)\b",
+    re.IGNORECASE,
+)
+
+
+def _turn_is_offer(text: str) -> bool:
+    """True when an assistant turn asked or offered something.
+
+    A question mark or a generic offer phrase is the signal; the exact topic
+    words are never interpreted here.
+    """
+    return (
+        "?" in text
+        or "¿" in text
+        or _OFFER_MARKERS.search(text) is not None
+    )
+
+
+def _recent_turns_touch_sensitive(
+    turns, topics: tuple[SensitiveTopic, ...]
+) -> bool:
+    if not topics:
+        return False
+    return any(
+        matches_topic(turn.text, topic)
+        for turn in turns[-2:]
+        for topic in topics
+    )
+
+
+def _without_source_ids(data: PersonData, excluded: set[uuid.UUID]) -> PersonData:
+    """Drop entities already presented by the previous assistant turn."""
+    return replace(
+        data,
+        relationships=[
+            item for item in data.relationships if item.id not in excluded
+        ],
+        facts=[item for item in data.facts if item.id not in excluded],
+        memories=[item for item in data.memories if item.id not in excluded],
+        events=[item for item in data.events if item.id not in excluded],
+        media=[item for item in data.media if item.id not in excluded],
     )
 
 
@@ -112,6 +163,29 @@ def _style_from_profile(
 # (person/memory/event/orientation queries) ask the system for information; the
 # user's declarative statements live in general chat.
 _INGEST_INTENTS = {Intent.general_chat, Intent.unknown}
+
+# A user can accept an offer the assistant made without any stored entity
+# behind it. The reply is a stable, honest no-data statement: it never repeats
+# the offer and never implies that projects or records exist.
+_NO_STORED_CONTINUATION_REPLY = (
+    "No tengo nada guardado sobre eso todavía. No quiero inventar detalles."
+)
+
+
+@dataclass(frozen=True)
+class _Continuation:
+    """Verified continuation of an accepted offer.
+
+    ``no_stored_data`` is a fail-closed path: the service returns a fixed
+    honest reply without calling the responder, so a generative model cannot
+    restart the offer/acceptance loop.
+    """
+
+    route: RouteResult
+    context: AnswerContext | None = None
+    resolution: Resolution | None = None
+    follow_up_topic: str | None = None
+    no_stored_data: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,11 +225,12 @@ class ConversationService:
         self._people = PersonRepository(session)
         self._resolver = EntityResolver(self._people)
         self._memory_repo = MemoryRepository(session)
+        self._facts = FactRepository(session)
         self._relationships = RelationshipRepository(session)
         self._structured_retriever = StructuredRetriever(
             person_repo=self._people,
             relationship_repo=self._relationships,
-            fact_repo=FactRepository(session),
+            fact_repo=self._facts,
             memory_repo=self._memory_repo,
             event_repo=EventRepository(session),
             media_repo=MediaRepository(session),
@@ -249,6 +324,17 @@ class ConversationService:
                         style=style,
                     )
 
+            # A short acceptance ("sí", "claro", "cuéntame", "ese mismo") or a
+            # topic selection ("sobre costura") only means something when the
+            # immediately previous assistant turn offered or asked something.
+            # The continuation is always built from stored sources cited by
+            # that turn, never from the offer text itself.
+            continuation: _Continuation | None = None
+            if route.intent in (Intent.general_chat, Intent.unknown):
+                continuation = await self._accepted_offer_continuation(
+                    text, window, sensitive_topics
+                )
+
             # Elliptical follow-ups ("¿Y de comer?", "¿Y dónde vivió?") keep the
             # subject of the immediately previous resolved fact answer. The
             # repository refuses to carry a subject across any other intent or
@@ -257,7 +343,10 @@ class ConversationService:
             follow_up_resolution: Resolution | None = None
             follow_up_topic: str | None = None
             interpreter_applied = False
-            if route.intent in (Intent.general_chat, Intent.event_query):
+            if continuation is None and route.intent in (
+                Intent.general_chat,
+                Intent.event_query,
+            ):
                 follow_up_route = self._router.route_fact_follow_up(text)
                 if follow_up_route is not None:
                     subject_id = window.last_fact_subject()
@@ -305,7 +394,8 @@ class ConversationService:
             # unresolved may use the verified interpreter route. The explicit
             # follow-up above always wins.
             if (
-                interpreter_route is not None
+                continuation is None
+                and interpreter_route is not None
                 and follow_up_resolution is None
                 and route.intent in (Intent.general_chat, Intent.unknown)
             ):
@@ -316,7 +406,14 @@ class ConversationService:
 
             resolution: Resolution | None = None
             context: AnswerContext
-            if route.relationship_role is not None:
+            if continuation is not None:
+                route = continuation.route
+                context = continuation.context or AnswerContext(intent=route.intent)
+                if continuation.context is not None:
+                    context = replace(context, accepted_offer=True)
+                resolution = continuation.resolution
+                follow_up_topic = continuation.follow_up_topic
+            elif route.relationship_role is not None:
                 context = await self._relationship_query_context(
                     route.relationship_role, window
                 )
@@ -359,14 +456,19 @@ class ConversationService:
             context = apply_to_context(
                 context, sensitive_evaluation, positive_topics=positive_topics
             )
-            answer = await self._respond(
-                context,
-                sensitive_evaluation,
-                conversation.id,
-                message=text,
-                history=responder_history,
-                style=style,
-            )
+            if continuation is not None and continuation.no_stored_data:
+                # Fail closed: a generative responder must never be able to
+                # turn a baseless offer into a repeated offer/acceptance loop.
+                answer = Response(text=_NO_STORED_CONTINUATION_REPLY)
+            else:
+                answer = await self._respond(
+                    context,
+                    sensitive_evaluation,
+                    conversation.id,
+                    message=text,
+                    history=responder_history,
+                    style=style,
+                )
 
             user_message = await self._conversations.add_message(
                 conversation.id,
@@ -425,6 +527,149 @@ class ConversationService:
             ),
             gap=gap,
             gap_created=gap_created,
+        )
+
+    async def _accepted_offer_continuation(
+        self,
+        text: str,
+        window: ConversationWindow | None,
+        sensitive_topics: tuple[SensitiveTopic, ...],
+    ) -> _Continuation | None:
+        """Continue a previous offer from stored sources, or fail closed.
+
+        Continuation facts, memories and people come from the sources the
+        previous answer actually cited. The offer text is not authority. When
+        no cited source yields verified context, the caller returns an honest
+        no-data reply without invoking a generative responder.
+        """
+        if window is None or not self._router.is_continuation_reply(text):
+            return None
+        offer_turn = window.latest_assistant_turn
+        if offer_turn is None:
+            return None
+        memory_continuation = (
+            offer_turn.intent == Intent.memory_query.value
+            and bool(offer_turn.sources)
+        )
+        if not (_turn_is_offer(offer_turn.text) or memory_continuation):
+            return None
+        # An ambiguity is unresolved until the person names a candidate; never
+        # let an acceptance pick one of them.
+        if window.pending_person_candidates():
+            return None
+        # Never carry an acceptance across a sensitive-topic boundary.
+        if _recent_turns_touch_sensitive(window.turns, sensitive_topics):
+            return None
+
+        sources = offer_turn.sources
+        excluded = {source.entity_id for source in sources}
+
+        memory_ids = [
+            source.entity_id
+            for source in sources
+            if source.entity_type == "memory"
+        ]
+        if memory_ids:
+            memories = []
+            filtered = 0
+            for memory_id in memory_ids:
+                memory = await self._memory_repo.get(memory_id)
+                if memory is None:
+                    continue
+                safe, blocked = filter_sensitive_memories([memory])
+                filtered += len(blocked)
+                memories.extend(safe)
+            if memories:
+                return _Continuation(
+                    route=RouteResult(intent=Intent.memory_query),
+                    context=self._context_builder.build_from_memories(
+                        memories, filtered_count=filtered
+                    ),
+                )
+
+        fact_ids = [
+            source.entity_id
+            for source in sources
+            if source.entity_type == "fact"
+        ]
+        if fact_ids:
+            facts = [
+                fact
+                for fact_id in fact_ids
+                if (fact := await self._facts.get(fact_id)) is not None
+                and is_answerable_fact_status(fact.status)
+            ]
+            if facts:
+                subject = await self._people.get(facts[0].subject_person_id)
+                if subject is not None:
+                    resolution = Resolution.from_people(
+                        subject.display_name, [subject]
+                    )
+                    context = self._context_builder.build_from_person_data(
+                        PersonData(
+                            person=subject,
+                            relationships=[],
+                            facts=facts,
+                            memories=[],
+                            events=[],
+                            media=[],
+                        ),
+                        resolution,
+                        intent=Intent.fact_query,
+                    )
+                    return _Continuation(
+                        route=RouteResult(
+                            intent=Intent.fact_query,
+                            term=subject.display_name,
+                            fact_topic=FactTopic.general,
+                        ),
+                        context=context,
+                        resolution=resolution,
+                    )
+
+        person_ids = [
+            source.entity_id
+            for source in sources
+            if source.entity_type == "person"
+            and source.usage_type == "subject"
+        ] or [
+            source.entity_id
+            for source in sources
+            if source.entity_type == "person"
+        ]
+        if person_ids:
+            person = await self._people.get(person_ids[0])
+            if person is not None:
+                data = await self._structured_retriever.retrieve(person.id)
+                data = _without_source_ids(data, excluded)
+                safe_memories, _ = filter_sensitive_memories(data.memories)
+                data = replace(data, memories=safe_memories)
+                if (
+                    data.relationships
+                    or data.facts
+                    or data.memories
+                    or data.events
+                    or data.media
+                ):
+                    resolution = Resolution.from_people(
+                        person.display_name, [person]
+                    )
+                    return _Continuation(
+                        route=RouteResult(
+                            intent=Intent.person_query,
+                            term=person.display_name,
+                        ),
+                        context=self._context_builder.build_from_person_data(
+                            data, resolution, intent=Intent.person_query
+                        ),
+                        resolution=resolution,
+                    )
+
+        # The offer itself is untrusted text, not a stored source. Without a
+        # cited source there is no verified context to continue from.
+        return _Continuation(
+            route=RouteResult(intent=Intent.general_chat),
+            no_stored_data=True,
         )
 
     async def _load_turn_window(
