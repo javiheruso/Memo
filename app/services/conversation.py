@@ -493,8 +493,9 @@ class ConversationService:
         """True only for an unresolved, safe, bounded conversational turn.
 
         Already-resolved deterministic routes, pending ambiguity, resolved
-        carry-over, configured sensitive-topic requests, and empty or oversized
-        text never reach the optional network call.
+        carry-over, pronoun-only follow-ups, configured sensitive-topic
+        requests, and empty or oversized text never reach the optional network
+        call.
         """
         if self._interpreter is None:
             return False
@@ -510,6 +511,14 @@ class ConversationService:
             return False
         if sensitive_evaluation.requested is not None:
             return False
+
+        # A pronoun-only follow-up is resolved from verified carry-over or
+        # intentionally left conversational. It contains no name for the
+        # interpreter to ground, so an interpreter call cannot help; skipping
+        # it also prevents "él"/"ella" from being re-read as a person name.
+        if self._router.route_pronoun_follow_up(normalized) is not None:
+            return False
+
         if window is None:
             return True
         if window.pending_person_candidates():
@@ -605,7 +614,7 @@ class ConversationService:
         if suggestion is None:
             return None
         try:
-            return await self._interpreter_verifier.verify(suggestion)
+            return await self._interpreter_verifier.verify(suggestion, message=text)
         except Exception as exc:  # noqa: BLE001 - verification must fail closed
             _log_interpreter_failure(exc)
             return None

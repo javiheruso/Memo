@@ -1,6 +1,32 @@
 from app.domain.enums import Intent
 from app.retrieval.fact_topics import FactTopic
-from app.retrieval.intent_router import IntentRouter
+from app.retrieval.intent_router import IntentRouter, is_explicit_pronoun_question
+
+
+def test_explicit_pronoun_question_is_not_a_person_name() -> None:
+    for phrase in (
+        "¿Quién es él?",
+        "¿Quién era ella?",
+        "¿Quién fue ese?",
+        "¿Y quién es él?",
+        "¿Quién es ella?",
+    ):
+        assert is_explicit_pronoun_question(phrase), phrase
+        result = IntentRouter().route(phrase)
+        assert result.intent == Intent.general_chat, phrase
+        assert result.term is None, phrase
+        # The existing pronoun follow-up recognizer still claims the turn, so
+        # the service can reuse the verified previous subject.
+        follow_up = IntentRouter().route_pronoun_follow_up(phrase)
+        assert follow_up is not None, phrase
+        assert follow_up.intent == Intent.person_query, phrase
+        assert follow_up.term is None, phrase
+
+    assert not is_explicit_pronoun_question("¿Quién es Antonio?")
+    assert not is_explicit_pronoun_question("¿Y él?")
+    named = IntentRouter().route("¿Quién es Antonio?")
+    assert named.intent == Intent.person_query
+    assert named.term == "Antonio"
 
 
 def test_routes_spanish_person_question():

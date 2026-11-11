@@ -19,8 +19,13 @@ from datetime import datetime
 
 from app.domain.enums import Intent
 
-_FACT_SUBJECT_INTENTS = frozenset({Intent.fact_query.value})
-_RESOLVED_PERSON_INTENTS = frozenset(
+# A resolved person answer also exposes a single verified subject, so an
+# elliptical fact follow-up may continue from either a person or a fact answer.
+# Ambiguous answers (candidate rows) and unrelated intents never qualify.
+FACT_SUBJECT_INTENTS = frozenset(
+    {Intent.person_query.value, Intent.fact_query.value}
+)
+RESOLVED_PERSON_INTENTS = frozenset(
     {Intent.person_query.value, Intent.fact_query.value}
 )
 
@@ -81,21 +86,23 @@ class ConversationWindow:
         )
 
     def last_fact_subject(self) -> uuid.UUID | None:
-        """Return the subject of the immediately previous fact answer.
+        """Return the subject an elliptical fact follow-up may continue.
 
         Continuity stays deliberately narrow: the latest assistant turn must
-        be a resolved ``fact_query`` answer with exactly one ``subject`` person
-        source and no ``candidate`` rows.
+        be a resolved ``person_query`` or ``fact_query`` answer with exactly one
+        ``subject`` person source and no ``candidate`` rows. The subject comes
+        only from stored response-source metadata, never from transcript text.
         """
-        return self._subject_person(_FACT_SUBJECT_INTENTS)
+        return self._subject_person(FACT_SUBJECT_INTENTS)
 
     def last_resolved_person(self) -> uuid.UUID | None:
         """Return the person of the immediately previous resolved answer.
 
-        A person or fact answer can establish the subject for a possessive
-        follow-up, but an unrelated turn or an unresolved ambiguity never does.
+        A person or fact answer can establish the subject for a possessive or
+        pronoun follow-up, but an unrelated turn or an unresolved ambiguity
+        never does.
         """
-        return self._subject_person(_RESOLVED_PERSON_INTENTS)
+        return self._subject_person(RESOLVED_PERSON_INTENTS)
 
     def _subject_person(self, intents: frozenset[str]) -> uuid.UUID | None:
         turn = self.latest_assistant_turn

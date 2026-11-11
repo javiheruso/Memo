@@ -6,11 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.domain.conversation_window import (
+    FACT_SUBJECT_INTENTS,
+    RESOLVED_PERSON_INTENTS,
     ConversationWindow,
     SourceSnapshot,
     TurnSnapshot,
 )
-from app.domain.enums import Intent
 from app.models import Conversation, Message, ResponseSource
 from app.repositories.base import SQLRepository
 
@@ -257,16 +258,17 @@ class ConversationRepository(SQLRepository[Conversation]):
         return [row.source_entity_id for row in rows]
 
     async def last_fact_subject(self, conversation_id: uuid.UUID) -> uuid.UUID | None:
-        """Return the subject of the immediately previous fact answer.
+        """Return the subject an elliptical fact follow-up may continue.
 
         Follow-up continuity is deliberately narrow: the most recent assistant
-        turn must be a resolved ``fact_query`` answer with exactly one
-        ``subject`` person source. An ambiguous answer (``candidate`` rows) or
-        any other intent returns ``None``, so a subject is never carried across
-        unrelated turns or an unresolved ambiguity.
+        turn must be a resolved ``person_query`` or ``fact_query`` answer with
+        exactly one ``subject`` person source. An ambiguous answer
+        (``candidate`` rows) or any other intent returns ``None``, so a subject
+        is never carried across unrelated turns or an unresolved ambiguity.
+        This mirrors :meth:`ConversationWindow.last_fact_subject`.
         """
         return await self._last_subject_person(
-            conversation_id, intents={Intent.fact_query.value}
+            conversation_id, intents=FACT_SUBJECT_INTENTS
         )
 
     async def last_resolved_person(
@@ -274,20 +276,20 @@ class ConversationRepository(SQLRepository[Conversation]):
     ) -> uuid.UUID | None:
         """Return the person of the immediately previous resolved answer.
 
-        Possessive follow-ups ("Háblame sobre su infancia") can refer to a
-        person already established by a person or fact answer. Continuity stays
-        narrow: the latest assistant turn must be one of those intents, carry
-        exactly one ``subject`` person source, and expose no ``candidate``
-        rows. A new conversation, an unrelated turn, or an ambiguous answer
-        therefore never carries a subject forward.
+        Possessive and pronoun follow-ups ("Háblame sobre su infancia",
+        "¿Quién es él?") can refer to a person already established by a person
+        or fact answer. Continuity stays narrow: the latest assistant turn must
+        be one of those intents, carry exactly one ``subject`` person source,
+        and expose no ``candidate`` rows. A new conversation, an unrelated turn,
+        or an ambiguous answer therefore never carries a subject forward.
         """
         return await self._last_subject_person(
             conversation_id,
-            intents={Intent.person_query.value, Intent.fact_query.value},
+            intents=RESOLVED_PERSON_INTENTS,
         )
 
     async def _last_subject_person(
-        self, conversation_id: uuid.UUID, *, intents: set[str]
+        self, conversation_id: uuid.UUID, *, intents: frozenset[str]
     ) -> uuid.UUID | None:
         latest = (
             await self._session.execute(

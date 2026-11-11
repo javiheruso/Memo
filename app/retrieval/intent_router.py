@@ -144,6 +144,15 @@ FOLLOW_UP_TOPIC_LABELS: dict[FactTopic, str] = {
 # extracted here; the caller supplies the immediately previous resolved person
 # and refuses when there is none (for example after an ambiguous answer).
 _PRONOUN_REFERENCE = r"(?:él|ella|ellos|ellas|ese|esa)"
+# A pronoun-only question ("¿Quién es él?", "¿Quién era ella?") is not a new
+# person name. It must reach the verified pronoun carry-over path instead of
+# being resolved as a person literally named "él"/"ella". Explicit names such as
+# "¿Quién es Antonio?" never match this guarded shape.
+_EXPLICIT_PRONOUN_QUESTION = re.compile(
+    rf"^\s*[¿¡]?\s*(?:y\s+)?(?:qui[ée]n|quien)\s+"
+    rf"(?:es|era|fue)\s+{_PRONOUN_REFERENCE}\s*[?.!¿¡]*$",
+    re.IGNORECASE,
+)
 _PRONOUN_FOLLOW_UP_PATTERNS = (
     re.compile(
         rf"^\s*[¿¡]?\s*(?:y\s+)?{_PRONOUN_REFERENCE}\s*[?.!¿¡]*$",
@@ -160,7 +169,7 @@ _PRONOUN_FOLLOW_UP_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        rf"^\s*[¿¡]?\s*(?:qui[ée]n|quien)\s+(?:es|era|fue)\s+"
+        rf"^\s*[¿¡]?\s*(?:y\s+)?(?:qui[ée]n|quien)\s+(?:es|era|fue)\s+"
         rf"{_PRONOUN_REFERENCE}\s*[?.!¿¡]*$",
         re.IGNORECASE,
     ),
@@ -183,6 +192,16 @@ _FACT_SUBJECT_PATTERNS = (
     _FACT_SUBJECT_POSSESSIVE,
     _FACT_SUBJECT_ENGLISH_AUX,
 )
+
+
+def is_explicit_pronoun_question(text: str) -> bool:
+    """True for a Spanish pronoun-only person question.
+
+    These questions name no person: the pronoun must be supplied from the
+    immediately previous verified resolved subject, never from the literal
+    pronoun text and never from the database as if it were a name.
+    """
+    return _EXPLICIT_PRONOUN_QUESTION.match(text.strip()) is not None
 
 
 def _extract_fact_subject(text: str) -> str | None:
@@ -225,6 +244,12 @@ class IntentRouter:
         normalized = text.strip()
         if not normalized:
             return RouteResult(intent=Intent.unknown)
+
+        # A pronoun-only question is not a proper name. Leave it as general
+        # chat so the service's pronoun follow-up block can reuse the verified
+        # previous subject, or stay safely conversational when none exists.
+        if is_explicit_pronoun_question(normalized):
+            return RouteResult(intent=Intent.general_chat)
 
         # An explicit relationship role ("mi marido", "¿Y mi pareja?") is an
         # explicit person query, but the subject comes from the conversation's

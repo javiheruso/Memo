@@ -306,7 +306,7 @@ def test_contract_keeps_ambiguous_and_unrelated_turns_narrow() -> None:
     assert unrelated.last_resolved_person() is None
 
 
-def test_contract_distinguishes_person_from_fact_subjects() -> None:
+def test_contract_allows_fact_continuation_from_person_and_fact_subjects() -> None:
     fact_subject = uuid.uuid4()
     person_subject = uuid.uuid4()
 
@@ -331,7 +331,9 @@ def test_contract_distinguishes_person_from_fact_subjects() -> None:
             ),
         ),
     )
-    assert person_window.last_fact_subject() is None
+    # Ported V2 policy: a resolved person answer also seeds an elliptical fact
+    # continuation, while ambiguity and unrelated turns stay excluded above.
+    assert person_window.last_fact_subject() == person_subject
     assert person_window.last_resolved_person() == person_subject
 
     # A later user message must not hide the previous assistant turn.
@@ -346,3 +348,44 @@ def test_contract_distinguishes_person_from_fact_subjects() -> None:
         ),
     )
     assert with_trailing_user.last_fact_subject() == fact_subject
+
+
+async def test_repository_fact_subject_matches_window_contract(
+    db_session: AsyncSession,
+) -> None:
+    repository = ConversationRepository(db_session)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+
+    resolved = await _conversation(db_session)
+    subject = uuid.uuid4()
+    await _message(
+        db_session,
+        resolved.id,
+        speaker="assistant",
+        text="answer",
+        created_at=start,
+        intent=Intent.person_query.value,
+        sources=(("person", subject, "subject"),),
+    )
+
+    window = await repository.load_window(resolved.id)
+    assert window is not None
+    assert window.last_fact_subject() == subject
+    assert await repository.last_fact_subject(resolved.id) == subject
+
+    ambiguous = await _conversation(db_session)
+    candidate = uuid.uuid4()
+    await _message(
+        db_session,
+        ambiguous.id,
+        speaker="assistant",
+        text="ambiguous",
+        created_at=start + timedelta(seconds=1),
+        intent=Intent.person_query.value,
+        sources=(("person", candidate, "candidate"),),
+    )
+
+    ambiguous_window = await repository.load_window(ambiguous.id)
+    assert ambiguous_window is not None
+    assert ambiguous_window.last_fact_subject() is None
+    assert await repository.last_fact_subject(ambiguous.id) is None
