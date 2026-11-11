@@ -237,10 +237,15 @@ async def test_chat_page_presents_voice_as_the_primary_interaction(
     assert 'id="voice-mic"' in text
     assert 'id="voice-stop"' in text
     assert 'id="voice-replay"' in text
+    assert 'id="voice-session-start"' in text
+    assert 'id="voice-session-pause"' in text
+    assert "Empezar conversación" in text
+    assert "Pausar conversación" in text
     assert 'id="voice-consent"' in text
     assert "consentimiento" in text
     assert 'aria-live="polite"' in text
     assert "/static/voice-silence.js" in text
+    assert "/static/voice-session.js" in text
     assert "/static/voice.js" in text
     assert "/static/voice.css" in text
     assert "dejará de escuchar cuando hagas una pausa" in text
@@ -269,6 +274,21 @@ async def test_voice_static_asset_is_vanilla_same_origin_and_consent_aware(
     assert "getFloatTimeDomainData" in script
     assert "startSilenceMonitor" in script
     assert "stopRecording" in script
+    assert "MemoVoiceSession" in script
+    assert "echoCancellation" in script
+    assert "noiseSuppression" in script
+    assert "autoGainControl" in script
+    assert "visibilitychange" in script
+    assert "pagehide" in script
+    assert "pauseSession" in script
+
+    session_asset = await app_client.get("/static/voice-session.js")
+    assert session_asset.status_code == 200
+    session_script = session_asset.text
+    assert "createConversationSession" in session_script
+    assert "maxSessionMs" in session_script
+    assert "resumeDelayMs" in session_script
+    assert "https://" not in session_script
 
     detector = await app_client.get("/static/voice-silence.js")
     assert detector.status_code == 200

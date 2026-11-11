@@ -350,17 +350,28 @@ the recognized `transcript`, the explicit `text`, the `answer`, the response
 `sources`/`ambiguity`/`gap` fields and, when synthesized, the audio as base64
 in `audio` (`audio_content_type` is `audio/mpeg`).
 
-The public `/chat` page is the voice-first pilot surface: tap **Hablar** once,
-speak, and the browser stops recording after a sustained pause, then sends the
-recording to the same-origin endpoint, shows the transcript with the spoken
-answer and offers **Repetir**. A visible **Detener** button stops immediately.
+The public `/chat` page is the voice-first pilot surface. Manual single-turn
+mode works with one **Hablar** tap: speak, and the browser stops recording after
+a sustained pause, then sends the recording to the same-origin endpoint, shows
+the transcript with the spoken answer and offers **Repetir**. A visible
+**Detener** button stops immediately.
+
+The page also exposes an explicit **Empezar conversación** hands-free session.
+Only that direct user action starts the loop; neither a finished response, a
+reload nor detected silence can enter it. While the session is active the
+browser listens for one bounded turn, detects speech plus sustained local
+silence, uploads that single blob, transcribes/responds/synthesizes, releases
+the microphone while Memo speaks, and resumes listening only after playback
+ends plus a short safe delay. **Pausar conversación** is always available during
+an active session. Text entry remains available as a clearly secondary fallback
+under a disclosure, and manual **Hablar** remains the fallback for browsers or
+situations where a session cannot continue.
+
 There is no wake word, no server-side VAD and no streaming: the silence detector
 runs locally in the browser with a Web Audio `AnalyserNode`. On first use the
 page asks for explicit consent before sending audio to the cloud STT/TTS
 providers, and raw audio is never persisted: it lives in the browser only long
 enough to upload it and the backend passes the bytes straight to the provider.
-Text entry remains available as a clearly secondary fallback under a disclosure
-for browsers or situations where the microphone is unavailable.
 
 Audio uploads are bounded and validated at the application boundary. Accepted
 media types are audio/webm, audio/ogg, audio/mp4, audio/mpeg, audio/wav,
@@ -612,13 +623,22 @@ surface, not an authorization system.
 Open <http://localhost:8000/chat> to talk to the companion with no auth. It is
 a plain FastAPI + Jinja2 surface with small vanilla JavaScript assets (no
 frontend framework, no build step, no streaming) and a large-text layout sized
-for the older-adult audience. The primary interaction is spoken conversation:
-tap **Hablar** once, speak, and the browser stops recording on a local silence
-detection, then sends the recording to `POST /api/v1/chat/voice`, shows the
-recognized transcript with the answer, and plays the synthesized reply. Every
-turn runs the same `ConversationService`, so intent routing, retrieval, trust
-policies, claim ingestion and knowledge-gap persistence behave identically to
-the API.
+for the older-adult audience. The primary interaction is spoken conversation.
+Every recorded turn is sent to `POST /api/v1/chat/voice` and runs the same
+`ConversationService`, so intent routing, retrieval, trust policies, claim
+ingestion and knowledge-gap persistence behave identically to the API.
+
+There are two voice paths:
+
+- **Hands-free conversation:** the user explicitly selects **Empezar
+  conversación**. The client then repeats: local listen -> speech plus sustained
+  silence -> one bounded upload -> transcript/answer/TTS -> microphone released
+  while speaking -> playback ends plus a safe delay -> local listen again. The
+  loop is client-side turn-taking, not streaming or barge-in. **Pausar
+  conversación** stops it at any time.
+- **Manual single turn:** **Hablar** records one turn and stops on local
+  silence, exactly as before. It remains available when a session is paused or
+  unavailable.
 
 The text form is a secondary fallback inside a disclosure, for a browser
 without `MediaRecorder` or a denied microphone permission. The public page does
@@ -630,40 +650,57 @@ Quick path:
 2. Configure `MEMO_STT_*` and `MEMO_TTS_*` (OpenAI-compatible) for the full
    spoken round trip.
 3. Open <http://localhost:8000/chat>
-4. Tap **Hablar**, accept the first-use voice consent, and speak. After a short
-   pause the turn is sent automatically; **Detener** stops immediately. The
-   transcript and answer render below; **Repetir** replays the latest spoken
-   answer.
+4. Either select **Empezar conversación** for hands-free turn-taking, or tap
+   **Hablar** for a single turn. Accept the first-use voice consent on the first
+   attempt. After a short pause the turn is sent automatically; **Detener**
+   stops the current recording immediately and **Pausar conversación** stops the
+   whole session. The transcript and answer render below; **Repetir** replays
+   the latest spoken answer.
 
 Details:
 
 | Concern | Decision |
 |---------|----------|
 | Multi-turn continuity | A signed ownership cookie (`memo_chat_session`) plus a `memo_chat_conversation` pointer cookie select the conversation; both the text fallback and the voice endpoint set them |
-| Voice consent | Explicit first-use dialog before any audio leaves the browser; the choice is remembered locally |
-| Raw audio | Never persisted server-side; bytes are passed straight to the configured STT provider and discarded |
+| Voice consent | Explicit first-use dialog before any audio leaves the browser; the choice is remembered locally, but a remembered consent never starts a session by itself |
+| Raw audio | Never persisted server-side; bytes are passed straight to the configured STT provider and discarded. A session uploads one bounded blob per turn, never continuous audio |
+| Hands-free consent boundary | Only **Empezar conversación** starts the loop. A finished answer, a reload or detected silence never does. A pause, hidden tab, navigation, provider/microphone failure, missing TTS or session limit requires an explicit restart |
+| Microphone during playback | The stream is released before Memo speaks. Resume happens only after playback `ended` plus a 0.8 s safe delay; playback or autoplay failure pauses the session |
+| Echo avoidance | Capture requests the standard `echoCancellation`, `noiseSuppression` and `autoGainControl` constraints when the browser supports them; non-supporting browsers ignore unknown constraints. This reduces, but does not eliminate, speaker echo |
 | Tap-to-talk | One tap starts capture. Local silence detection stops it after speech plus a sustained pause; **Detener** is always available |
 | Silence detection | Web Audio `AnalyserNode` RMS sampled every 100 ms, all in the browser; no audio is streamed or analyzed server-side |
-| Grace and bounds | No auto-stop during the first 2.5 s of a recording; stop needs 1.6 s of sustained silence after speech; every recording is hard-stopped at 60 s |
-| Client configuration | `window.MEMO_VOICE_CONFIG` may override the documented defaults (`maxRecordingMs`, `initialGraceMs`, `silenceDurationMs`, `silenceRmsThreshold`, `analyserFftSize`, `pollIntervalMs`) before the voice script loads |
-| Fallback | Without `AudioContext`/`AnalyserNode` the page keeps working with manual **Detener**; without `MediaRecorder` the text form remains |
-| Accessible states | `role="status"`/`aria-live` announcements and visible `is-listening`/`is-processing`/`is-speaking` states for listening, thinking, speaking, errors and microphone availability |
-| Errors | STT failure, TTS failure, unsupported format and oversized audio produce safe user-facing messages; provider details and secrets are not exposed |
+| Grace and bounds | No auto-stop during the first 2.5 s of a recording; stop needs 1.6 s of sustained silence after speech; every recording is hard-stopped at 60 s; an active hands-free session is hard-stopped at 10 minutes |
+| Client configuration | `window.MEMO_VOICE_CONFIG` may override the documented defaults (`maxRecordingMs`, `maxSessionMs`, `resumeDelayMs`, `initialGraceMs`, `silenceDurationMs`, `silenceRmsThreshold`, `analyserFftSize`, `pollIntervalMs`) before the voice scripts load |
+| Fallback | Without `AudioContext`/`AnalyserNode` the page keeps working with manual **Detener**; without `MediaRecorder` the text form remains; manual **Hablar** remains available whenever the session is paused |
+| Accessible states | `role="status"`/`aria-live` announcements and visible `is-listening`/`is-processing`/`is-speaking`/`is-waiting`/`is-paused` states for listening, thinking, speaking, waiting to resume, paused sessions, errors and microphone availability |
+| Errors | STT failure, TTS failure, unsupported format and oversized audio produce safe user-facing messages; provider details and secrets are not exposed. A failed turn pauses the session instead of recording again |
 | New conversation | The *Empezar otra conversación* button clears the pointer cookie (never deletes stored history) |
 | Pipeline signals | A created gap ("unknown person") and an ambiguous person render as an inline notice; the assistant reply text is still shown as the turn |
 
 Accepted limitations for this slice: silence detection is a simple loudness
 threshold, not speaker-aware VAD, so a noisy room may require raising
 `silenceRmsThreshold` and a very quiet speaker may need the manual **Detener**
-button. Background-tab throttling can delay the 100 ms sampler, but the hard
-60 s timer still bounds the session. The transcript shows both sides of every
-stored turn for the current conversation but no per-message timestamps, the
-cookie is HTTP-only and SameSite=Lax but not `Secure` (use TLS in any real
-deployment), and the whole surface speaks to whatever person is at the device
-(a conversation can be shared; the reset button starts a clean thread). Browser
-audio capture depends on `MediaRecorder`; iOS Safari may still choose a
-different container, which the backend accepts when it normalizes to an
-allowed media type.
+button. Hands-free mode is client-side turn-taking, not streaming or barge-in:
+you cannot interrupt Memo by speaking over it; use **Pausar conversación** or
+stop playback first. Echo cancellation, noise suppression and auto gain are
+requested browser constraints, not a guarantee: speaker output may still be
+captured on some devices, so headphones reduce the risk in shared or noisy
+spaces. If playback is blocked by the browser's autoplay policy, fails to start
+or fails to decode, the session pauses instead of silently recording again. If
+TTS is unconfigured or fails, the text answer is shown and the session pauses;
+restarting requires **Empezar conversación**. Session state lives only in the
+page: a reload never resumes hands-free mode, and the user must grant/accept
+consent again if the browser no longer has it. Hidden-tab pausing depends on the
+Page Visibility API; the 10-minute session ceiling and 60-second per-turn
+ceiling still bound microphone use even when a visibility event is delayed.
+Background-tab throttling can also delay the 100 ms sampler. The transcript
+shows both sides of every stored turn for the current conversation but no
+per-message timestamps, the cookie is HTTP-only and SameSite=Lax but not
+`Secure` (use TLS in any real deployment), and the whole surface speaks to
+whatever person is at the device (a conversation can be shared; the reset
+button starts a clean thread). Browser audio capture depends on
+`MediaRecorder`; iOS Safari may still choose a different container, which the
+backend accepts when it normalizes to an allowed media type.
 
 ## Query pipeline ("Who was Paco?" / "¿Viene María hoy?")
 
@@ -1050,8 +1087,9 @@ The MVP is feature-complete against the dossier. Implemented and verified:
 - **Progressive hints** — person answers follow relation → facts → photo →
   memory, plus a metadata-only media slice with primary-media management.
 - **Voice (STT/TTS)** — replaceable OpenAI-compatible seams, voice-first public
-  page with explicit first-use consent, push-to-talk capture, spoken answers and
-  graceful text-only degradation.
+  page with explicit first-use consent, manual single-turn capture, an explicit
+  hands-free session with local silence turns, spoken answers and graceful
+  text-only degradation.
 - **Interfaces** — JSON API, server-rendered admin UI (`/admin`) with minimal
   shared-password auth, and a public conversational chat page (`/chat`).
 
@@ -1078,7 +1116,8 @@ Deferred by design (dossier phases) and not required for the MVP:
   `MEMO_EMBEDDER_*`, `MEMO_LLM_*` against your OpenAI-compatible backend.
 - Dedicated tablet/touch client (the `/chat` page is the current pilot surface).
 - Streaming voice, wake-word/server-side VAD and barge-in; this slice uses
-  local silence detection and sends one complete recording per turn.
+  local silence detection in an explicit client-side hands-free session and
+  sends one complete bounded recording per turn.
 - Media image serving/upload (currently metadata-only).
 
 ## Deploying

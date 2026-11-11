@@ -1,12 +1,19 @@
 /* Voice-first public chat interaction.
  *
- * One tap starts a MediaRecorder. A local Web Audio AnalyserNode watches the
- * microphone level; after speech has been detected and a sustained pause
- * follows, the client stops recording and uploads the turn automatically. A
- * visible Detener button remains available, and a hard maximum recording time
- * bounds every listening session.
+ * Manual single-turn mode: one tap starts a MediaRecorder. A local Web Audio
+ * AnalyserNode watches the microphone level; after speech has been detected and
+ * a sustained pause follows, the client stops recording and uploads the turn
+ * automatically. A visible Detener button remains available, and a hard
+ * maximum recording time bounds every listening turn.
  *
- * There is no wake word, no audio streaming and no dependency: the recorded
+ * Hands-free conversation mode: only an explicit "Empezar conversación" action
+ * may start the loop. While it is active the client listens for one bounded
+ * turn, uploads it once, plays the answer with the microphone released, waits
+ * for playback to end plus a safe delay, then resumes listening. Pausing on a
+ * hidden tab, page navigation, provider/microphone failure, missing TTS or the
+ * session time limit stops the loop and requires another explicit start.
+ *
+ * There is no wake word, no audio streaming and no dependency: each recorded
  * blob is sent once to the same-origin voice endpoint. Raw audio is kept in
  * memory just long enough to upload it; the app never stores it.
  */
@@ -16,6 +23,8 @@
   var CONSENT_KEY = "memo_voice_consent_v1";
   var FALLBACK_CONFIG = {
     maxRecordingMs: 60000,
+    maxSessionMs: 600000,
+    resumeDelayMs: 800,
     initialGraceMs: 2500,
     silenceDurationMs: 1600,
     silenceRmsThreshold: 0.012,
@@ -26,6 +35,11 @@
     window.MemoVoiceSilence &&
     typeof window.MemoVoiceSilence.createSilenceDetector === "function"
       ? window.MemoVoiceSilence
+      : null;
+  var sessionApi =
+    window.MemoVoiceSession &&
+    typeof window.MemoVoiceSession.createConversationSession === "function"
+      ? window.MemoVoiceSession
       : null;
   var root = document.querySelector("[data-voice-endpoint]");
   if (!root) {
@@ -40,6 +54,8 @@
   var micButton = document.getElementById("voice-mic");
   var stopButton = document.getElementById("voice-stop");
   var replayButton = document.getElementById("voice-replay");
+  var sessionStartButton = document.getElementById("voice-session-start");
+  var sessionPauseButton = document.getElementById("voice-session-pause");
   var consentDialog = document.getElementById("voice-consent");
   var consentAccept = document.getElementById("voice-consent-accept");
   var consentCancel = document.getElementById("voice-consent-cancel");
@@ -48,6 +64,9 @@
   }
 
   var config = voiceConfig();
+  var session = sessionApi
+    ? sessionApi.createConversationSession(config)
+    : null;
   var mediaRecorder = null;
   var mediaStream = null;
   var audioContext = null;
@@ -57,6 +76,8 @@
   var detector = null;
   var silenceTimer = null;
   var maxTimer = null;
+  var sessionLimitTimer = null;
+  var resumeTimer = null;
   var chunks = [];
   var stopping = false;
   var manualStopOnly = false;
@@ -64,17 +85,20 @@
   var playback = null;
   var lastAudioUrl = null;
   var busy = false;
+  var consentIntent = null;
 
   function voiceConfig() {
-    var defaults =
-      (silenceApi && silenceApi.DEFAULT_CONFIG) || FALLBACK_CONFIG;
+    var defaults = Object.assign({}, FALLBACK_CONFIG);
+    if (sessionApi && sessionApi.DEFAULT_CONFIG) {
+      Object.assign(defaults, sessionApi.DEFAULT_CONFIG);
+    }
     var overrides =
       window.MEMO_VOICE_CONFIG && typeof window.MEMO_VOICE_CONFIG === "object"
         ? window.MEMO_VOICE_CONFIG
         : {};
     var merged = Object.assign({}, defaults, overrides);
     if (silenceApi && typeof silenceApi.normalizeConfig === "function") {
-      return silenceApi.normalizeConfig(merged);
+      Object.assign(merged, silenceApi.normalizeConfig(merged));
     }
     return merged;
   }
@@ -87,6 +111,10 @@
       return window.performance.now();
     }
     return Date.now();
+  }
+
+  function recordingLimitMs() {
+    return session ? session.config.maxRecordingMs : config.maxRecordingMs;
   }
 
   function setStatus(message) {
@@ -136,7 +164,8 @@
     }
   }
 
-  function openConsent() {
+  function openConsent(intent) {
+    consentIntent = intent || "manual";
     if (!consentDialog) {
       return;
     }
@@ -183,6 +212,8 @@
     root.classList.toggle("is-listening", phase === "listening");
     root.classList.toggle("is-processing", phase === "thinking");
     root.classList.toggle("is-speaking", phase === "speaking");
+    root.classList.toggle("is-waiting", phase === "waiting");
+    root.classList.toggle("is-paused", phase === "paused");
     root.setAttribute("data-voice-state", phase);
     micButton.setAttribute(
       "aria-pressed",
@@ -196,6 +227,16 @@
       setStatus(message);
     }
     updateStopButton();
+  }
+
+  function updateSessionControls() {
+    if (!session || !sessionStartButton || !sessionPauseButton) {
+      return;
+    }
+    var active = session.state().active;
+    sessionStartButton.hidden = active;
+    sessionPauseButton.hidden = !active;
+    sessionStartButton.setAttribute("aria-pressed", active ? "true" : "false");
   }
 
   function releaseStream() {
@@ -267,22 +308,67 @@
       return;
     }
     stopPlayback();
-    playback = new Audio(lastAudioUrl);
-    playback.addEventListener("ended", function () {
+    var answered = new Audio(lastAudioUrl);
+    playback = answered;
+    answered.addEventListener("ended", function () {
+      if (playback !== answered) {
+        return;
+      }
       playback = null;
+      updateStopButton();
+      if (
+        session &&
+        session.state().active &&
+        session.state().status === "speaking"
+      ) {
+        var decision = session.playbackEnded(nowMs());
+        applySessionEffects(decision.effects);
+        return;
+      }
       setPhase("idle", "Listo para escucharte.");
     });
-    playback.addEventListener("error", function () {
+    answered.addEventListener("error", function () {
+      if (playback !== answered) {
+        return;
+      }
       playback = null;
+      updateStopButton();
+      if (
+        session &&
+        session.state().active &&
+        session.state().status === "speaking"
+      ) {
+        pauseSession(
+          "playback_error",
+          "No se ha podido reproducir la voz. La conversación está en pausa; puedes leer la respuesta."
+        );
+        return;
+      }
       setPhase(
         "idle",
         "La voz no está disponible. Puedes leer la respuesta."
       );
     });
     setPhase("speaking", "Memo está respondiendo…");
-    var started = playback.play();
+    var started = answered.play();
     if (started && typeof started.catch === "function") {
       started.catch(function () {
+        if (playback !== answered) {
+          return;
+        }
+        playback = null;
+        updateStopButton();
+        if (
+          session &&
+          session.state().active &&
+          session.state().status === "speaking"
+        ) {
+          pauseSession(
+            "playback_error",
+            "El navegador no ha podido reproducir la voz. La conversación está en pausa; puedes leer la respuesta."
+          );
+          return;
+        }
         setPhase("idle", "Pulsa Repetir para escuchar la respuesta.");
       });
     }
@@ -325,48 +411,42 @@
       root.setAttribute("data-conversation-id", payload.conversation_id);
     }
     storeAnswerAudio(payload.audio, payload.audio_content_type);
-    if (payload.audio) {
-      playAnswer();
-    } else {
-      setPhase(
-        "idle",
-        "Respuesta lista. La voz no está disponible ahora mismo; puedes leerla."
-      );
-    }
+    return Boolean(payload.audio);
   }
 
-  function showHttpError(status) {
+  function showHttpError(status, sessionTurn) {
+    var message = "No se ha podido completar la respuesta.";
+    var detail = "Algo ha ido mal. Inténtalo de nuevo.";
     if (status === 400) {
-      setPhase(
-        "idle",
-        "No he podido entenderte. Prueba a hablar más cerca del micrófono."
-      );
-      showError("No se ha entendido el audio.");
-      return;
+      message =
+        "No he podido entenderte. Prueba a hablar más cerca del micrófono.";
+      detail = "No se ha entendido el audio.";
+    } else if (status === 413) {
+      message = "La grabación es demasiado larga.";
+      detail =
+        "La grabación es demasiado larga. Prueba con una frase más corta.";
+    } else if (status === 415) {
+      message = "Formato de audio no compatible.";
+      detail =
+        "Este navegador usa un formato de audio no compatible. Prueba con otro navegador.";
+    } else if (status === 404) {
+      message = "Conversación nueva.";
+      detail =
+        "No he podido recuperar esta conversación. Empezamos una conversación nueva.";
     }
-    if (status === 413) {
-      setPhase("idle", "La grabación es demasiado larga.");
-      showError(
-        "La grabación es demasiado larga. Prueba con una frase más corta."
-      );
-      return;
+
+    if (
+      sessionTurn &&
+      session &&
+      session.state().active
+    ) {
+      pauseSession("provider_error", message);
+    } else if (
+      !(sessionTurn && session && session.state().status === "paused")
+    ) {
+      setPhase("idle", message);
     }
-    if (status === 415) {
-      setPhase("idle", "Formato de audio no compatible.");
-      showError(
-        "Este navegador usa un formato de audio no compatible. Prueba con otro navegador."
-      );
-      return;
-    }
-    if (status === 404) {
-      setPhase("idle", "Conversación nueva.");
-      showError(
-        "No he podido recuperar esta conversación. Empezamos una conversación nueva."
-      );
-      return;
-    }
-    setPhase("idle", "No se ha podido completar la respuesta.");
-    showError("Algo ha ido mal. Inténtalo de nuevo.");
+    showError(detail);
   }
 
   function buildForm(blob, includeConversation) {
@@ -396,7 +476,8 @@
     });
   }
 
-  async function sendAudio(blob) {
+  async function sendAudio(blob, options) {
+    var sessionTurn = Boolean(options && options.sessionTurn);
     if (busy) {
       return;
     }
@@ -413,14 +494,51 @@
         response = await postVoice(blob, false);
       }
       if (!response.ok) {
-        showHttpError(response.status);
+        showHttpError(response.status, sessionTurn);
         return;
       }
       var payload = await response.json();
-      renderResult(payload);
+      var hasAudio = renderResult(payload);
+      if (sessionTurn) {
+        if (!session || !session.state().active) {
+          /* The user paused while the turn was in flight. Render the text but
+           * never auto-play or return to the microphone. */
+          setPhase("paused", "La conversación está en pausa.");
+          updateSessionControls();
+          return;
+        }
+        var decision = session.answerReady(nowMs(), { hasAudio: hasAudio });
+        applySessionEffects(decision.effects);
+        if (!hasAudio) {
+          setPhase(
+            "paused",
+            "La voz no está disponible ahora mismo; puedes leer la respuesta. La conversación está en pausa."
+          );
+          updateSessionControls();
+        }
+        return;
+      }
+      if (hasAudio) {
+        playAnswer();
+      } else {
+        setPhase(
+          "idle",
+          "Respuesta lista. La voz no está disponible ahora mismo; puedes leerla."
+        );
+      }
     } catch (error) {
-      setPhase("idle", "Sin conexión.");
-      showError("No he podido conectar con Memo. Inténtalo otra vez.");
+      if (sessionTurn && session && session.state().active) {
+        pauseSession(
+          "provider_error",
+          "No he podido conectar con Memo. La conversación está en pausa."
+        );
+        showError("No he podido conectar con Memo. Inténtalo otra vez.");
+      } else if (
+        !(sessionTurn && session && session.state().status === "paused")
+      ) {
+        setPhase("idle", "Sin conexión.");
+        showError("No he podido conectar con Memo. Inténtalo otra vez.");
+      }
     } finally {
       busy = false;
     }
@@ -431,6 +549,116 @@
       window.clearTimeout(maxTimer);
       maxTimer = null;
     }
+  }
+
+  function clearSessionLimit() {
+    if (sessionLimitTimer !== null) {
+      window.clearTimeout(sessionLimitTimer);
+      sessionLimitTimer = null;
+    }
+  }
+
+  function clearResumeTimer() {
+    if (resumeTimer !== null) {
+      window.clearTimeout(resumeTimer);
+      resumeTimer = null;
+    }
+  }
+
+  function scheduleSessionLimit() {
+    clearSessionLimit();
+    if (!session) {
+      return;
+    }
+    sessionLimitTimer = window.setTimeout(function () {
+      sessionLimitTimer = null;
+      if (session.state().active) {
+        pauseSession(
+          "session_limit",
+          "La conversación se ha detenido al alcanzar el límite de tiempo. Pulsa Empezar conversación para continuar."
+        );
+      }
+    }, session.config.maxSessionMs);
+  }
+
+  function scheduleResume(delayMs) {
+    clearResumeTimer();
+    setPhase("waiting", "Preparando el micrófono…");
+    resumeTimer = window.setTimeout(function () {
+      resumeTimer = null;
+      if (
+        !session ||
+        !session.state().active ||
+        session.state().status !== "waiting"
+      ) {
+        return;
+      }
+      var decision = session.resumeReady(nowMs());
+      applySessionEffects(decision.effects);
+    }, Math.max(0, delayMs));
+  }
+
+  function stopEverythingForPause() {
+    clearSessionLimit();
+    clearResumeTimer();
+    clearMaxTimer();
+    stopSilenceMonitor();
+    var discarded = mediaRecorder;
+    mediaRecorder = null;
+    stopping = false;
+    chunks = [];
+    if (discarded) {
+      /* Detach the turn handlers before stopping so a pause can never upload
+       * the in-progress audio or leak its data chunks into the next turn. */
+      discarded.removeEventListener("dataavailable", onRecordingData);
+      discarded.removeEventListener("stop", onRecordingStopped);
+      if (discarded.state === "recording") {
+        try {
+          discarded.stop();
+        } catch (error) {
+          /* Ignore a recorder that has already been released. */
+        }
+      }
+    }
+    releaseStream();
+    stopPlayback();
+    updateStopButton();
+  }
+
+  function applySessionEffects(effects) {
+    (effects || []).forEach(function (effect) {
+      if (!effect) {
+        return;
+      }
+      if (effect.type === "listen") {
+        startRecording({ sessionMode: true });
+      } else if (effect.type === "stop_turn") {
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+          stopRecording(effect.reason || "max");
+        }
+      } else if (effect.type === "stop_all") {
+        stopEverythingForPause();
+      } else if (effect.type === "schedule_resume") {
+        scheduleResume(effect.delayMs);
+      } else if (effect.type === "play_audio") {
+        playAnswer();
+      }
+    });
+  }
+
+  function pauseSession(reason, message) {
+    if (!session || !session.state().active) {
+      updateSessionControls();
+      return;
+    }
+    var decision = session.pause(nowMs(), reason);
+    applySessionEffects(decision.effects);
+    updateSessionControls();
+    setPhase(
+      "paused",
+      message ||
+        "Conversación en pausa. Pulsa Empezar conversación para volver a hablar."
+    );
   }
 
   function stopSilenceMonitor() {
@@ -557,6 +785,12 @@
     }
   }
 
+  function onRecordingData(event) {
+    if (event.data && event.data.size > 0) {
+      chunks.push(event.data);
+    }
+  }
+
   function onRecordingStopped() {
     var mimeType =
       (mediaRecorder && mediaRecorder.mimeType) ||
@@ -567,18 +801,46 @@
     stopping = false;
     updateStopButton();
     if (!blob.size) {
-      setPhase("idle", "No se ha grabado audio. Inténtalo otra vez.");
+      if (session && session.state().active) {
+        pauseSession(
+          "empty_audio",
+          "No se ha grabado audio. La conversación está en pausa."
+        );
+      } else {
+        setPhase("idle", "No se ha grabado audio. Inténtalo otra vez.");
+      }
       return;
     }
-    sendAudio(blob);
+    var sessionTurn = false;
+    if (
+      session &&
+      session.state().active &&
+      session.state().status === "listening"
+    ) {
+      var decision = session.turnStopped(nowMs());
+      sessionTurn = Boolean(decision && decision.ok);
+    } else if (session && session.state().active) {
+      /* A microphone turn ended outside the listening phase; dropping it is
+       * safer than uploading an unexpected extra turn. */
+      return;
+    }
+    sendAudio(blob, { sessionTurn: sessionTurn });
   }
 
-  async function startRecording() {
-    if (busy) {
+  async function startRecording(options) {
+    var sessionMode = Boolean(options && options.sessionMode);
+    if (busy || stopping) {
+      return;
+    }
+    if (
+      session &&
+      session.state().active &&
+      session.state().status !== "listening"
+    ) {
       return;
     }
     if (!consentGranted()) {
-      openConsent();
+      openConsent(sessionMode ? "session" : "manual");
       return;
     }
     if (!supportsRecording()) {
@@ -596,23 +858,40 @@
     setStatus("Pidiendo permiso para el micrófono…");
 
     try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      var stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      if (
+        sessionMode &&
+        (!session ||
+          !session.state().active ||
+          session.state().status !== "listening")
+      ) {
+        stream.getTracks().forEach(function (track) {
+          track.stop();
+        });
+        return;
+      }
+      mediaStream = stream;
       var mimeType = preferredMimeType();
       mediaRecorder = mimeType
         ? new window.MediaRecorder(mediaStream, { mimeType: mimeType })
         : new window.MediaRecorder(mediaStream);
 
       chunks = [];
-      mediaRecorder.addEventListener("dataavailable", function (event) {
-        if (event.data && event.data.size > 0) {
-          chunks.push(event.data);
-        }
-      });
+      mediaRecorder.addEventListener("dataavailable", onRecordingData);
       mediaRecorder.addEventListener("stop", onRecordingStopped, {
         once: true
       });
       mediaRecorder.start();
 
+      if (sessionMode && session) {
+        session.listeningStarted(nowMs());
+      }
       var automatic = startSilenceMonitor();
       manualStopOnly = !automatic;
       setPhase("listening");
@@ -629,13 +908,32 @@
         if (mediaRecorder && mediaRecorder.state === "recording") {
           stopRecording("max");
         }
-      }, config.maxRecordingMs);
+      }, recordingLimitMs());
     } catch (error) {
       clearMaxTimer();
       stopSilenceMonitor();
       releaseStream();
       mediaRecorder = null;
       stopping = false;
+      if (sessionMode) {
+        showError(
+          "No he podido usar el micrófono. Revisa el permiso del navegador o usa la opción de escribir."
+        );
+        if (session && session.state().active) {
+          pauseSession(
+            "microphone_error",
+            "No he podido usar el micrófono. La conversación está en pausa; revisa el permiso y vuelve a empezar."
+          );
+        } else if (session && session.state().status === "paused") {
+          setPhase(
+            "paused",
+            "La conversación está en pausa. Revisa el permiso del micrófono y pulsa Empezar conversación."
+          );
+        } else {
+          setPhase("idle", "Micrófono no disponible.");
+        }
+        return;
+      }
       setPhase("idle", "Micrófono no disponible.");
       showError(
         "No he podido usar el micrófono. Revisa el permiso del navegador o usa la opción de escribir."
@@ -643,18 +941,73 @@
     }
   }
 
+  function beginSession() {
+    if (!session) {
+      showError(
+        "Este navegador no puede mantener una conversación manos libres. Puedes usar Hablar."
+      );
+      setPhase("idle", "Modo conversación no disponible.");
+      return;
+    }
+    if (session.state().active) {
+      return;
+    }
+    if (!supportsRecording()) {
+      showError(
+        "Este navegador no puede grabar audio. Puedes escribir tu mensaje en la opción de abajo."
+      );
+      setPhase("idle", "Micrófono no disponible.");
+      return;
+    }
+    clearError();
+    stopPlayback();
+    var decision = session.start(nowMs());
+    if (!decision.ok) {
+      return;
+    }
+    updateSessionControls();
+    scheduleSessionLimit();
+    applySessionEffects(decision.effects);
+  }
+
+  function requestSessionStart() {
+    if (!session) {
+      beginSession();
+      return;
+    }
+    if (session.state().active) {
+      return;
+    }
+    if (!consentGranted()) {
+      openConsent("session");
+      return;
+    }
+    beginSession();
+  }
+
   micButton.addEventListener("click", function () {
     if (mediaRecorder && mediaRecorder.state === "recording") {
       stopRecording("manual");
-    } else {
-      startRecording();
+      return;
     }
+    if (session && session.state().active) {
+      /* An active session owns the microphone; use Pausar conversación. */
+      return;
+    }
+    startRecording();
   });
 
   if (stopButton) {
     stopButton.addEventListener("click", function () {
       if (mediaRecorder && mediaRecorder.state === "recording") {
         stopRecording("manual");
+        return;
+      }
+      if (session && session.state().active) {
+        pauseSession(
+          "user",
+          "Conversación en pausa. Pulsa Empezar conversación para volver a hablar."
+        );
         return;
       }
       stopPlayback();
@@ -664,32 +1017,93 @@
 
   if (replayButton) {
     replayButton.addEventListener("click", function () {
+      if (session && session.state().active) {
+        /* Replaying during a session must not race the automatic resume
+         * timer. Stop hands-free mode first, then treat the replay as manual
+         * output with no microphone listening. */
+        pauseSession(
+          "user_replay",
+          "Conversación en pausa para repetir la respuesta."
+        );
+      }
       playAnswer();
     });
+  }
+
+  if (sessionStartButton) {
+    sessionStartButton.addEventListener("click", requestSessionStart);
+  }
+
+  if (sessionPauseButton) {
+    sessionPauseButton.addEventListener("click", function () {
+      pauseSession(
+        "user",
+        "Conversación en pausa. Pulsa Empezar conversación para volver a hablar."
+      );
+    });
+  }
+
+  if (!session && sessionStartButton) {
+    sessionStartButton.hidden = true;
   }
 
   if (consentAccept) {
     consentAccept.addEventListener("click", function () {
       rememberConsent();
       closeConsent();
-      startRecording();
+      var intent = consentIntent;
+      consentIntent = null;
+      if (intent === "session") {
+        beginSession();
+      } else {
+        startRecording();
+      }
     });
   }
 
   if (consentCancel) {
     consentCancel.addEventListener("click", function () {
+      var intent = consentIntent;
+      consentIntent = null;
       closeConsent();
+      if (intent === "session") {
+        setStatus(
+          "Puedes usar Hablar para un turno suelto o escribir si prefieres no activar la voz."
+        );
+        return;
+      }
       setStatus(
         "Puedes usar la opción de escribir si prefieres no activar la voz."
       );
     });
   }
 
+  function pauseForHiddenPage() {
+    if (session && session.state().active) {
+      pauseSession(
+        "hidden_tab",
+        "Conversación en pausa porque has salido de la página. Pulsa Empezar conversación para volver."
+      );
+    }
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      pauseForHiddenPage();
+    }
+  });
+
+  window.addEventListener("pagehide", pauseForHiddenPage);
+
   window.addEventListener("beforeunload", function () {
     clearMaxTimer();
+    clearSessionLimit();
+    clearResumeTimer();
     stopSilenceMonitor();
     releaseStream();
     stopPlayback();
     clearLastAudio();
   });
+
+  updateSessionControls();
 })();

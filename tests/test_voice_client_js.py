@@ -33,12 +33,17 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
 def test_voice_client_scripts_parse() -> None:
     for path in (
         "app/web/static/voice-silence.js",
+        "app/web/static/voice-session.js",
         "app/web/static/voice.js",
     ):
         result = _run("--check", path)
         assert result.returncode == 0, result.stderr
 
 
-def test_voice_silence_detector_unit_suite() -> None:
-    result = _run("--test", "tests/js/voice_silence.test.js")
-    assert result.returncode == 0, result.stdout + result.stderr
+def test_voice_client_unit_suites() -> None:
+    for path in (
+        "tests/js/voice_silence.test.js",
+        "tests/js/voice_session.test.js",
+    ):
+        result = _run("--test", path)
+        assert result.returncode == 0, result.stdout + result.stderr

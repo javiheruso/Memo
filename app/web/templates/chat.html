@@ -40,6 +40,13 @@
   <section class="voice-controls" aria-label="Controles de voz">
     <p id="voice-status" class="status" role="status" aria-live="polite">Listo para escucharte.</p>
     <div class="buttons">
+      <button type="button" id="voice-session-start" class="voice-button session"
+              aria-pressed="false" aria-describedby="voice-hint">
+        <span class="js-session-label">Empezar conversación</span>
+      </button>
+      <button type="button" id="voice-session-pause" class="voice-button secondary" hidden>
+        Pausar conversación
+      </button>
       <button type="button" id="voice-mic" class="voice-button primary"
               aria-pressed="false" aria-describedby="voice-hint">
         <svg aria-hidden="true" width="30" height="30" viewBox="0 0 24 24" fill="none"
@@ -54,7 +61,13 @@
       <button type="button" id="voice-stop" class="voice-button secondary" hidden>Detener</button>
       <button type="button" id="voice-replay" class="voice-button secondary" hidden>Repetir</button>
     </div>
-    <p id="voice-hint" class="hint">Pulsa Hablar una vez y empieza a contar lo que quieras. Memo dejará de escuchar cuando hagas una pausa; también puedes pulsar Detener. El audio no se guarda.</p>
+    <p id="voice-hint" class="hint">
+      Para hablar sin pulsar cada vez, elige Empezar conversación. Escucharé un
+      turno, responderé y volveré a escuchar cuando termine la voz. Pulsa Pausar
+      conversación para parar en cualquier momento. También puedes pulsar Hablar
+      una vez y empezar a contar lo que quieras: Memo dejará de escuchar cuando
+      hagas una pausa; también puedes pulsar Detener. El audio no se guarda.
+    </p>
   </section>
 
   <details class="text-fallback">
@@ -81,8 +94,11 @@
   <p id="voice-consent-body">
     Para activar la voz necesitamos tu consentimiento. El audio se envía a un
     servicio de voz en la nube para transcribirlo y la respuesta se convierte
-    en voz. El navegador detecta el silencio localmente para parar la
-    grabación. No guardamos las grabaciones. ¿Quieres activar la voz?
+    en voz. En una conversación, el navegador detecta el silencio localmente y
+    sube un único turno acotado cada vez; no hay audio continuo. Mientras Memo
+    habla, el micrófono se detiene. No guardamos las grabaciones. La
+    conversación se pausa si sales de la página o si falla el micrófono o el
+    proveedor. ¿Quieres activar la voz?
   </p>
   <div class="consent-actions">
     <button type="button" id="voice-consent-accept" class="consent-accept">Aceptar y usar el micrófono</button>
@@ -91,6 +107,7 @@
 </dialog>
 
 <script src="{{ asset_url('voice-silence.js') }}" defer></script>
+<script src="{{ asset_url('voice-session.js') }}" defer></script>
 <script src="{{ asset_url('voice.js') }}" defer></script>
 </body>
 </html>
