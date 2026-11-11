@@ -1,13 +1,15 @@
 import json
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 
-from app.domain.conversation_context import ConversationStyle
+from app.domain.conversation_context import ConversationStyle, ConversationTurn
 from app.domain.enums import (
     EpistemicKind,
+    EventStatus,
     Intent,
     RelationshipStatus,
     RelationshipType,
@@ -15,6 +17,8 @@ from app.domain.enums import (
 from app.llm.openai_compatible import OpenAICompatibleResponder
 from app.retrieval.context_builder import (
     AnswerContext,
+    EventItem,
+    FactItem,
     RelationshipItem,
 )
 from app.retrieval.entity_resolver import PersonCandidate, ResolutionKind
@@ -22,6 +26,24 @@ from app.retrieval.entity_resolver import PersonCandidate, ResolutionKind
 
 def _person(name: str = "Francisco Navarro") -> PersonCandidate:
     return PersonCandidate(id=uuid.uuid4(), display_name=name)
+
+
+def _fact() -> FactItem:
+    return FactItem(
+        entity_id=uuid.uuid4(),
+        text="Vivió en Guardamar",
+        status="verified",
+        epistemic=EpistemicKind.verified_fact,
+    )
+
+
+def _event() -> EventItem:
+    return EventItem(
+        entity_id=uuid.uuid4(),
+        title="Visita de María",
+        start_at=datetime.now(UTC) + timedelta(days=2),
+        status=EventStatus.confirmed,
+    )
 
 
 def _verified_relation(
@@ -230,7 +252,7 @@ async def test_http_fallback_logs_status_without_sensitive_fields(caplog) -> Non
 
     assert "era amigo de Antonio" in response.text
     log = caplog.text
-    assert "http_status_error" in log
+    assert "timeout_or_transport" in log
     assert "503" in log
     for forbidden in (
         marker,
@@ -258,7 +280,7 @@ async def test_invalid_model_output_logs_no_model_content(caplog) -> None:
 
     assert "era amigo de Antonio" in response.text
     log = caplog.text
-    assert "invalid_model_output" in log
+    assert "invalid_json_or_schema" in log
     for forbidden in (marker, "super-secret-api-key", "Authorization", "Bearer"):
         assert forbidden not in log
 
@@ -275,7 +297,7 @@ async def test_network_error_logs_only_failure_class(caplog) -> None:
 
     assert "era amigo de Antonio" in response.text
     log = caplog.text
-    assert "ConnectError" in log
+    assert "timeout_or_transport" in log
     for forbidden in (
         "internal.example",
         "token=leaked",
@@ -299,7 +321,12 @@ async def test_request_targets_chat_completions_with_model_and_auth() -> None:
     body = json.loads(request.content)
     assert body["model"] == "test-model"
     assert body["temperature"] == 0
-    assert body["response_format"] == {"type": "json_object"}
+    response_format = body["response_format"]
+    assert response_format["type"] == "json_schema"
+    schema = response_format["json_schema"]
+    assert schema["name"] == "memo_reply"
+    assert schema["strict"] is True
+    assert set(schema["schema"]["required"]) == {"answer", "sources"}
     assert request.headers["Authorization"] == "Bearer secret"
 
 
@@ -444,6 +471,42 @@ async def test_positive_topic_offer_is_rejected_when_not_allowed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_positive_topic_named_by_the_person_can_be_echoed_as_a_statement() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    style = ConversationStyle(
+        positive_topics=("la costura", "la playa"),
+        offer_positive_topics=False,
+    )
+    async with _client_for(
+        '{"answer": "Me alegra que te guste la costura.", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Prefiero hablar de la costura.", style=style
+        )
+
+    assert response.text == "Me alegra que te guste la costura."
+    assert response.sources == []
+
+
+@pytest.mark.asyncio
+async def test_positive_topic_named_by_the_person_cannot_be_reoffered() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    style = ConversationStyle(
+        positive_topics=("la costura", "la playa"),
+        offer_positive_topics=False,
+    )
+    async with _client_for(
+        '{"answer": "Claro, ¿te apetece hablar de la costura?", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Prefiero hablar de la costura.", style=style
+        )
+
+    assert "costura" not in response.text
+    assert response.sources == []
+
+
+@pytest.mark.asyncio
 async def test_positive_topic_offer_is_bounded_to_one_topic() -> None:
     context = AnswerContext(intent=Intent.general_chat, term=None)
     style = ConversationStyle(
@@ -490,3 +553,308 @@ async def test_no_data_model_cannot_claim_stored_projects_or_memories() -> None:
     assert "proyectos" not in response.text
     assert "recuerdos" not in response.text
     assert response.sources == []
+
+
+@pytest.mark.asyncio
+async def test_sensitive_redirect_question_is_accepted() -> None:
+    context = AnswerContext(
+        intent=Intent.memory_query,
+        sensitive_topic_requested="la muerte de Antonio",
+        sensitive_redirect_topic="la costura",
+    )
+    answer = (
+        "Entiendo que quieres hablar de la muerte de Antonio. No quiero "
+        "inventar detalles. Si te parece, podemos hablar de la costura."
+    )
+    async with _client_for(
+        f'{{"answer": "{answer}", "sources": []}}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="¿Te acuerdas del hospital?"
+        )
+
+    assert response.text == answer
+    assert response.sources == []
+
+
+@pytest.mark.asyncio
+async def test_memory_answer_with_conversational_framing_is_grounded() -> None:
+    memory = _memory_for_grounding()
+    context = AnswerContext(
+        intent=Intent.memory_query,
+        memories=[memory],
+    )
+    answer = (
+        "Tengo un recuerdo guardado que encaja con eso: "
+        f"'{memory.narrative}'"
+    )
+    payload = (
+        f'{{"answer": "{answer}", "sources": '
+        f'[{{"entity_type": "memory", "entity_id": "{memory.entity_id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(
+            context, message="¿Te acuerdas de las tardes de pesca?"
+        )
+
+    assert response.text == answer
+    assert len(response.sources) == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_answer_with_invented_detail_still_falls_back() -> None:
+    memory = _memory_for_grounding()
+    context = AnswerContext(
+        intent=Intent.memory_query,
+        memories=[memory],
+    )
+    payload = (
+        '{"answer": "También iban a la playa en verano.", "sources": '
+        f'[{{"entity_type": "memory", "entity_id": "{memory.entity_id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(
+            context, message="¿Te acuerdas de las tardes de pesca?"
+        )
+
+    assert "playa" not in response.text
+    assert response.text.startswith("Tengo un recuerdo guardado")
+
+
+def _memory_for_grounding():
+    from app.domain.enums import MemoryStatus
+    from app.retrieval.context_builder import MemoryItem
+
+    return MemoryItem(
+        entity_id=uuid.uuid4(),
+        title="Tardes de pesca",
+        narrative=(
+            "Carmen recuerda las tardes de pesca con Antonio y Paco en Guardamar."
+        ),
+        memory_status=MemoryStatus.consolidated,
+        epistemic=EpistemicKind.memory,
+    )
+
+
+@pytest.mark.asyncio
+async def test_json_schema_enumerates_only_allowed_source_ids() -> None:
+    person = _person()
+    relation = _verified_relation()
+    context = _person_context(person, relation)
+    capture: list[httpx.Request] = []
+    payload = (
+        '{"answer": "Francisco era amigo de Antonio.", "sources": '
+        f'[{{"entity_type": "person", "entity_id": "{person.id}"}}]}}'
+    )
+    async with _client_for(payload, capture=capture) as client:
+        await _responder(client).respond(context)
+
+    schema = json.loads(capture[0].content)["response_format"]["json_schema"][
+        "schema"
+    ]
+    item_schema = schema["properties"]["sources"]["items"]
+    assert set(item_schema["properties"]["entity_id"]["enum"]) == {
+        str(person.id),
+        str(relation.entity_id),
+    }
+    assert item_schema["properties"]["entity_type"]["enum"] == [
+        "person",
+        "relationship",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_json_schema_forbids_sources_when_context_has_none() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    capture: list[httpx.Request] = []
+    async with _client_for(
+        '{"answer": "Hola.", "sources": []}', capture=capture
+    ) as client:
+        response = await _responder(client).respond(context, message="Hola")
+
+    schema = json.loads(capture[0].content)["response_format"]["json_schema"][
+        "schema"
+    ]
+    assert schema["properties"]["sources"]["maxItems"] == 0
+    assert response.text == "Hola."
+
+
+def _ambiguous_context() -> AnswerContext:
+    candidates = [_person("Carmen"), _person("Antonio")]
+    return AnswerContext(
+        intent=Intent.person_query,
+        term="Gómez",
+        resolution=ResolutionKind.ambiguous,
+        candidates=candidates,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ambiguity_without_a_question_falls_back() -> None:
+    context = _ambiguous_context()
+    payload = (
+        '{"answer": "Gómez era el marido de Carmen.", "sources": '
+        f'[{{"entity_type": "person", "entity_id": "{context.candidates[0].id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(context)
+
+    assert "Hay varias personas llamadas Gómez" in response.text
+    assert "¿A cuál te refieres?" in response.text
+
+
+@pytest.mark.asyncio
+async def test_ambiguity_question_without_sources_gets_candidate_sources() -> None:
+    context = _ambiguous_context()
+    async with _client_for(
+        '{"answer": "Hay varias personas. ¿A cuál te refieres?", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(context)
+
+    assert response.text == "Hay varias personas. ¿A cuál te refieres?"
+    assert {str(source.entity_id) for source in response.sources} == {
+        str(candidate.id) for candidate in context.candidates
+    }
+    assert all(source.usage_type == "candidate" for source in response.sources)
+
+
+@pytest.mark.asyncio
+async def test_no_data_fact_with_only_subject_gets_subject_source() -> None:
+    person = _person("Antonio")
+    context = AnswerContext(
+        intent=Intent.fact_query,
+        term="Antonio",
+        resolution=ResolutionKind.resolved,
+        person=person,
+    )
+    async with _client_for(
+        '{"answer": "No tengo información sobre eso de Antonio.", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(context)
+
+    assert response.text == "No tengo información sobre eso de Antonio."
+    assert [(source.entity_type, str(source.entity_id), source.usage_type) for source in response.sources] == [
+        ("person", str(person.id), "subject")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_memory_claim_with_no_stored_memory_falls_back() -> None:
+    context = AnswerContext(intent=Intent.memory_query, term=None)
+    async with _client_for(
+        '{"answer": "Sí, me acuerdo del crucero. Fue muy divertido.", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="¿Recuerdas aquel crucero?"
+        )
+
+    assert "crucero" not in response.text
+    assert response.text == "No tengo guardado ese recuerdo todavía."
+
+
+@pytest.mark.asyncio
+async def test_acceptance_can_repeat_the_cited_memory_narrative() -> None:
+    memory = _memory_for_grounding()
+    context = AnswerContext(
+        intent=Intent.memory_query,
+        memories=[memory],
+        accepted_offer=True,
+    )
+    text = (
+        "Tengo un recuerdo guardado que encaja con eso: "
+        f"'{memory.narrative}'"
+    )
+    payload = (
+        f'{{"answer": "{text}", "sources": '
+        f'[{{"entity_type": "memory", "entity_id": "{memory.entity_id}"}}]}}'
+    )
+    history = (
+        ConversationTurn(role="assistant", text=text),
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(
+            context, message="Sí.", history=history
+        )
+
+    assert response.text == text
+
+
+@pytest.mark.asyncio
+async def test_acceptance_still_rejects_a_repeated_offer_question() -> None:
+    context = AnswerContext(intent=Intent.general_chat, accepted_offer=True)
+    offer = "¿Te gustaría hablar de la costura?"
+    payload = f'{{"answer": "{offer}", "sources": []}}'
+    history = (ConversationTurn(role="assistant", text=offer),)
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(
+            context, message="Sí.", history=history
+        )
+
+    assert response.text != offer
+    assert "?" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_event_query_without_event_source_falls_back() -> None:
+    person = _person("María")
+    context = AnswerContext(
+        intent=Intent.event_query,
+        term="María",
+        resolution=ResolutionKind.resolved,
+        person=person,
+        events=[_event()],
+    )
+    payload = (
+        '{"answer": "María viene el domingo.", "sources": '
+        f'[{{"entity_type": "person", "entity_id": "{person.id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(context)
+
+    assert "Visita de María" in response.text
+    assert "confirmado" in response.text
+
+
+@pytest.mark.asyncio
+async def test_fact_query_without_fact_source_falls_back() -> None:
+    person = _person("Francisco")
+    context = AnswerContext(
+        intent=Intent.fact_query,
+        term="Francisco",
+        resolution=ResolutionKind.resolved,
+        person=person,
+        facts=[_fact()],
+    )
+    payload = (
+        '{"answer": "Vivió en Guardamar.", "sources": '
+        f'[{{"entity_type": "person", "entity_id": "{person.id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(context)
+
+    assert "Vivió en Guardamar" in response.text
+    assert any(
+        source.entity_type == "fact" for source in response.sources
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_query_without_memory_source_falls_back() -> None:
+    person = _person("Carmen")
+    memory = _memory_for_grounding()
+    context = AnswerContext(
+        intent=Intent.memory_query,
+        person=person,
+        memories=[memory],
+    )
+    payload = (
+        f'{{"answer": "{memory.narrative}", "sources": '
+        f'[{{"entity_type": "person", "entity_id": "{person.id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(context)
+
+    assert "Tengo un recuerdo guardado" in response.text
+    assert any(
+        source.entity_type == "memory" for source in response.sources
+    )

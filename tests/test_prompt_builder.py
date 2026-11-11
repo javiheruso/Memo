@@ -350,3 +350,26 @@ def test_positive_topics_are_withheld_when_not_offerable() -> None:
     assert "Positive topics that may be offered gently" not in prompt.user
     assert "la costura" not in prompt.user
     assert "la playa" not in prompt.user
+
+
+def test_prompt_requires_provenance_when_context_has_stored_data() -> None:
+    context = AnswerContext(
+        intent=Intent.fact_query,
+        person=_person("Antonio"),
+        term="Antonio",
+    )
+    prompt = build_prompt(context, message="¿Qué opina Antonio de la política?")
+
+    assert "include at least the id the answer is based on" in prompt.system
+    assert "Use an empty \"sources\" list only when CONTEXT has no stored data" in (
+        prompt.system
+    )
+    assert "You may return an empty \"sources\" list" not in prompt.system
+
+
+def test_memory_prompt_requires_reusing_the_stored_wording() -> None:
+    context = AnswerContext(intent=Intent.memory_query, memories=[_memory()])
+    prompt = build_prompt(context, message="¿Te acuerdas de las tardes de pesca?")
+
+    assert "reuse the memory's own wording" in prompt.system
+    assert "Add no detail, person or event that is absent" in prompt.system

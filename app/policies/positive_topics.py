@@ -16,6 +16,7 @@ policy. No topic string is special-cased here.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 
 from app.domain.enums import Intent
@@ -23,6 +24,15 @@ from app.policies.sensitive_topics import SensitiveTopic, matches_topic
 from app.retrieval.context_builder import AnswerContext
 
 _SPONTANEOUS_INTENTS = frozenset({Intent.general_chat, Intent.unknown})
+
+# A topic already present in the current message may be echoed as a statement,
+# but never converted into a new suggestion. These markers are language-level
+# (an offer or a question), not topic-specific.
+_OFFER_OR_QUESTION = re.compile(
+    r"\b(?:podemos|puedo|quieres|quiere|te\s+gustar[íi]a|te\s+apetece|"
+    r"te\s+interesa|si\s+quieres|te\s+cuento|hablamos\s+de)\b",
+    re.IGNORECASE,
+)
 
 
 def mentioned_topics(text: str, topics: Iterable[str]) -> tuple[str, ...]:
@@ -80,6 +90,13 @@ def may_offer_positive_topics(
     )
 
 
+def _is_offer_or_question(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.endswith(("?", "¿")) or bool(
+        _OFFER_OR_QUESTION.search(stripped)
+    )
+
+
 def positive_topic_violation(
     *,
     answer: str,
@@ -92,7 +109,7 @@ def positive_topic_violation(
 
     A topic present in the current message wins, and a topic present in stored
     context is a factual mention, not an offer. Otherwise:
-    - when suggestions are not allowed, any new topic mention is a violation;
+    - when suggestions are not allowed, introducing a new topic is a violation;
     - when they are allowed, at most one new topic may be suggested, and never
       alongside a topic the person already chose.
     """
@@ -105,8 +122,10 @@ def positive_topic_violation(
     if not offer_allowed:
         # After an earlier suggestion, a rejection, or a topic change, a
         # preference must not become an offer. A grounded factual mention is
-        # still allowed, even when the person just named the topic.
-        return bool(proposed - grounded)
+        # still allowed. The person's current topic may be echoed as a plain
+        # statement, but a question/offer that puts it back to them is not.
+        echoable = set() if _is_offer_or_question(answer) else surfaced
+        return bool(proposed - grounded - echoable)
     if surfaced and unexpected:
         return True
     return len(unexpected) > 1

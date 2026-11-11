@@ -33,42 +33,126 @@ from app.policies.positive_topics import (
 )
 from app.repositories.conversation import ResponseSourceRef
 from app.retrieval.context_builder import AnswerContext
+from app.retrieval.entity_resolver import ResolutionKind
 
 logger = logging.getLogger(__name__)
+
+# Output contract shared with the prompt. Ollama turns this into a grammar, so
+# the model cannot omit ``answer``/``sources``, use a non-object shape, or cite
+# an id outside the current allowed set. The dynamic enum is derived from the
+# same context the prompt renders; validation still runs fail-closed afterwards.
+def _response_schema(
+    allowed: dict[tuple[str, str], str],
+) -> dict[str, Any]:
+    if allowed:
+        entity_types = sorted({entity_type for entity_type, _ in allowed})
+        entity_ids = sorted({entity_id for _, entity_id in allowed})
+        sources_schema: dict[str, Any] = {
+            "type": "array",
+            "description": "Only the exact ids listed under 'Allowed source ids'.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "entity_type": {
+                        "type": "string",
+                        "enum": entity_types,
+                        "description": "Allowed entity type from the context list.",
+                    },
+                    "entity_id": {
+                        "type": "string",
+                        "enum": entity_ids,
+                        "description": "Exact allowed UUID from the context list.",
+                    },
+                },
+                "required": ["entity_type", "entity_id"],
+                "additionalProperties": False,
+            },
+        }
+    else:
+        sources_schema = {
+            "type": "array",
+            "maxItems": 0,
+            "description": "Must be empty: the context has no stored data.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "entity_type": {"type": "string"},
+                    "entity_id": {"type": "string"},
+                },
+                "required": ["entity_type", "entity_id"],
+                "additionalProperties": False,
+            },
+        }
+    return {
+        "type": "object",
+        "properties": {
+            "answer": {
+                "type": "string",
+                "description": "Natural Spanish reply for the person.",
+            },
+            "sources": sources_schema,
+        },
+        "required": ["answer", "sources"],
+        "additionalProperties": False,
+    }
+
+
+# Safe, stable fallback categories. They describe why a turn degraded to the
+# deterministic responder without recording prompts, model text, source ids or
+# credentials, so an evaluation can aggregate them.
+INVALID_JSON_OR_SCHEMA = "invalid_json_or_schema"
+UNALLOWED_SOURCE = "unallowed_source"
+UNSUPPORTED_PERSONAL_CONTENT = "unsupported_personal_content"
+POSITIVE_TOPIC_OR_REPETITION = "positive_topic_or_repetition"
+TIMEOUT_OR_TRANSPORT = "timeout_or_transport"
+OTHER_INTERNAL = "other_internal"
 
 
 class InvalidModelOutput(ValueError):
     """Raised when model output cannot be turned into a trusted response."""
 
+    def __init__(
+        self, message: str, *, category: str = INVALID_JSON_OR_SCHEMA
+    ) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def _fallback_category(exc: Exception) -> str:
+    if isinstance(exc, InvalidModelOutput):
+        return exc.category
+    if isinstance(exc, httpx.HTTPError):
+        return TIMEOUT_OR_TRANSPORT
+    return OTHER_INTERNAL
+
 
 def _log_fallback(exc: Exception) -> None:
     """Log a safe fallback signal without prompts, bodies, or credentials.
 
-    Only the failure category/class and, when the provider answered with an
-    HTTP error, the status code are recorded. Exception messages are never
-    logged because they may embed model output, provider response text, or
-    request details.
+    Only the failure category and, when the provider answered with an HTTP
+    error, the status code are recorded. Exception messages are never logged
+    because they may embed model output, provider response text, or request
+    details.
     """
-    category = (
-        "invalid_model_output"
-        if isinstance(exc, InvalidModelOutput)
-        else "http_status_error"
-        if isinstance(exc, httpx.HTTPStatusError)
-        else type(exc).__name__
-    )
+    category = _fallback_category(exc)
     status = (
         exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
     )
+    extra: dict[str, Any] = {"fallback_category": category}
+    if status is not None:
+        extra["http_status"] = status
     if status is None:
         logger.warning(
             "LLM responder fell back to deterministic (category=%s)",
             category,
+            extra=extra,
         )
     else:
         logger.warning(
             "LLM responder fell back to deterministic (category=%s, http_status=%s)",
             category,
             status,
+            extra=extra,
         )
 
 
@@ -121,13 +205,49 @@ class OpenAICompatibleResponder(Responder):
                 {"role": "system", "content": prompt.system},
                 {"role": "user", "content": prompt.user},
             ]
-            raw = await self._call_model(messages)
+            raw = await self._call_model(
+                messages, allowed=allowed_sources(context)
+            )
             response = self._validate_response(raw, context)
             has_stored_data = bool(allowed_sources(context))
-            if has_stored_data and not response.sources:
+            if (
+                context.resolution == ResolutionKind.ambiguous
+                and context.candidates
+                and not _asks_question(response.text)
+            ):
                 raise InvalidModelOutput(
-                    "model cited no context source although stored data exists"
+                    "model did not ask which candidate the person means",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
                 )
+            if has_stored_data and not response.sources:
+                if context.resolution == ResolutionKind.ambiguous and _asks_question(
+                    response.text
+                ):
+                    response = Response(
+                        text=response.text,
+                        sources=[
+                            ResponseSourceRef(
+                                "person", candidate.id, "candidate"
+                            )
+                            for candidate in context.candidates
+                        ],
+                    )
+                elif _only_subject_available(
+                    context
+                ) and _HONEST_NO_DATA.search(response.text):
+                    response = Response(
+                        text=response.text,
+                        sources=[
+                            ResponseSourceRef(
+                                "person", context.person.id, "subject"
+                            )
+                        ],
+                    )
+                else:
+                    raise InvalidModelOutput(
+                        "model cited no context source although stored data exists",
+                        category=UNSUPPORTED_PERSONAL_CONTENT,
+                    )
             if (
                 style is not None
                 and context.sensitive_topic_requested is None
@@ -140,7 +260,8 @@ class OpenAICompatibleResponder(Responder):
                 )
             ):
                 raise InvalidModelOutput(
-                    "model broke the bounded positive-topic suggestion policy"
+                    "model broke the bounded positive-topic suggestion policy",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
                 )
             if (
                 not has_stored_data
@@ -148,32 +269,42 @@ class OpenAICompatibleResponder(Responder):
                 and _NO_STORED_DATA_RECORD_CLAIM.search(response.text)
             ):
                 raise InvalidModelOutput(
-                    "model claimed stored records although no stored data exists"
+                    "model claimed stored records although no stored data exists",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
                 )
             if (
                 not has_stored_data
                 and _similar_to_previous(response.text, history)
             ):
                 raise InvalidModelOutput(
-                    "model repeated the previous answer with no stored data"
+                    "model repeated the previous answer with no stored data",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
                 )
             if context.accepted_offer and _repeats_offer_or_question(
                 response.text, history
             ):
                 raise InvalidModelOutput(
-                    "model repeated the offer or asked again after acceptance"
+                    "model repeated the offer or asked again after acceptance",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
                 )
             if (
                 context.intent == Intent.memory_query
                 and not context.memories
-                and (
+                and context.sensitive_topic_requested is None
+            ):
+                if (
                     response.text.strip().endswith(("?", "¿"))
                     or _MEMORY_NO_DATA_OFFER.search(response.text)
-                )
-            ):
-                raise InvalidModelOutput(
-                    "model offered or asked a question with no stored memory"
-                )
+                ):
+                    raise InvalidModelOutput(
+                        "model offered or asked a question with no stored memory",
+                        category=UNSUPPORTED_PERSONAL_CONTENT,
+                    )
+                if not _HONEST_NO_DATA.search(response.text):
+                    raise InvalidModelOutput(
+                        "model claimed a memory although none is stored",
+                        category=UNSUPPORTED_PERSONAL_CONTENT,
+                    )
             if (
                 context.intent == Intent.memory_query
                 and context.memories
@@ -182,7 +313,13 @@ class OpenAICompatibleResponder(Responder):
                 )
             ):
                 raise InvalidModelOutput(
-                    "model memory answer added details absent from the source"
+                    "model memory answer added details absent from the source",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if not _cites_answer_content(context, response.sources):
+                raise InvalidModelOutput(
+                    "model did not cite the stored content its intent answers from",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
                 )
             return response
         except (httpx.HTTPError, InvalidModelOutput) as exc:
@@ -192,16 +329,29 @@ class OpenAICompatibleResponder(Responder):
                 context, message=message, history=history, style=style
             )
 
-    async def _call_model(self, messages: list[dict[str, str]]) -> str:
+    async def _call_model(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        allowed: dict[tuple[str, str], str] | None = None,
+    ) -> str:
         url = f"{self._base_url}/chat/completions"
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": 0,
-            # Ask OpenAI-compatible servers for a JSON object so the model does
-            # not wrap or pad the required ``{answer, sources}`` contract. This
-            # only shapes output; every field is still validated fail-closed.
-            "response_format": {"type": "json_object"},
+            # Ollama (and OpenAI structured outputs) can constrain generation to
+            # this exact object shape. That removes avoidable JSON/schema
+            # failures without trusting the output: every field, source id and
+            # policy check is still validated fail-closed below.
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "memo_reply",
+                    "strict": True,
+                    "schema": _response_schema(allowed or {}),
+                },
+            },
         }
         headers = {"Content-Type": "application/json"}
         if self._api_key:
@@ -218,47 +368,63 @@ class OpenAICompatibleResponder(Responder):
             content = response.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise InvalidModelOutput(
-                "model response did not match the chat completions shape"
+                "model response did not match the chat completions shape",
+                category=INVALID_JSON_OR_SCHEMA,
             ) from exc
         if not isinstance(content, str) or not content.strip():
-            raise InvalidModelOutput("model returned an empty answer")
+            raise InvalidModelOutput(
+                "model returned an empty answer", category=INVALID_JSON_OR_SCHEMA
+            )
         return content
 
     def _validate_response(self, raw: str, context: AnswerContext) -> Response:
         payload = _parse_json_payload(raw)
         if payload is None:
-            raise InvalidModelOutput("model output is not a JSON object")
+            raise InvalidModelOutput(
+                "model output is not a JSON object", category=INVALID_JSON_OR_SCHEMA
+            )
 
         answer = payload.get("answer")
         if not isinstance(answer, str) or not answer.strip():
-            raise InvalidModelOutput("model output has no text answer")
+            raise InvalidModelOutput(
+                "model output has no text answer", category=INVALID_JSON_OR_SCHEMA
+            )
 
         raw_sources = payload.get("sources", [])
         if not isinstance(raw_sources, list):
-            raise InvalidModelOutput("model output 'sources' is not a list")
+            raise InvalidModelOutput(
+                "model output 'sources' is not a list",
+                category=INVALID_JSON_OR_SCHEMA,
+            )
 
         allowed = allowed_sources(context)
         sources: list[ResponseSourceRef] = []
         for entry in raw_sources:
             if not isinstance(entry, dict):
-                raise InvalidModelOutput("model output contains a malformed source")
+                raise InvalidModelOutput(
+                    "model output contains a malformed source",
+                    category=INVALID_JSON_OR_SCHEMA,
+                )
             entity_type = entry.get("entity_type")
             entity_id = entry.get("entity_id")
             if not isinstance(entity_type, str) or not isinstance(entity_id, str):
                 raise InvalidModelOutput(
-                    "model output source is missing entity_type or entity_id"
+                    "model output source is missing entity_type or entity_id",
+                    category=INVALID_JSON_OR_SCHEMA,
                 )
             try:
                 parsed_id = uuid.UUID(entity_id)
             except (ValueError, TypeError) as exc:
                 raise InvalidModelOutput(
-                    f"model output has an invalid source id: {entity_id!r}"
+                    f"model output has an invalid source id: {entity_id!r}",
+                    category=INVALID_JSON_OR_SCHEMA,
                 ) from exc
             usage = allowed.get((entity_type, str(parsed_id)))
             if usage is None:
                 raise InvalidModelOutput(
                     "model output references a source not in the context: "
-                    f"{entity_type}/{entity_id}"
+                    f"{entity_type}/{entity_id}",
+                    category=UNALLOWED_SOURCE,
                 )
             sources.append(
                 ResponseSourceRef(
@@ -276,7 +442,14 @@ _GROUNDING_STOPWORDS = frozenset(
         "algo",
         "como",
         "con",
+        "cuando",
         "de",
+        "aunque",
+        "quien",
+        "pues",
+        "porque",
+        "mientras",
+        "donde",
         "del",
         "el",
         "ella",
@@ -311,6 +484,51 @@ _GROUNDING_STOPWORDS = frozenset(
         "una",
         "y",
         "ya",
+        # Frame words a natural memory answer uses around the stored text. They
+        # carry no factual detail: "tengo un recuerdo guardado que encaja con
+        # eso" repeats the memory's own content, it does not add to it.
+        "acuerdo",
+        "aqui",
+        "aquí",
+        "asi",
+        "así",
+        "contar",
+        "contarte",
+        "creo",
+        "encaja",
+        "encajan",
+        "entonces",
+        "esa",
+        "ese",
+        "eso",
+        "esos",
+        "estas",
+        "estos",
+        "guardada",
+        "guardadas",
+        "guardado",
+        "guardados",
+        "has",
+        "hemos",
+        "han",
+        "he",
+        "parece",
+        "puedo",
+        "puedes",
+        "recuerdo",
+        "recuerdos",
+        "recordar",
+        "segun",
+        "según",
+        "si",
+        "sí",
+        "solo",
+        "sólo",
+        "tambien",
+        "también",
+        "tiene",
+        "tienes",
+        "tengo",
     }
 )
 
@@ -334,6 +552,38 @@ def _memory_answer_is_grounded(answer: str, memories) -> bool:
     for memory in memories:
         allowed |= _content_tokens(f"{memory.title or ''} {memory.narrative}")
     return _content_tokens(answer) <= allowed
+
+
+_HONEST_NO_DATA = re.compile(
+    r"\bno\s+(?:tengo|s[ée]|recuerdo|conozco|hay|encuentro|dispongo)\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_question(text: str) -> bool:
+    return "?" in text or "¿" in text
+
+
+def _only_subject_available(context: AnswerContext) -> bool:
+    """True when CONTEXT carries only a verified subject person.
+
+    In that case an honest "I have no stored data" answer still concerns that
+    person, so adding the subject source keeps provenance and pronoun
+    continuity without accepting any factual claim.
+    """
+    if context.person is None:
+        return False
+    if context.intent not in (Intent.person_query, Intent.fact_query):
+        return False
+    return not (
+        context.candidates
+        or context.verified_relations
+        or context.probable_relations
+        or context.facts
+        or context.memories
+        or context.events
+        or context.media
+    )
 
 
 def _normalize_reply(text: str) -> str:
@@ -367,14 +617,44 @@ def _repeats_offer_or_question(
 ) -> bool:
     """Detect the acceptance-loop failure in a model answer.
 
-    After the person accepts, a new question or a near-copy of the previous
-    assistant offer is not a continuation. The responder falls back to the
-    deterministic, context-grounded answer instead.
+    After the person accepts, a new question or a near-copy of a previous
+    assistant *offer* is not a continuation. A memory answer may legitimately
+    repeat the cited narrative when that is the only stored content, so a
+    near-copy is rejected only when the previous turn was itself an offer or
+    question.
     """
     stripped = answer.strip()
     if stripped.endswith(("?", "¿")):
         return True
+    previous = _previous_assistant_text(history)
+    if previous is None or not _is_offer_or_question(previous):
+        return False
     return _similar_to_previous(answer, history)
+
+
+def _is_offer_or_question(text: str) -> bool:
+    return text.strip().endswith(("?", "¿")) or bool(
+        _MEMORY_NO_DATA_OFFER.search(text)
+    )
+
+
+def _cites_answer_content(
+    context: AnswerContext, sources: Sequence[ResponseSourceRef]
+) -> bool:
+    """Require the response to cite the stored content its intent answers from.
+
+    A fact/event/memory answer that cites only an unrelated entity is not a
+    grounded answer, even when its source id is allowed. This is a coverage
+    check, not a new source: validation above already rejected invented ids.
+    """
+    cited = {source.entity_type for source in sources}
+    if context.intent == Intent.fact_query and context.facts:
+        return "fact" in cited
+    if context.intent == Intent.event_query and context.events:
+        return "event" in cited
+    if context.intent == Intent.memory_query and context.memories:
+        return "memory" in cited
+    return True
 
 
 _MEMORY_NO_DATA_OFFER = re.compile(

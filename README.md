@@ -196,15 +196,26 @@ How it stays within the trust model:
   tool is ever exposed, so the model cannot query storage directly.
 - Retrieval, policy decisions and ambiguity resolution stay in code upstream;
   the prompt only repeats them as instructions.
-- The model must answer with a JSON object `{"answer": ..., "sources": [...]}`
-  where every source references an id listed in the context. The responder
-  validates each id against the allowed set and derives the `usage_type` from
-  the context item itself (subject, candidate, epistemic kind, event status),
-  never from the model.
-- Fail closed: on any invalid output (non-JSON, empty answer, invented or
-  mismatched source id) or on any provider/network problem (HTTP error,
-  timeout, connection failure), the turn falls back to the deterministic
-  responder, so a model mistake can degrade a turn but can never inject an
+- The model must answer with a JSON object `{"answer": ..., "sources": [...]}`.
+  The request uses Ollama/OpenAI structured outputs (`response_format` with a
+  JSON schema) whose source enums are built from the current context, so an
+  invalid UUID or an id outside the allowed set cannot be generated. When the
+  context has no stored data, the schema caps `sources` at zero items. This
+  request shape requires a server with JSON-schema `response_format` support;
+  Ollama 0.40 was verified locally. An unsupported server fails closed like any
+  other provider error.
+- The responder still validates every returned id against the allowed set and
+  derives the `usage_type` from the context item itself (subject, candidate,
+  epistemic kind, event status), never from the model. It also requires the
+  content the intent answers from (fact, event or memory) to be cited, keeps
+  memory answers within the stored wording, rejects ambiguity answers that do
+  not ask which candidate is meant, and rejects no-data memory claims.
+- Fail closed: on any invalid output or provider/network problem the turn falls
+  back to the deterministic responder. Fallback logs contain only a stable
+  category (`invalid_json_or_schema`, `unallowed_source`,
+  `unsupported_personal_content`, `positive_topic_or_repetition`,
+  `timeout_or_transport`, `other_internal`), never prompts, model text, ids or
+  credentials. A model mistake can degrade a turn but can never inject an
   invented source into `response_sources`.
 
 The test suite exercises the provider through `httpx.MockTransport` and never
