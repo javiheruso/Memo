@@ -3,10 +3,13 @@
 Calls any OpenAI-compatible ``/chat/completions`` endpoint with a prompt built
 exclusively from the ``AnswerContext`` (no database handle or tool is ever
 exposed), parses the model's JSON answer, validates every returned source id
-against the context's allowed set, and on any invalid output or
-provider/network problem falls back to the deterministic responder for that
-turn. A model mistake can therefore degrade a turn to the conservative text
-responder but can never inject an invented source into ``response_sources``.
+against the context's allowed set, and checks that the written claims are
+supported by the context. Answer classes whose wording cannot be attributed
+deterministically (memory prose, multi-subject relations, explicit sensitive
+topics) and unsupported claims fall back to the deterministic responder for
+that turn. A model mistake can therefore degrade a turn to the conservative
+text responder but can never inject an invented source into
+``response_sources``.
 """
 
 from __future__ import annotations
@@ -25,6 +28,11 @@ from app.core.config import Settings
 from app.domain.conversation_context import ConversationStyle, ConversationTurn
 from app.domain.enums import Intent
 from app.llm.base import Responder, Response
+from app.llm.claim_grounding import (
+    HONEST_NO_DATA,
+    answer_needs_deterministic_responder,
+    content_tokens,
+)
 from app.llm.deterministic import DeterministicResponder
 from app.llm.prompt_builder import allowed_sources, build_prompt
 from app.policies.positive_topics import (
@@ -234,7 +242,7 @@ class OpenAICompatibleResponder(Responder):
                     )
                 elif _only_subject_available(
                     context
-                ) and _HONEST_NO_DATA.search(response.text):
+                ) and HONEST_NO_DATA.search(response.text):
                     response = Response(
                         text=response.text,
                         sources=[
@@ -300,7 +308,7 @@ class OpenAICompatibleResponder(Responder):
                         "model offered or asked a question with no stored memory",
                         category=UNSUPPORTED_PERSONAL_CONTENT,
                     )
-                if not _HONEST_NO_DATA.search(response.text):
+                if not HONEST_NO_DATA.search(response.text):
                     raise InvalidModelOutput(
                         "model claimed a memory although none is stored",
                         category=UNSUPPORTED_PERSONAL_CONTENT,
@@ -319,6 +327,16 @@ class OpenAICompatibleResponder(Responder):
             if not _cites_answer_content(context, response.sources):
                 raise InvalidModelOutput(
                     "model did not cite the stored content its intent answers from",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            # An allowed source id proves the entity was visible, not that the
+            # written sentence is supported by it. Reject generated claims that
+            # the deterministic responder cannot verify.
+            if answer_needs_deterministic_responder(
+                context, response.text, message
+            ):
+                raise InvalidModelOutput(
+                    "generated answer cannot be deterministically grounded",
                     category=UNSUPPORTED_PERSONAL_CONTENT,
                 )
             return response
@@ -434,132 +452,6 @@ class OpenAICompatibleResponder(Responder):
         return Response(text=answer.strip(), sources=sources)
 
 
-_GROUNDING_TOKEN = re.compile(r"[a-záéíóúñü0-9]+")
-_GROUNDING_STOPWORDS = frozenset(
-    {
-        "a",
-        "al",
-        "algo",
-        "como",
-        "con",
-        "cuando",
-        "de",
-        "aunque",
-        "quien",
-        "pues",
-        "porque",
-        "mientras",
-        "donde",
-        "del",
-        "el",
-        "ella",
-        "en",
-        "era",
-        "es",
-        "esta",
-        "este",
-        "fue",
-        "ha",
-        "la",
-        "las",
-        "lo",
-        "los",
-        "más",
-        "mas",
-        "me",
-        "mi",
-        "mis",
-        "que",
-        "qué",
-        "se",
-        "sin",
-        "sobre",
-        "son",
-        "su",
-        "sus",
-        "te",
-        "tu",
-        "tus",
-        "un",
-        "una",
-        "y",
-        "ya",
-        # Frame words a natural memory answer uses around the stored text. They
-        # carry no factual detail: "tengo un recuerdo guardado que encaja con
-        # eso" repeats the memory's own content, it does not add to it.
-        "acuerdo",
-        "aqui",
-        "aquí",
-        "asi",
-        "así",
-        "contar",
-        "contarte",
-        "creo",
-        "encaja",
-        "encajan",
-        "entonces",
-        "esa",
-        "ese",
-        "eso",
-        "esos",
-        "estas",
-        "estos",
-        "guardada",
-        "guardadas",
-        "guardado",
-        "guardados",
-        "has",
-        "hemos",
-        "han",
-        "he",
-        "parece",
-        "puedo",
-        "puedes",
-        "recuerdo",
-        "recuerdos",
-        "recordar",
-        "segun",
-        "según",
-        "si",
-        "sí",
-        "solo",
-        "sólo",
-        "tambien",
-        "también",
-        "tiene",
-        "tienes",
-        "tengo",
-    }
-)
-
-
-def _content_tokens(text: str) -> set[str]:
-    return {
-        token
-        for token in _GROUNDING_TOKEN.findall(text.lower())
-        if len(token) >= 2 and token not in _GROUNDING_STOPWORDS
-    }
-
-
-def _memory_answer_is_grounded(answer: str, memories) -> bool:
-    """True when the answer adds no content absent from the memory texts.
-
-    Memory narratives are exact stored text. A model that embellishes them
-    (for example, inventing a detail that is not in the narrative) is rejected
-    and the deterministic renderer answers instead.
-    """
-    allowed: set[str] = set()
-    for memory in memories:
-        allowed |= _content_tokens(f"{memory.title or ''} {memory.narrative}")
-    return _content_tokens(answer) <= allowed
-
-
-_HONEST_NO_DATA = re.compile(
-    r"\bno\s+(?:tengo|s[ée]|recuerdo|conozco|hay|encuentro|dispongo)\b",
-    re.IGNORECASE,
-)
-
-
 def _asks_question(text: str) -> bool:
     return "?" in text or "¿" in text
 
@@ -584,6 +476,18 @@ def _only_subject_available(context: AnswerContext) -> bool:
         or context.events
         or context.media
     )
+
+
+def _memory_answer_is_grounded(answer: str, memories) -> bool:
+    """True when the answer adds no content absent from the memory texts.
+
+    Memory narratives are exact stored text. This remains a defensive check
+    behind the deterministic memory-query gate.
+    """
+    allowed: set[str] = set()
+    for memory in memories:
+        allowed |= content_tokens(f"{memory.title or ''} {memory.narrative}")
+    return content_tokens(answer) <= allowed
 
 
 def _normalize_reply(text: str) -> str:

@@ -14,6 +14,7 @@ from app.domain.enums import (
     RelationshipStatus,
     RelationshipType,
 )
+from app.llm.claim_grounding import audit_answer_claims
 from app.llm.openai_compatible import OpenAICompatibleResponder
 from app.retrieval.context_builder import (
     AnswerContext,
@@ -101,33 +102,45 @@ def _responder(client: httpx.AsyncClient, **kwargs) -> OpenAICompatibleResponder
 
 @pytest.mark.asyncio
 async def test_valid_model_output_returns_text_and_validated_sources() -> None:
-    person = _person()
-    relation = _verified_relation()
-    context = _person_context(person, relation)
+    person = _person("Francisco")
+    fact = _fact()
+    context = AnswerContext(
+        intent=Intent.fact_query,
+        term="Francisco",
+        resolution=ResolutionKind.resolved,
+        person=person,
+        facts=[fact],
+    )
     payload = (
-        '{"answer": "Francisco era amigo de Antonio.", '
+        '{"answer": "Vivió en Guardamar.", '
         f'"sources": [{{"entity_type": "person", "entity_id": "{person.id}"}}, '
-        f'{{"entity_type": "relationship", "entity_id": "{relation.entity_id}"}}]}}'
+        f'{{"entity_type": "fact", "entity_id": "{fact.entity_id}"}}]}}'
     )
     async with _client_for(payload) as client:
         response = await _responder(client).respond(context)
 
-    assert response.text == "Francisco era amigo de Antonio."
+    assert response.text == "Vivió en Guardamar."
     by_type = {source.entity_type: source for source in response.sources}
     assert str(by_type["person"].entity_id) == str(person.id)
     assert by_type["person"].usage_type == "subject"
-    assert str(by_type["relationship"].entity_id) == str(relation.entity_id)
-    assert by_type["relationship"].usage_type == "verified_fact"
+    assert str(by_type["fact"].entity_id) == str(fact.entity_id)
+    assert by_type["fact"].usage_type == "verified_fact"
 
 
 @pytest.mark.asyncio
 async def test_usage_type_is_derived_from_context_not_from_model() -> None:
-    person = _person()
-    relation = _verified_relation()
-    context = _person_context(person, relation)
+    person = _person("Francisco")
+    fact = _fact()
+    context = AnswerContext(
+        intent=Intent.fact_query,
+        term="Francisco",
+        resolution=ResolutionKind.resolved,
+        person=person,
+        facts=[fact],
+    )
     payload = (
-        '{"answer": "ok", '
-        f'"sources": [{{"entity_type": "relationship", "entity_id": "{relation.entity_id}", "usage_type": "hallucinated"}}]}}'
+        '{"answer": "Vivió en Guardamar.", '
+        f'"sources": [{{"entity_type": "fact", "entity_id": "{fact.entity_id}", "usage_type": "hallucinated"}}]}}'
     )
     async with _client_for(payload) as client:
         response = await _responder(client).respond(context)
@@ -573,7 +586,12 @@ async def test_sensitive_redirect_question_is_accepted() -> None:
             context, message="¿Te acuerdas del hospital?"
         )
 
-    assert response.text == answer
+    expected = (
+        "Entiendo que quieres hablar de la muerte de Antonio. No quiero "
+        "inventar detalles, así que prefiero no extenderme. Si te parece, "
+        "podemos hablar de la costura."
+    )
+    assert response.text == expected
     assert response.sources == []
 
 
@@ -597,7 +615,10 @@ async def test_memory_answer_with_conversational_framing_is_grounded() -> None:
             context, message="¿Te acuerdas de las tardes de pesca?"
         )
 
-    assert response.text == answer
+    assert response.text == (
+        "Tengo un recuerdo guardado que encaja con eso: "
+        f"Recuerdo guardado: '{memory.narrative}'"
+    )
     assert len(response.sources) == 1
 
 
@@ -776,7 +797,10 @@ async def test_acceptance_can_repeat_the_cited_memory_narrative() -> None:
             context, message="Sí.", history=history
         )
 
-    assert response.text == text
+    assert response.text == (
+        "Tengo un recuerdo guardado que encaja con eso: "
+        f"Recuerdo guardado: '{memory.narrative}'"
+    )
 
 
 @pytest.mark.asyncio
@@ -857,4 +881,238 @@ async def test_memory_query_without_memory_source_falls_back() -> None:
     assert "Tengo un recuerdo guardado" in response.text
     assert any(
         source.entity_type == "memory" for source in response.sources
+    )
+
+
+@pytest.mark.asyncio
+async def test_sensitive_memory_query_cannot_accept_invented_personal_details() -> None:
+    context = AnswerContext(
+        intent=Intent.memory_query,
+        sensitive_topic_requested="la enfermedad de Lucía",
+        sensitive_redirect_topic="la jardinería",
+    )
+    payload = (
+        '{"answer": "Lucía estuvo ingresada dos semanas en 1999.", '
+        '"sources": []}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(
+            context, message="¿Te acuerdas de aquella operación?"
+        )
+
+    assert response.text.startswith("Entiendo que quieres hablar de")
+    assert "No quiero inventar detalles" in response.text
+    assert "ingresada" not in response.text
+    assert "1999" not in response.text
+    assert response.sources == []
+
+
+@pytest.mark.asyncio
+async def test_person_fact_attributed_to_another_person_falls_back() -> None:
+    person = _person("Elena Ruiz")
+    relation = RelationshipItem(
+        entity_id=uuid.uuid4(),
+        other_display_name="Tomás Vidal",
+        relationship_type=RelationshipType.child_of,
+        status=RelationshipStatus.verified,
+        epistemic=EpistemicKind.verified_fact,
+    )
+    fact = FactItem(
+        entity_id=uuid.uuid4(),
+        text="arquitecta",
+        status="verified",
+        epistemic=EpistemicKind.verified_fact,
+    )
+    context = AnswerContext(
+        intent=Intent.person_query,
+        term="Elena",
+        resolution=ResolutionKind.resolved,
+        person=person,
+        verified_relations=[relation],
+        facts=[fact],
+    )
+    payload = (
+        '{"answer": "Tomás Vidal es arquitecto. Elena Ruiz es la hija de '
+        'Tomás Vidal.", "sources": ['
+        f'{{"entity_type": "person", "entity_id": "{person.id}"}}, '
+        f'{{"entity_type": "relationship", "entity_id": "{relation.entity_id}"}}, '
+        f'{{"entity_type": "fact", "entity_id": "{fact.entity_id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(context)
+
+    assert response.text == "Elena Ruiz era hijo de Tomás Vidal."
+    assert "arquitect" not in response.text
+    assert {source.entity_type for source in response.sources} == {
+        "person",
+        "relationship",
+    }
+
+
+@pytest.mark.asyncio
+async def test_reversed_relationship_claim_falls_back_to_stored_direction() -> None:
+    person = _person("Elena Ruiz")
+    relation = RelationshipItem(
+        entity_id=uuid.uuid4(),
+        other_display_name="Tomás Vidal",
+        relationship_type=RelationshipType.child_of,
+        status=RelationshipStatus.verified,
+        epistemic=EpistemicKind.verified_fact,
+    )
+    context = AnswerContext(
+        intent=Intent.person_query,
+        term="Elena",
+        resolution=ResolutionKind.resolved,
+        person=person,
+        verified_relations=[relation],
+    )
+    payload = (
+        '{"answer": "Tomás Vidal era hijo de Elena Ruiz.", "sources": ['
+        f'{{"entity_type": "person", "entity_id": "{person.id}"}}, '
+        f'{{"entity_type": "relationship", "entity_id": "{relation.entity_id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(context)
+
+    assert response.text == "Elena Ruiz era hijo de Tomás Vidal."
+    assert "Tomás Vidal era hijo" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_fact_query_without_stored_fact_rejects_invented_detail() -> None:
+    person = _person("Paco")
+    context = AnswerContext(
+        intent=Intent.fact_query,
+        term="Paco",
+        resolution=ResolutionKind.resolved,
+        person=person,
+    )
+    payload = (
+        '{"answer": "Paco vivía en Denia.", "sources": ['
+        f'{{"entity_type": "person", "entity_id": "{person.id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(
+            context, message="¿Dónde vivió Paco?"
+        )
+
+    assert response.text == "No tengo guardado ningún dato sobre eso de Paco."
+    assert "Denia" not in response.text
+    assert [(source.entity_type, source.usage_type) for source in response.sources] == [
+        ("person", "subject")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fact_query_claim_not_supported_by_stored_fact_falls_back() -> None:
+    person = _person("Paco")
+    fact = FactItem(
+        entity_id=uuid.uuid4(),
+        text="panadero",
+        status="verified",
+        epistemic=EpistemicKind.verified_fact,
+    )
+    context = AnswerContext(
+        intent=Intent.fact_query,
+        term="Paco",
+        resolution=ResolutionKind.resolved,
+        person=person,
+        facts=[fact],
+    )
+    payload = (
+        '{"answer": "Paco vivía en Denia.", "sources": ['
+        f'{{"entity_type": "person", "entity_id": "{person.id}"}}, '
+        f'{{"entity_type": "fact", "entity_id": "{fact.entity_id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(
+            context, message="¿A qué se dedicaba Paco?"
+        )
+
+    assert "Denia" not in response.text
+    assert "panadero" in response.text
+
+
+@pytest.mark.asyncio
+async def test_event_query_without_stored_event_rejects_invented_event() -> None:
+    person = _person("María")
+    context = AnswerContext(
+        intent=Intent.event_query,
+        term="María",
+        resolution=ResolutionKind.resolved,
+        person=person,
+    )
+    payload = (
+        '{"answer": "La boda de María es el sábado.", "sources": ['
+        f'{{"entity_type": "person", "entity_id": "{person.id}"}}]}}'
+    )
+    async with _client_for(payload) as client:
+        response = await _responder(client).respond(context)
+
+    assert response.text == "No tengo eventos próximos guardados para María."
+    assert "boda" not in response.text
+
+
+def test_claim_audit_distinguishes_supported_and_unsupported_claims() -> None:
+    person = _person("Elena Ruiz")
+    fact = FactItem(
+        entity_id=uuid.uuid4(),
+        text="arquitecta",
+        status="verified",
+        epistemic=EpistemicKind.verified_fact,
+    )
+    context = AnswerContext(
+        intent=Intent.person_query,
+        term="Elena",
+        resolution=ResolutionKind.resolved,
+        person=person,
+        facts=[fact],
+    )
+
+    audit = audit_answer_claims(
+        context, "Elena Ruiz es arquitecta. Tomás Vidal es arquitecto."
+    )
+
+    assert audit.supported_claims == ("Elena Ruiz es arquitecta",)
+    assert audit.unsupported_claims == ("Tomás Vidal es arquitecto",)
+    assert audit.source_absent_personal_claims == ()
+
+
+def test_claim_audit_flags_source_absent_personal_claims() -> None:
+    context = AnswerContext(intent=Intent.memory_query)
+
+    audit = audit_answer_claims(
+        context, "Lucía estuvo ingresada dos semanas en 1999."
+    )
+
+    assert audit.unsupported_claims == (
+        "Lucía estuvo ingresada dos semanas en 1999",
+    )
+    assert audit.source_absent_personal_claims == (
+        "Lucía estuvo ingresada dos semanas en 1999",
+    )
+
+
+def test_claim_audit_does_not_flag_honest_no_data() -> None:
+    context = AnswerContext(intent=Intent.memory_query)
+
+    audit = audit_answer_claims(
+        context,
+        "No tengo guardado ese recuerdo todavía.",
+        message="¿Recuerdas aquel crucero?",
+    )
+
+    assert audit.unsupported_claims == ()
+    assert audit.source_absent_personal_claims == ()
+
+
+def test_claim_audit_does_not_skip_a_statement_with_a_question_tag() -> None:
+    context = AnswerContext(intent=Intent.memory_query)
+
+    audit = audit_answer_claims(
+        context, "Lucía estuvo ingresada dos semanas en 1999, ¿verdad?"
+    )
+
+    assert audit.source_absent_personal_claims == (
+        "Lucía estuvo ingresada dos semanas en 1999, ¿verdad",
     )
