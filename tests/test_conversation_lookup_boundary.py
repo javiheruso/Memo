@@ -12,18 +12,27 @@ sources, knowledge gaps and claim status. They do not stop at intent labels.
 
 import uuid
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.domain.enums import ClaimStatus, Intent
 from app.embeddings.deterministic import DeterministicEmbedder
 from app.llm.deterministic import DeterministicResponder
 from app.models import Claim, Fact, KnowledgeGap, Memory
+from app.repositories.memory import MemoryRepository
 from app.repositories.profile import ConversationProfileRepository
 from app.schemas.interpreter import InterpreterSuggestion
 from app.schemas.profile import ConversationProfileCreate, SensitiveTopicCreate
 from app.services.conversation import ConversationService
+from app.services.memory_embeddings import MemoryEmbeddingBackfillService
 from tests.fixtures.universe import SeedUniverse
+
+_NEEDS_POSTGRES = pytest.mark.skipif(
+    settings.test_database_url is None,
+    reason="requires the PostgreSQL pgvector profile",
+)
 
 
 def _service(
@@ -37,6 +46,22 @@ def _service(
         embedder=DeterministicEmbedder(),
         interpreter=interpreter,
     )
+
+
+async def _make_seed_memories_recoverable(session: AsyncSession) -> None:
+    """Persist seed embeddings where the dialect needs them for recall.
+
+    The SQLite fallback embeds memories without stored vectors on the fly, so
+    the seeded universe is already recoverable there. PostgreSQL only matches
+    rows with a stored pgvector value, so the positive recall scenario backfills
+    the seed through the same production service the admin path uses.
+    """
+    repo = MemoryRepository(session)
+    if not repo.supports_vector_search:
+        return
+    await MemoryEmbeddingBackfillService(
+        embedder=DeterministicEmbedder(), memory_repo=repo
+    ).backfill()
 
 
 def _source_keys(result) -> set[tuple[str, str]]:
@@ -299,7 +324,7 @@ async def test_ambiguous_name_and_candidate_selection_survive_narrative_noise(
 # --------------------------------------------------------------------------
 
 
-async def test_verified_pronoun_carry_memory_recall_and_acceptance(
+async def test_verified_pronoun_carry_keeps_person_context(
     db_session: AsyncSession, seed: SeedUniverse
 ) -> None:
     service = _service(db_session)
@@ -312,21 +337,66 @@ async def test_verified_pronoun_carry_memory_recall_and_acceptance(
     )
     assert pronoun.intent == Intent.person_query
     assert ("person", str(seed.person_ids["carmen"])) in _source_keys(pronoun)
+    assert pronoun.gap is None
 
-    memory = await service.handle_user_message(
-        "Do you remember when we went dancing?",
-        conversation_id=first.conversation_id,
+
+async def test_memory_recall_and_acceptance_use_recoverable_memory(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    await _make_seed_memories_recoverable(db_session)
+    service = _service(db_session)
+    dancing = (
+        await db_session.execute(
+            select(Memory).where(Memory.title == "Dancing evenings")
+        )
+    ).scalar_one()
+
+    recalled = await service.handle_user_message(
+        "Do you remember when we went dancing?"
     )
-    assert memory.intent == Intent.memory_query
-    assert memory.sources
-    assert all(source.entity_type == "memory" for source in memory.sources)
+    assert recalled.intent == Intent.memory_query
+    assert ("memory", str(dancing.id)) in _source_keys(recalled)
+    assert all(source.entity_type == "memory" for source in recalled.sources)
 
     accepted = await service.handle_user_message(
-        "Sí.", conversation_id=first.conversation_id
+        "Sí.", conversation_id=recalled.conversation_id
     )
     assert accepted.intent == Intent.memory_query
-    assert accepted.sources
+    assert ("memory", str(dancing.id)) in _source_keys(accepted)
     assert all(source.entity_type == "memory" for source in accepted.sources)
+
+
+@_NEEDS_POSTGRES
+async def test_seeded_memory_without_stored_embedding_is_honestly_absent_on_postgres(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    """Seeded rows without vectors must not be recalled or invented.
+
+    The seed universe stores no embeddings by design. Without a backfill, the
+    pgvector path matches nothing, so the first turn reports honest absence and
+    an acceptance cannot turn that absence into an invented memory or source.
+    """
+    service = _service(db_session)
+    dancing = (
+        await db_session.execute(
+            select(Memory).where(Memory.title == "Dancing evenings")
+        )
+    ).scalar_one()
+    assert dancing.embedding is None
+
+    recalled = await service.handle_user_message(
+        "Do you remember when we went dancing?"
+    )
+    assert recalled.intent == Intent.memory_query
+    assert recalled.answer == "No tengo guardado ese recuerdo todavía."
+    assert recalled.sources == []
+
+    accepted = await service.handle_user_message(
+        "Sí.", conversation_id=recalled.conversation_id
+    )
+    assert accepted.intent == Intent.general_chat
+    assert accepted.sources == []
+    assert "dancing" not in accepted.answer.lower()
 
 
 async def test_narrative_does_not_establish_pronoun_carry_or_topic_context(
