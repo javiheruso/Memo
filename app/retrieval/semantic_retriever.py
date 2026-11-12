@@ -12,6 +12,7 @@ similarity hit, and every returned item keeps its database status so the
 context builder can tag it as a memory (never a fact).
 """
 
+import math
 from dataclasses import dataclass
 
 from app.domain.enums import SensitivityLevel
@@ -25,6 +26,21 @@ from app.policies.trust import (
 from app.repositories.memory import MemoryRepository
 
 _FALLBACK_CORPUS_LIMIT = 1000
+
+# A memory is only a recall candidate when it clears a calibrated relevance
+# floor. Without a floor, the SQLite fallback admits any memory that shares one
+# token with the query (for example the unrelated dancing memory admitted by
+# "¿Te acuerdas de cuando fuimos juntos a Valencia?"). The floor below was
+# calibrated on a fictional outside-repo set with 10 positive and 10 negative
+# memory questions: positives scored >= 0.45 and negatives <= 0.16 (cosine).
+_MIN_COSINE_RELEVANCE = 0.20
+# The pgvector path returns ``1 / (1 + L2)``. For L2-normalized embeddings
+# (the deterministic embedder and OpenAI-compatible providers) L2 is
+# ``sqrt(2 - 2 * cosine)``, so the cosine floor maps to this similarity.
+# Memories without a stored embedding never reach this path.
+_MIN_PGVECTOR_RELEVANCE = 1.0 / (
+    1.0 + math.sqrt(2.0 - 2.0 * _MIN_COSINE_RELEVANCE)
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +88,7 @@ class SemanticRetriever:
                 SemanticHit(memory=memory, score=score)
                 for memory, score in scored
                 if memory.id in safe_ids
+                and score >= _MIN_PGVECTOR_RELEVANCE
             ][:limit]
             return SemanticSearchResult(
                 hits=hits, filtered_count=len(filtered)
@@ -117,7 +134,7 @@ class SemanticRetriever:
                     )
                 )
             score = cosine_similarity(query_vector, vector)
-            if score > 0.0:
+            if score >= _MIN_COSINE_RELEVANCE:
                 scored.append((memory, score))
         scored.sort(key=lambda pair: pair[1], reverse=True)
         safe, filtered = filter_sensitive_memories(
