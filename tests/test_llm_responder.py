@@ -568,6 +568,31 @@ async def test_no_data_model_cannot_claim_stored_projects_or_memories() -> None:
     assert response.sources == []
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "¿Y él ya no está?",
+        "y el ya no esta",
+        "¿Antonio ya no está?",
+    ],
+)
+@pytest.mark.asyncio
+async def test_general_chat_unverified_absence_claim_falls_back(
+    message: str,
+) -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        '{"answer": "No, ya no está.", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(context, message=message)
+
+    folded = response.text.lower()
+    assert "ya no" not in folded
+    assert "no está" not in folded
+    assert "murió" not in folded
+    assert response.sources == []
+
+
 @pytest.mark.asyncio
 async def test_sensitive_redirect_question_is_accepted() -> None:
     context = AnswerContext(

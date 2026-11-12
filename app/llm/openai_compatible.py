@@ -282,6 +282,17 @@ class OpenAICompatibleResponder(Responder):
                 )
             if (
                 not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and context.sensitive_topic_requested is None
+                and _UNVERIFIED_ABSENCE_CLAIM.search(response.text)
+            ):
+                raise InvalidModelOutput(
+                    "model asserted an unverified absence or death without "
+                    "stored context",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if (
+                not has_stored_data
                 and _similar_to_previous(response.text, history)
             ):
                 raise InvalidModelOutput(
@@ -572,6 +583,19 @@ _MEMORY_NO_DATA_OFFER = re.compile(
 # generic: it protects the trust boundary without naming any profile topic.
 _NO_STORED_DATA_RECORD_CLAIM = re.compile(
     r"\b(?:proyect\w*|recuerd\w*|memori\w*|registr\w*|archiv\w*|guardad\w*)\b",
+    re.IGNORECASE,
+)
+
+# A general-chat turn without stored data must not confirm that an unresolved
+# person is absent or dead. The pattern is deliberately narrow: it matches
+# assertions such as "ya no está", "murió" or "falleció", and not the noun
+# "muerte" used by the careful sensitive-topic copy.
+_UNVERIFIED_ABSENCE_CLAIM = re.compile(
+    r"\b(?:ya\s+)?no\s+est[aá](?=\s*[.!?]|\s*$)"
+    r"|\bno\s+est[aá]\s+(?:con\s+nosotros|entre\s+nosotros|aqu[ií]|vivo|viva)\b"
+    r"|\b(?:ha\s+)?(?:muerto|fallecido)\b"
+    r"|\b(?:muri[oó]|falleci[oó])\b"
+    r"|\bse\s+nos\s+fue\b",
     re.IGNORECASE,
 )
 
