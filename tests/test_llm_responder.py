@@ -16,6 +16,7 @@ from app.domain.enums import (
 )
 from app.llm.claim_grounding import audit_answer_claims
 from app.llm.openai_compatible import OpenAICompatibleResponder
+from app.policies.positive_topics import may_offer_positive_topics
 from app.retrieval.context_builder import (
     AnswerContext,
     EventItem,
@@ -442,7 +443,7 @@ async def test_general_chat_follow_up_prompt_is_bounded_and_source_free() -> Non
 
     body = json.loads(capture[0].content)
     combined = body["messages"][0]["content"] + "\n" + body["messages"][1]["content"]
-    assert "at most one brief, generic follow-up question" in combined
+    assert "at most one brief follow-up that follows the person's current topic" in combined
     assert "Stored data available this turn: none" in combined
     assert response.text == "¿Qué te apetece hacer hoy?"
     assert response.sources == []
@@ -515,7 +516,8 @@ async def test_positive_topic_named_by_the_person_cannot_be_reoffered() -> None:
             context, message="Prefiero hablar de la costura.", style=style
         )
 
-    assert "costura" not in response.text
+    assert response.text == "¿Qué es lo que más te gusta de la costura?"
+    assert "te apetece" not in response.text
     assert response.sources == []
 
 
@@ -641,8 +643,8 @@ async def test_memory_answer_with_conversational_framing_is_grounded() -> None:
         )
 
     assert response.text == (
-        "Tengo un recuerdo guardado que encaja con eso: "
-        f"Recuerdo guardado: '{memory.narrative}'"
+        "No sé si te refieres a esto, pero tengo guardado este recuerdo: "
+        f"'{memory.narrative}'"
     )
     assert len(response.sources) == 1
 
@@ -664,7 +666,7 @@ async def test_memory_answer_with_invented_detail_still_falls_back() -> None:
         )
 
     assert "playa" not in response.text
-    assert response.text.startswith("Tengo un recuerdo guardado")
+    assert response.text.startswith("No sé si te refieres a esto, pero tengo guardado este recuerdo")
 
 
 def _memory_for_grounding():
@@ -823,8 +825,8 @@ async def test_acceptance_can_repeat_the_cited_memory_narrative() -> None:
         )
 
     assert response.text == (
-        "Tengo un recuerdo guardado que encaja con eso: "
-        f"Recuerdo guardado: '{memory.narrative}'"
+        "No sé si te refieres a esto, pero tengo guardado este recuerdo: "
+        f"'{memory.narrative}'"
     )
 
 
@@ -903,7 +905,7 @@ async def test_memory_query_without_memory_source_falls_back() -> None:
     async with _client_for(payload) as client:
         response = await _responder(client).respond(context)
 
-    assert "Tengo un recuerdo guardado" in response.text
+    assert "tengo guardado este recuerdo" in response.text
     assert any(
         source.entity_type == "memory" for source in response.sources
     )
@@ -1141,3 +1143,189 @@ def test_claim_audit_does_not_skip_a_statement_with_a_question_tag() -> None:
     assert audit.source_absent_personal_claims == (
         "Lucía estuvo ingresada dos semanas en 1999, ¿verdad",
     )
+
+
+@pytest.mark.asyncio
+async def test_general_chat_rejects_first_person_shared_experience() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        '{"answer": "He ido a caminar también. ¿Te ha gustado el paseo?", '
+        '"sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Hoy he ido a caminar un rato por el paseo."
+        )
+
+    assert "He ido" not in response.text
+    assert response.text == "Gracias por contármelo."
+
+
+@pytest.mark.asyncio
+async def test_general_chat_rejects_parroting_and_discusses_chosen_topic() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    style = ConversationStyle(
+        positive_topics=("la playa",),
+        offer_positive_topics=False,
+    )
+    async with _client_for(
+        '{"answer": "Prefiero hablar de la playa. '
+        '¿Has estado en la playa?", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Prefiero hablar de la playa.", style=style
+        )
+
+    assert response.text == "¿Qué es lo que más te gusta de la playa?"
+
+
+@pytest.mark.asyncio
+async def test_general_chat_do_you_know_question_gets_honest_no_data() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        '{"answer": "Sí, entiendo que te preocupa.", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="¿Tú sabes si la operación salió bien?"
+        )
+
+    assert response.text == "No, no tengo información sobre eso."
+
+
+@pytest.mark.asyncio
+async def test_general_chat_repeated_question_falls_back() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    history = (ConversationTurn(role="assistant", text="Entiendo. ¿Cómo estás hoy?"),)
+    async with _client_for(
+        '{"answer": "Estoy aquí para escuchar. ¿Cómo estás hoy, Carmen?", '
+        '"sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Gracias por escucharme.", history=history
+        )
+
+    assert response.text == "De nada."
+
+
+@pytest.mark.asyncio
+async def test_general_chat_chosen_topic_is_discussed_when_model_ignores_it() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    style = ConversationStyle(
+        positive_topics=("la playa",),
+        offer_positive_topics=False,
+    )
+    async with _client_for(
+        '{"answer": "Entiendo. Esperemos que todo salga bien para Rosa.", '
+        '"sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Prefiero hablar de la playa.", style=style
+        )
+
+    assert response.text == "¿Qué es lo que más te gusta de la playa?"
+
+
+@pytest.mark.asyncio
+async def test_general_chat_does_not_continue_after_a_farewell() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        '{"answer": "¿Te apetece hablar de la costura?", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Hasta luego."
+        )
+
+    assert response.text == "Hasta luego."
+
+
+@pytest.mark.asyncio
+async def test_general_chat_open_topic_request_gets_a_neutral_suggestion() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        '{"answer": "¿Te apetece hablar de tus recetas favoritas?", '
+        '"sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="No se me ocurre nada; propón tú un tema."
+        )
+
+    assert response.text == (
+        "Podemos hablar del tiempo, de la comida o de lo que tú prefieras."
+    )
+
+
+@pytest.mark.asyncio
+async def test_general_chat_invent_memory_request_is_refused() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        '{"answer": "Claro, recuerdo cuando fuimos juntos a la playa.", '
+        '"sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Invéntate un recuerdo mío de verdad."
+        )
+
+    assert response.text == (
+        "No puedo inventar recuerdos tuyos. Prefiero no inventar detalles."
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_query_accepts_source_free_honest_no_data() -> None:
+    memory = _memory_for_grounding()
+    context = AnswerContext(
+        intent=Intent.memory_query,
+        memories=[memory],
+    )
+    answer = "No tengo ninguna memoria sobre ir a Valencia contigo."
+    async with _client_for(
+        f'{{"answer": "{answer}", "sources": []}}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="¿Te acuerdas de cuando fuimos juntos a Valencia?"
+        )
+
+    assert response.text == answer
+    assert response.sources == []
+
+
+def test_positive_topic_offer_is_suppressed_on_personal_disclosure() -> None:
+    assert (
+        may_offer_positive_topics(
+            topics=("la costura",),
+            message="Mi vecina Rosa se rompió la cadera y la operan el jueves.",
+            prior_turn_texts=(),
+            intent=Intent.general_chat,
+        )
+        is False
+    )
+    assert (
+        may_offer_positive_topics(
+            topics=("la costura",),
+            message="Hola",
+            prior_turn_texts=(),
+            intent=Intent.general_chat,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_general_chat_repeated_question_is_caught_across_a_non_question_turn() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    history = (
+        ConversationTurn(
+            role="assistant", text="Entiendo. ¿Has hecho algo para distraerte hoy?"
+        ),
+        ConversationTurn(
+            role="assistant", text="No, no tengo información sobre eso."
+        ),
+    )
+    async with _client_for(
+        '{"answer": "No tengo información sobre eso. '
+        '¿Has hecho algo para distraerte hoy?", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Rosa es una mujer muy fuerte.", history=history
+        )
+
+    assert response.text == "Te escucho."

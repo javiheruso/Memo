@@ -33,10 +33,17 @@ from app.llm.claim_grounding import (
     answer_needs_deterministic_responder,
     content_tokens,
 )
-from app.llm.deterministic import DeterministicResponder
+from app.llm.deterministic import (
+    DeterministicResponder,
+    is_do_you_know_question,
+    is_farewell_message,
+    is_invent_memory_request,
+)
 from app.llm.prompt_builder import allowed_sources, build_prompt
 from app.policies.positive_topics import (
     context_topic_grounding,
+    is_open_topic_request,
+    mentioned_topics,
     positive_topic_violation,
 )
 from app.repositories.conversation import ResponseSourceRef
@@ -218,6 +225,16 @@ class OpenAICompatibleResponder(Responder):
             )
             response = self._validate_response(raw, context)
             has_stored_data = bool(allowed_sources(context))
+            # A memory query may retrieve a weak candidate that the model
+            # rightly refuses. An explicit, source-free no-data answer is safe:
+            # it makes no personal claim and cannot misattribute a stored item.
+            source_free_memory_no_data = (
+                context.intent == Intent.memory_query
+                and bool(context.memories)
+                and not response.sources
+                and HONEST_NO_DATA.search(response.text) is not None
+                and not _asks_question(response.text)
+            )
             if (
                 context.resolution == ResolutionKind.ambiguous
                 and context.candidates
@@ -251,6 +268,8 @@ class OpenAICompatibleResponder(Responder):
                             )
                         ],
                     )
+                elif source_free_memory_no_data:
+                    pass
                 else:
                     raise InvalidModelOutput(
                         "model cited no context source although stored data exists",
@@ -299,6 +318,83 @@ class OpenAICompatibleResponder(Responder):
                     "model repeated the previous answer with no stored data",
                     category=POSITIVE_TOPIC_OR_REPETITION,
                 )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and _repeats_previous_question(response.text, history)
+            ):
+                raise InvalidModelOutput(
+                    "model repeated a question from the previous turn",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and _parrots_current_message(response.text, message)
+            ):
+                raise InvalidModelOutput(
+                    "model repeated the person's message back to them",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and _FIRST_PERSON_EXPERIENCE.search(response.text)
+            ):
+                raise InvalidModelOutput(
+                    "model claimed a personal experience of its own",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and is_open_topic_request(message or "")
+            ):
+                raise InvalidModelOutput(
+                    "model did not follow the bounded topic-choice reply",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and is_do_you_know_question(message or "")
+            ):
+                raise InvalidModelOutput(
+                    "model did not answer an explicit do-you-know question "
+                    "with an honest no-data reply",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and is_invent_memory_request(message or "")
+            ):
+                raise InvalidModelOutput(
+                    "model answered an explicit request to invent a memory",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and is_farewell_message(message or "")
+                and _asks_question(response.text)
+            ):
+                raise InvalidModelOutput(
+                    "model asked a question after a farewell",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                style is not None
+                and style.positive_topics
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and context.sensitive_topic_requested is None
+            ):
+                chosen = mentioned_topics(message or "", style.positive_topics)
+                if chosen and not mentioned_topics(response.text, chosen):
+                    raise InvalidModelOutput(
+                        "model ignored the topic the person just chose",
+                        category=POSITIVE_TOPIC_OR_REPETITION,
+                    )
             if context.accepted_offer and _repeats_offer_or_question(
                 response.text, history
             ):
@@ -327,6 +423,7 @@ class OpenAICompatibleResponder(Responder):
             if (
                 context.intent == Intent.memory_query
                 and context.memories
+                and not source_free_memory_no_data
                 and not _memory_answer_is_grounded(
                     response.text, context.memories
                 )
@@ -335,7 +432,9 @@ class OpenAICompatibleResponder(Responder):
                     "model memory answer added details absent from the source",
                     category=UNSUPPORTED_PERSONAL_CONTENT,
                 )
-            if not _cites_answer_content(context, response.sources):
+            if not source_free_memory_no_data and not _cites_answer_content(
+                context, response.sources
+            ):
                 raise InvalidModelOutput(
                     "model did not cite the stored content its intent answers from",
                     category=UNSUPPORTED_PERSONAL_CONTENT,
@@ -343,7 +442,7 @@ class OpenAICompatibleResponder(Responder):
             # An allowed source id proves the entity was visible, not that the
             # written sentence is supported by it. Reject generated claims that
             # the deterministic responder cannot verify.
-            if answer_needs_deterministic_responder(
+            if not source_free_memory_no_data and answer_needs_deterministic_responder(
                 context, response.text, message
             ):
                 raise InvalidModelOutput(
@@ -515,6 +614,23 @@ def _previous_assistant_text(
     return previous.text if previous is not None else None
 
 
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+
+def _question_text(text: str) -> str:
+    """Return the question part of an answer, or the last sentence.
+
+    The model often prefixes a question with a repeated statement. Comparing
+    the whole answer then hides an exact duplicate question, so the comparison
+    is scoped to the part from the last opening question mark.
+    """
+    index = text.rfind("¿")
+    if index != -1:
+        return text[index:]
+    parts = _SENTENCE_BOUNDARY.split(text.strip())
+    return parts[-1] if parts else text
+
+
 def _similar_to_previous(answer: str, history: Sequence[ConversationTurn]) -> bool:
     previous = _previous_assistant_text(history)
     if previous is None:
@@ -525,6 +641,63 @@ def _similar_to_previous(answer: str, history: Sequence[ConversationTurn]) -> bo
         _normalize_reply(previous),
     ).ratio()
     return ratio >= 0.9
+
+
+def _parrots_current_message(answer: str, message: str | None) -> bool:
+    """True when the answer's first sentence copies the person's message."""
+    if not message:
+        return False
+    first = _SENTENCE_BOUNDARY.split(answer.strip(), maxsplit=1)[0]
+    normalized_answer = _normalize_reply(first)
+    normalized_message = _normalize_reply(message)
+    if len(normalized_message) < 12:
+        return False
+    return (
+        difflib.SequenceMatcher(
+            None, normalized_answer, normalized_message
+        ).ratio()
+        >= 0.75
+    )
+
+
+def _repeats_previous_question(
+    answer: str, history: Sequence[ConversationTurn]
+) -> bool:
+    """Detect a near-duplicate follow-up question in recent turns.
+
+    Two content questions that share most of their words ("¿Te gusta leer
+    sobre playas y océanos?" / "¿Te interesa leer sobre playas y océanos?")
+    are repetition, not continuity. This is narrow on purpose: it requires
+    both turns to be questions and a high lexical overlap on the question
+    itself, not on a repeated prefix. The bounded responder history is small,
+    so checking every assistant question in it catches repeats separated by a
+    short non-question turn without growing the window.
+    """
+    if not _asks_question(answer):
+        return False
+    answer_question = _question_text(answer)
+    answer_tokens = content_tokens(answer_question)
+    for turn in reversed(history):
+        if turn.role != "assistant" or not _asks_question(turn.text):
+            continue
+        previous_question = _question_text(turn.text)
+        previous_tokens = content_tokens(previous_question)
+        if answer_tokens and previous_tokens:
+            overlap = len(answer_tokens & previous_tokens) / len(
+                answer_tokens | previous_tokens
+            )
+            if overlap >= 0.5:
+                return True
+        if (
+            difflib.SequenceMatcher(
+                None,
+                _normalize_reply(answer_question),
+                _normalize_reply(previous_question),
+            ).ratio()
+            >= 0.7
+        ):
+            return True
+    return False
 
 
 def _repeats_offer_or_question(
@@ -583,6 +756,19 @@ _MEMORY_NO_DATA_OFFER = re.compile(
 # generic: it protects the trust boundary without naming any profile topic.
 _NO_STORED_DATA_RECORD_CLAIM = re.compile(
     r"\b(?:proyect\w*|recuerd\w*|memori\w*|registr\w*|archiv\w*|guardad\w*)\b",
+    re.IGNORECASE,
+)
+
+# A companion cannot have its own past. A first-person past-experience claim
+# ("me ha gustado", "he ido", "fuimos", "estuve") is a false shared or
+# personal experience, not a conversational acknowledgement. Present-tense
+# states and opinions ("estoy bien", "me gusta el mar") are allowed.
+_FIRST_PERSON_EXPERIENCE = re.compile(
+    r"\b(?:yo\s+)?(?:tambi[eé]n\s+)?(?:me\s+ha\s+gustado|"
+    r"me\s+gustaron|he\s+(?:ido|estado|vivido|hecho|visto|visitado|"
+    r"pasado|disfrutado)|hemos\s+(?:ido|estado|vivido|hecho|visto|"
+    r"visitado|pasado|disfrutado)|fui|fuimos|estuve|estuvimos|hice|"
+    r"hicimos|viv[ií]|vivimos|conoc[ií]|conocimos)\b",
     re.IGNORECASE,
 )
 

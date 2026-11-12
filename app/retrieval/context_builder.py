@@ -115,6 +115,10 @@ class AnswerContext:
     media: list[MediaItem] = field(default_factory=list)
     policies: list[str] = field(default_factory=list)
     sensitive_topic_requested: str | None = None
+    # True when only generic sensitive vocabulary matched a person-specific
+    # configured topic. The requested label is then a neutral stand-in, not the
+    # configured personal topic.
+    sensitive_topic_generic: bool = False
     sensitive_redirect_topic: str | None = None
     blocked_sensitive_topics: tuple[str, ...] = ()
     # A user-authored, unverified conversational referent. It is deliberately

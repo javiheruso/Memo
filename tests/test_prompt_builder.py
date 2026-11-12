@@ -306,9 +306,9 @@ def test_general_chat_without_data_allows_one_generic_follow_up() -> None:
     prompt = build_prompt(context, message="Hola, hoy hace un día precioso.")
 
     assert "Stored data available this turn: none" in prompt.user
-    assert "at most one brief, generic follow-up question" in prompt.system
+    assert "at most one brief follow-up that follows the person's current topic" in prompt.system
     assert "general_chat or unknown turn" in prompt.system
-    assert "Never imply, recall, or invent a personal fact" in prompt.system
+    assert "Never imply, recall, invent or claim a personal fact" in prompt.system
     assert "shared experience" in prompt.system
     assert allowed_sources(context) == {}
 
@@ -332,7 +332,7 @@ def test_unknown_turn_without_data_allows_the_same_bounded_follow_up() -> None:
     prompt = build_prompt(context, message="No sé qué decir.")
 
     assert "Stored data available this turn: none" in prompt.user
-    assert "at most one brief, generic follow-up question" in prompt.system
+    assert "at most one brief follow-up that follows the person's current topic" in prompt.system
 
 
 def test_positive_topics_are_withheld_when_not_offerable() -> None:
@@ -346,7 +346,7 @@ def test_positive_topics_are_withheld_when_not_offerable() -> None:
         ),
     )
 
-    assert "Do not offer or mention profile positive topics this turn" in prompt.user
+    assert "Do not offer profile positive topics this turn" in prompt.user
     assert "Positive topics that may be offered gently" not in prompt.user
     assert "la costura" not in prompt.user
     assert "la playa" not in prompt.user
@@ -373,3 +373,37 @@ def test_memory_prompt_requires_reusing_the_stored_wording() -> None:
 
     assert "reuse the memory's own wording" in prompt.system
     assert "Add no detail, person or event that is absent" in prompt.system
+
+
+def test_prompt_separates_user_authored_experience_from_stored_data() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    prompt = build_prompt(
+        context, message="Mi vecina Rosa se rompió la cadera y la operan el jueves."
+    )
+
+    combined = prompt.system + "\n" + prompt.user
+    assert "You are a companion, not a person" in combined
+    assert "unverified and user-authored" in combined
+    assert "acknowledge it with empathy" in combined
+    assert "never claim you already knew it" in combined
+    assert "Do not claim to feel what the person feels" in combined
+
+
+def test_prompt_discusses_a_topic_the_person_just_chose() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    prompt = build_prompt(
+        context,
+        message="Prefiero hablar de la playa.",
+        style=ConversationStyle(
+            positive_topics=("la playa",),
+            offer_positive_topics=False,
+        ),
+    )
+
+    assert "When the person names or chooses a topic, discuss that topic" in (
+        prompt.system
+    )
+    assert "you may acknowledge and discuss that chosen topic naturally" in (
+        prompt.user
+    )
+    assert "never ask permission to talk about it" in prompt.user

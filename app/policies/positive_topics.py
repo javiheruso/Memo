@@ -25,14 +25,37 @@ from app.retrieval.context_builder import AnswerContext
 
 _SPONTANEOUS_INTENTS = frozenset({Intent.general_chat, Intent.unknown})
 
-# A topic already present in the current message may be echoed as a statement,
+# A topic already present in the current message may be echoed or discussed,
 # but never converted into a new suggestion. These markers are language-level
-# (an offer or a question), not topic-specific.
+# offer cues, not topic-specific.
 _OFFER_OR_QUESTION = re.compile(
-    r"\b(?:podemos|puedo|quieres|quiere|te\s+gustar[íi]a|te\s+apetece|"
-    r"te\s+interesa|si\s+quieres|te\s+cuento|hablamos\s+de)\b",
+    r"\b(?:podemos|puedo|quieres|quiere|te\s+gustar[íi]a(?:n)?|"
+    r"te\s+apetece(?:n)?|te\s+interesa(?:n)?|si\s+quieres|te\s+cuento|"
+    r"hablamos\s+de|hablemos\s+de)\b",
     re.IGNORECASE,
 )
+_OPEN_TOPIC_REQUEST = re.compile(
+    r"\b(?:prop[oó]n(?:me)?|dime\s+t[uú]|algo\s+interesante|"
+    r"de\s+qu[eé]\s+podemos\s+hablar|de\s+qu[eé]\s+hablamos)\b",
+    re.IGNORECASE,
+)
+# A first-person disclosure is a turn where the person is talking about their
+# own life or feelings. Offering a profile topic there is tone-deaf even when
+# the topic itself is benign.
+_PERSONAL_DISCLOSURE = re.compile(
+    r"\b(?:me|mi|mis|estoy|tengo|siento|creo|necesito|prefiero|he|"
+    r"preocupad[oa]|preocupa\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_personal_disclosure(text: str) -> bool:
+    return _PERSONAL_DISCLOSURE.search(text) is not None
+
+
+def is_open_topic_request(text: str) -> bool:
+    """True when the person asks the assistant to choose a topic."""
+    return _OPEN_TOPIC_REQUEST.search(text) is not None
 
 
 def mentioned_topics(text: str, topics: Iterable[str]) -> tuple[str, ...]:
@@ -82,6 +105,9 @@ def may_offer_positive_topics(
     current = message.strip()
     if not current:
         return False
+    if _is_personal_disclosure(current):
+        # The person is sharing their own news or feelings; no topic offer.
+        return False
     if mentioned_topics(current, topics):
         # The person's current topic already wins; never propose it back.
         return False
@@ -90,11 +116,14 @@ def may_offer_positive_topics(
     )
 
 
-def _is_offer_or_question(text: str) -> bool:
-    stripped = text.strip()
-    return stripped.endswith(("?", "¿")) or bool(
-        _OFFER_OR_QUESTION.search(stripped)
-    )
+def _is_offer_shape(text: str) -> bool:
+    """True only for an explicit offer, not for every question.
+
+    A content question about the topic the person chose ("¿Has estado en la
+    playa?") is conversation. "¿Te apetece hablar de la playa?" is an offer
+    and must still be rejected when offers are not allowed.
+    """
+    return _OFFER_OR_QUESTION.search(text) is not None
 
 
 def positive_topic_violation(
@@ -109,7 +138,9 @@ def positive_topic_violation(
 
     A topic present in the current message wins, and a topic present in stored
     context is a factual mention, not an offer. Otherwise:
-    - when suggestions are not allowed, introducing a new topic is a violation;
+    - when suggestions are not allowed, an offer-shaped answer that proposes a
+      new topic is a violation; a plain acknowledgement, statement or content
+      question is discussion, not an offer;
     - when they are allowed, at most one new topic may be suggested, and never
       alongside a topic the person already chose.
     """
@@ -121,11 +152,10 @@ def positive_topic_violation(
     unexpected = proposed - surfaced - grounded
     if not offer_allowed:
         # After an earlier suggestion, a rejection, or a topic change, a
-        # preference must not become an offer. A grounded factual mention is
-        # still allowed. The person's current topic may be echoed as a plain
-        # statement, but a question/offer that puts it back to them is not.
-        echoable = set() if _is_offer_or_question(answer) else surfaced
-        return bool(proposed - grounded - echoable)
+        # preference must not become an offer. Stored topics remain grounded
+        # factual mentions. A content question about the person's chosen topic
+        # is discussion; only an explicit offer puts a topic back to them.
+        return _is_offer_shape(answer) and bool(proposed - grounded)
     if surfaced and unexpected:
         return True
     return len(unexpected) > 1

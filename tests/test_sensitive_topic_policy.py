@@ -129,6 +129,7 @@ def test_generic_reference_context_never_carries_the_personal_label() -> None:
     result = apply_to_context(context, evaluation)
 
     assert result.sensitive_topic_requested == "un tema sensible"
+    assert result.sensitive_topic_generic is True
     assert "la muerte de Antonio" not in (result.sensitive_topic_requested or "")
     # The filter still withholds content that mentions the blocked topic.
     assert result.memories == []

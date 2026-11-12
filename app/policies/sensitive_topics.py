@@ -374,6 +374,7 @@ def apply_to_context(
         sensitive_topic_requested=(
             evaluation.requested.topic if evaluation.requested is not None else None
         ),
+        sensitive_topic_generic=evaluation.generic_reference,
         sensitive_redirect_topic=redirect_topic,
         blocked_sensitive_topics=tuple(topic.topic for topic in evaluation.blocked),
     )
