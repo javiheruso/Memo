@@ -23,6 +23,11 @@ from app.domain.conversation_context import (
 )
 from app.domain.conversation_window import ConversationWindow
 from app.domain.enums import Intent
+from app.domain.provisional_referent import (
+    ProvisionalReferent,
+    project_provisional_referent,
+    surfaces_match,
+)
 from app.embeddings.base import Embedder
 from app.llm.base import Responder, Response
 from app.llm.interpreter import (
@@ -239,6 +244,32 @@ _NO_STORED_CONTINUATION_REPLY = (
     "No tengo nada guardado sobre eso todavía. No quiero inventar detalles."
 )
 
+# A provisional, user-introduced referent can share a surface name with a
+# registered person. When that happens, an explicit lookup must not silently
+# select the registered person; the service asks one concise identity question
+# instead, without retrieving, citing or opening a knowledge gap.
+def _provisional_identity_clarification(referent: ProvisionalReferent) -> str:
+    description = (
+        f", tu {referent.description}" if referent.description else ""
+    )
+    # For a name, repeat it so the two possible identities are explicit. For an
+    # expression-only surface ("mi vecina") that would read awkwardly, so ask
+    # about "esa persona" instead.
+    starts_with_article = referent.surface.casefold().startswith(
+        ("mi ", "una ", "la ", "un ")
+    )
+    if starts_with_article:
+        return (
+            f"Para no confundirme: antes me hablaste de "
+            f"{referent.surface}{description}. ¿Te refieres a esa persona o a "
+            "otra?"
+        )
+    return (
+        f"Para no confundirme: antes me hablaste de "
+        f"{referent.surface}{description}. ¿Te refieres a esa "
+        f"{referent.surface} o a otra persona?"
+    )
+
 
 @dataclass(frozen=True)
 class _Continuation:
@@ -364,6 +395,9 @@ class ConversationService:
         # and every later continuity decision derives from this same snapshot.
         window = await self._load_turn_window(conversation_id, owner_session_id)
         responder_history = self._responder_history(window, sensitive_topics)
+        provisional_referent = self._project_provisional_referent(
+            window, text, sensitive_topics
+        )
         # A disambiguation turn is a person query, never an offer opportunity.
         style = _style_from_profile(profile, offer_positive_topics=False)
 
@@ -477,6 +511,20 @@ class ConversationService:
                 follow_up_topic = interpreter_route.route.follow_up_topic
                 interpreter_applied = True
 
+            # A provisional referent that shares its surface with a registered
+            # person makes an explicit lookup genuinely ambiguous. Ask one
+            # identity question instead of silently selecting the registered
+            # person, and do not retrieve, cite or open a knowledge gap.
+            # The internal resolution check only decides whether a registered
+            # conflict exists; it is not used to answer or cite anything.
+            conflict = await self._provisional_conflict_resolution(
+                route, provisional_referent, lookup_requested
+            )
+            if conflict is not None and provisional_referent is not None:
+                return await self._provisional_conflict_turn(
+                    conversation.id, text, route, provisional_referent
+                )
+
             resolution: Resolution | None = None
             context: AnswerContext
             if continuation is not None:
@@ -546,6 +594,16 @@ class ConversationService:
             context = apply_to_context(
                 context, sensitive_evaluation, positive_topics=positive_topics
             )
+            if (
+                provisional_referent is not None
+                and route.intent in (Intent.general_chat, Intent.unknown)
+                and context.sensitive_topic_requested is None
+            ):
+                # Conversation-only hint. It is not an AnswerContext item and
+                # never reaches allowed_sources or response_sources.
+                context = replace(
+                    context, provisional_referent=provisional_referent
+                )
             if continuation is not None and continuation.no_stored_data:
                 # Fail closed: a generative responder must never be able to
                 # turn a baseless offer into a repeated offer/acceptance loop.
@@ -793,6 +851,111 @@ class ConversationService:
         if window is None and owner_session_id is not None:
             raise ConversationAccessDenied
         return window
+
+    def _lookup_term_for(self, text: str) -> str | None:
+        """Return an explicit lookup term, or ``None`` for conversational text.
+
+        Used only to decide whether a referral target changed. It never
+        resolves, retrieves or persists anything.
+        """
+        if not text.strip() or not self._router.is_personal_lookup_request(text):
+            return None
+        route = self._router.route(text)
+        if route.intent in (
+            Intent.person_query,
+            Intent.fact_query,
+            Intent.event_query,
+        ):
+            return route.term
+        return None
+
+    def _project_provisional_referent(
+        self,
+        window: ConversationWindow | None,
+        text: str,
+        sensitive_topics: tuple[SensitiveTopic, ...],
+    ) -> ProvisionalReferent | None:
+        """Project the unverified referent for this turn from user turns only.
+
+        The projection is pure and bounded by the existing window. Assistant
+        text never participates, and an unresolved ambiguity blocks carry-over.
+        """
+        return project_provisional_referent(
+            window,
+            current_message=text,
+            is_sensitive=lambda value: evaluate(
+                value, sensitive_topics
+            ).requested
+            is not None,
+            ambiguity_pending=bool(
+                window is not None and window.pending_person_candidates()
+            ),
+            lookup_term_for=self._lookup_term_for,
+        )
+
+    async def _provisional_conflict_resolution(
+        self,
+        route: RouteResult,
+        referent: ProvisionalReferent | None,
+        lookup_requested: bool,
+    ) -> Resolution | None:
+        """Return the registered resolution a provisional referent shadows.
+
+        Only an explicit lookup of the same surface can conflict, and only when
+        the normal resolver would actually select one registered person. An
+        unknown name keeps its existing not-found/gap behavior, and an
+        ambiguous name keeps the existing ambiguity behavior.
+        """
+        if (
+            referent is None
+            or not lookup_requested
+            or not route.term
+            or route.relationship_role is not None
+            or route.intent
+            not in (Intent.person_query, Intent.fact_query, Intent.event_query)
+        ):
+            return None
+        if not surfaces_match(route.term, referent.surface):
+            return None
+        resolution = await self._resolver.resolve(route.term)
+        if resolution.kind != ResolutionKind.resolved or resolution.person is None:
+            return None
+        if (
+            referent.verified_person_id is not None
+            and referent.verified_person_id == resolution.person.id
+        ):
+            return None
+        return resolution
+
+    async def _provisional_conflict_turn(
+        self,
+        conversation_id: uuid.UUID,
+        text: str,
+        route: RouteResult,
+        referent: ProvisionalReferent,
+    ) -> ChatResult:
+        """Ask one identity clarification without lookup, sources or a gap."""
+        await self._conversations.add_message(
+            conversation_id,
+            speaker="user",
+            text=text,
+            intent=route.intent.value,
+            commit=False,
+        )
+        answer = _provisional_identity_clarification(referent)
+        await self._conversations.add_message(
+            conversation_id,
+            speaker="assistant",
+            text=answer,
+            intent=route.intent.value,
+            commit=False,
+        )
+        return ChatResult(
+            conversation_id=conversation_id,
+            intent=route.intent,
+            answer=answer,
+            sources=[],
+        )
 
     async def _relationship_query_context(
         self,

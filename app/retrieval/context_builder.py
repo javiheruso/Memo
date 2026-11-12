@@ -11,6 +11,7 @@ from app.domain.enums import (
     RelationshipStatus,
     RelationshipType,
 )
+from app.domain.provisional_referent import ProvisionalReferent
 from app.models import Event, Fact, Memory, Person, Relationship
 from app.policies.trust import (
     epistemic_kind_for_fact,
@@ -116,6 +117,10 @@ class AnswerContext:
     sensitive_topic_requested: str | None = None
     sensitive_redirect_topic: str | None = None
     blocked_sensitive_topics: tuple[str, ...] = ()
+    # A user-authored, unverified conversational referent. It is deliberately
+    # not an entity item: it has no id, never appears in ``allowed_sources`` and
+    # can never become a fact, relationship, memory, claim, source or gap.
+    provisional_referent: ProvisionalReferent | None = None
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
