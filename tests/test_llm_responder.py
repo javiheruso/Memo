@@ -1161,6 +1161,53 @@ async def test_general_chat_rejects_first_person_shared_experience() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Me alegra oírlo.",
+        "Qué pena.",
+        "Entiendo lo que me cuentas.",
+    ],
+)
+async def test_general_chat_allows_first_person_social_acknowledgements(
+    answer: str,
+) -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        json.dumps({"answer": answer, "sources": []}, ensure_ascii=False)
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Mi vecina Rosa se rompió la cadera la semana pasada."
+        )
+
+    assert response.text == answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Yo también estuve allí.",
+        "Recuerdo cuando fuimos juntos.",
+        "Me pasó lo mismo el año pasado.",
+    ],
+)
+async def test_general_chat_rejects_first_person_autobiography(
+    answer: str,
+) -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        json.dumps({"answer": answer, "sources": []}, ensure_ascii=False)
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Mi vecina Rosa se rompió la cadera la semana pasada."
+        )
+
+    assert response.text != answer
+    assert response.text == "Gracias por contármelo."
+
+
+@pytest.mark.asyncio
 async def test_general_chat_rejects_parroting_and_discusses_chosen_topic() -> None:
     context = AnswerContext(intent=Intent.general_chat, term=None)
     style = ConversationStyle(

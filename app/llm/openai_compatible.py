@@ -760,14 +760,15 @@ _NO_STORED_DATA_RECORD_CLAIM = re.compile(
 )
 
 # A companion cannot have its own past. A first-person past-experience claim
-# ("me ha gustado", "he ido", "fuimos", "estuve") is a false shared or
-# personal experience, not a conversational acknowledgement. Present-tense
+# ("me ha gustado", "he ido", "fuimos", "estuve", "me pasó") is a false shared
+# or personal experience, not a conversational acknowledgement. Present-tense
 # states and opinions ("estoy bien", "me gusta el mar") are allowed.
 _FIRST_PERSON_EXPERIENCE = re.compile(
     r"\b(?:yo\s+)?(?:tambi[eé]n\s+)?(?:me\s+ha\s+gustado|"
     r"me\s+gustaron|he\s+(?:ido|estado|vivido|hecho|visto|visitado|"
     r"pasado|disfrutado)|hemos\s+(?:ido|estado|vivido|hecho|visto|"
-    r"visitado|pasado|disfrutado)|fui|fuimos|estuve|estuvimos|hice|"
+    r"visitado|pasado|disfrutado)|me\s+(?:pas[oó]|pasaba|ocurri[oó]|"
+    r"sucedi[oó])|fui|fuimos|estuve|estuvimos|hice|"
     r"hicimos|viv[ií]|vivimos|conoc[ií]|conocimos)\b",
     re.IGNORECASE,
 )
