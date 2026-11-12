@@ -17,6 +17,7 @@ import uuid
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -387,6 +388,99 @@ async def test_neighbor_maria_conflict_asks_identity_without_lookup_or_gap(
     assert claims, "the narrative turn should produce candidate claims"
     assert all(claim.status is ClaimStatus.candidate for claim in claims)
     assert all(claim.canonical_subject is None for claim in claims)
+
+
+@pytest.mark.parametrize(
+    "introduction",
+    (
+        "Mi vecina se llama María y tiene un gato",
+        "María, mi vecina, tiene un gato",
+        "No, María es mi vecina, no mi hija",
+    ),
+)
+async def test_neighbor_introduction_across_clauses_keeps_name_and_description(
+    introduction: str,
+    db_session: AsyncSession,
+    seed: SeedUniverse,
+) -> None:
+    """A trailing clause must not erase the introduced name.
+
+    The greedy name body used to consume the following conjunction ("María
+    y"), reject the whole capture and keep only the description, so a later
+    explicit lookup silently selected the registered daughter María.
+    """
+    capture = CapturingResponder()
+    service = _service(db_session, capture)
+    facts_before = await _count(db_session, Fact)
+
+    first = await service.handle_user_message(introduction)
+
+    assert first.intent == Intent.general_chat
+    assert first.sources == []
+    assert first.gap is None
+    referent = capture.calls[-1]["context"].provisional_referent
+    assert referent is not None
+    assert referent.surface == "María"
+    assert referent.description == "vecina"
+    assert referent.verified_person_id is None
+
+    calls_before_conflict = len(capture.calls)
+    conflict = await service.handle_user_message(
+        "¿Qué sabes de María?", conversation_id=first.conversation_id
+    )
+
+    assert conflict.intent in (Intent.person_query, Intent.fact_query)
+    assert conflict.sources == []
+    assert conflict.gap is None
+    assert conflict.gap_created is False
+    assert "Para no confundirme" in conflict.answer
+    assert "María" in conflict.answer
+    assert "vecina" in conflict.answer
+    assert len(capture.calls) == calls_before_conflict
+    assert str(seed.person_ids["maria"]) not in conflict.answer
+    assert await _count(db_session, ResponseSource) == 0
+    assert await _count(db_session, KnowledgeGap) == 0
+    assert await _count(db_session, Fact) == facts_before
+
+
+async def test_pronoun_after_unregistered_neighbor_does_not_resolve_daughter(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    capture = CapturingResponder()
+    service = _service(db_session, capture)
+
+    first = await service.handle_user_message(
+        "Mi vecina se llama María y tiene un gato"
+    )
+    follow_up = await service.handle_user_message(
+        "¿Y ella cómo está?", conversation_id=first.conversation_id
+    )
+
+    assert follow_up.intent == Intent.general_chat
+    assert follow_up.sources == []
+    assert follow_up.gap is None
+    context = capture.calls[-1]["context"]
+    assert context.person is None
+    assert context.candidates == []
+    assert context.provisional_referent is not None
+    assert context.provisional_referent.description == "vecina"
+    assert allowed_sources(context) == {}
+
+
+async def test_explicit_daughter_lookup_without_referent_is_unchanged(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    service = _service(db_session)
+
+    lookup = await service.handle_user_message("¿Qué sabes de María?")
+
+    assert lookup.intent == Intent.fact_query
+    assert "Para no confundirme" not in lookup.answer
+    assert any(
+        source.entity_type == "person"
+        and source.entity_id == seed.person_ids["maria"]
+        for source in lookup.sources
+    )
 
 
 async def test_correction_updates_referent_and_pronoun_keeps_latest(

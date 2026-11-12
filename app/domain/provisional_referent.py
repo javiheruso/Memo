@@ -284,12 +284,19 @@ def _tokens(value: str) -> tuple[str, ...]:
 def _clean_name(raw: str | None) -> str | None:
     if raw is None:
         return None
-    tokens = raw.split()
-    if not tokens or len(tokens) > 2:
+    # The name body may greedily take one trailing token from the next clause
+    # ("María y", "María que"). That token is a function word, not part of the
+    # name, so trim there instead of discarding the whole capture.
+    tokens: list[str] = []
+    for token in raw.split():
+        if _fold(token) in _NAME_STOPWORDS:
+            break
+        tokens.append(token)
+        if len(tokens) == 2:
+            break
+    if not tokens:
         return None
     folded = [_fold(token) for token in tokens]
-    if any(token in _NAME_STOPWORDS for token in folded):
-        return None
     if len(tokens) == 1 and folded[0] in _FOLDED_DESCRIPTION_HEADS:
         return None
     return " ".join(tokens)
