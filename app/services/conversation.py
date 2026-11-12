@@ -130,6 +130,18 @@ def _with_grounded_subject(
     ]
 
 
+def _term_looks_like_proper_name(term: str | None) -> bool:
+    """True when a term keeps at least one capitalized letter.
+
+    STT transcripts are lowercase by nature, so a lowercase term that matches
+    no stored person is not a reliable identity reference. The service keeps
+    that turn conversational instead of opening a knowledge gap for what may be
+    an ordinary word. Proper-cased explicit lookups keep the existing gap
+    behavior.
+    """
+    return bool(term) and any(char.isupper() for char in term)
+
+
 def _turn_is_offer(text: str) -> bool:
     """True when an assistant turn asked or offered something.
 
@@ -339,6 +351,7 @@ class ConversationService:
         owner_session_id: str | None = None,
     ) -> ChatResult:
         route = self._router.route(text)
+        lookup_requested = self._router.is_personal_lookup_request(text)
         profile = await self._profiles.get_active()
         sensitive_topics = _topics_from_profile(profile)
         sensitive_evaluation = evaluate(text, sensitive_topics)
@@ -368,7 +381,9 @@ class ConversationService:
                 window = ConversationWindow(conversation_id=conversation.id)
 
             pending = window.pending_person_candidates()
-            if pending:
+            if pending and (
+                lookup_requested or self._router.is_candidate_selection(text)
+            ):
                 person = await self._disambiguation.resolve(text, pending)
                 if person is not None:
                     return await self._disambiguation_turn(
@@ -454,6 +469,7 @@ class ConversationService:
                 continuation is None
                 and interpreter_route is not None
                 and follow_up_resolution is None
+                and lookup_requested
                 and route.intent in (Intent.general_chat, Intent.unknown)
             ):
                 route = interpreter_route.route
@@ -484,26 +500,43 @@ class ConversationService:
                 Intent.event_query,
                 Intent.fact_query,
             ) and (route.term or follow_up_resolution):
-                resolution = follow_up_resolution or await self._resolver.resolve(
-                    route.term
-                )
-                if resolution.kind == ResolutionKind.resolved:
-                    if route.intent == Intent.fact_query:
-                        data = await self._structured_retriever.retrieve_facts(
-                            resolution.person.id,
-                            topic=route.fact_topic or FactTopic.general,
+                if follow_up_resolution is None and not lookup_requested:
+                    # Defensive boundary: a narrative or self-disclosure term
+                    # never reaches entity resolution.
+                    route = RouteResult(intent=Intent.general_chat)
+                    context = AnswerContext(intent=route.intent)
+                else:
+                    resolution = follow_up_resolution or await self._resolver.resolve(
+                        route.term
+                    )
+                    if (
+                        follow_up_resolution is None
+                        and resolution.kind == ResolutionKind.not_found
+                        and not _term_looks_like_proper_name(route.term)
+                    ):
+                        # A lowercase STT term that matches no stored person is
+                        # not a reliable identity reference. Keep the turn
+                        # conversational and open no knowledge gap.
+                        route = RouteResult(intent=Intent.general_chat)
+                        resolution = None
+                        context = AnswerContext(intent=route.intent)
+                    elif resolution.kind == ResolutionKind.resolved:
+                        if route.intent == Intent.fact_query:
+                            data = await self._structured_retriever.retrieve_facts(
+                                resolution.person.id,
+                                topic=route.fact_topic or FactTopic.general,
+                            )
+                        else:
+                            data = await self._structured_retriever.retrieve(
+                                resolution.person.id
+                            )
+                        context = self._context_builder.build_from_person_data(
+                            data, resolution, intent=route.intent
                         )
                     else:
-                        data = await self._structured_retriever.retrieve(
-                            resolution.person.id
+                        context = self._context_builder.build_from_resolution(
+                            resolution, route.intent
                         )
-                    context = self._context_builder.build_from_person_data(
-                        data, resolution, intent=route.intent
-                    )
-                else:
-                    context = self._context_builder.build_from_resolution(
-                        resolution, route.intent
-                    )
             else:
                 context = AnswerContext(intent=route.intent, term=route.term)
 
@@ -564,8 +597,10 @@ class ConversationService:
             if (
                 route.relationship_role is None
                 and not interpreter_applied
+                and lookup_requested
                 and context.resolution == ResolutionKind.not_found
                 and route.term
+                and _term_looks_like_proper_name(route.term)
             ):
                 gap, gap_created = await self._gaps.upsert(
                     gap_type="person_unknown",
@@ -806,11 +841,14 @@ class ConversationService:
         Already-resolved deterministic routes, pending ambiguity, resolved
         carry-over, pronoun-only follow-ups, configured sensitive-topic
         requests, and empty or oversized text never reach the optional network
-        call.
+        call. A narrative or self-disclosure is not an explicit personal lookup
+        either, so the interpreter is not asked to promote it into one.
         """
         if self._interpreter is None:
             return False
         if route.intent not in (Intent.general_chat, Intent.unknown):
+            return False
+        if not self._router.is_personal_lookup_request(text):
             return False
         max_input_chars = getattr(
             self._interpreter,

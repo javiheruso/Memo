@@ -317,13 +317,13 @@ async def test_interpreter_term_absent_from_message_is_rejected(
 ) -> None:
     interpreter = ScriptedInterpreter(
         {
-            "Ayer estuve pensando en una persona": InterpreterSuggestion(
+            "dime qué datos tienes de una persona": InterpreterSuggestion(
                 intent="person_query", term="Carmen"
             )
         }
     )
     service = _service(db_session, interpreter=interpreter)
-    result = await service.handle_user_message("Ayer estuve pensando en una persona")
+    result = await service.handle_user_message("dime qué datos tienes de una persona")
 
     assert interpreter.calls == 1
     assert result.intent == Intent.general_chat
@@ -338,7 +338,7 @@ async def test_interpreter_history_only_term_is_rejected(
 ) -> None:
     interpreter = ScriptedInterpreter(
         {
-            "Ayer estuve pensando en una persona": InterpreterSuggestion(
+            "dime qué datos tienes de una persona": InterpreterSuggestion(
                 intent="person_query", term="Carmen"
             )
         }
@@ -346,7 +346,7 @@ async def test_interpreter_history_only_term_is_rejected(
     service = _service(db_session, interpreter=interpreter)
     first = await service.handle_user_message("Háblame de Carmen")
     result = await service.handle_user_message(
-        "Ayer estuve pensando en una persona",
+        "dime qué datos tienes de una persona",
         conversation_id=first.conversation_id,
     )
 
@@ -362,13 +362,13 @@ async def test_interpreter_substring_term_is_rejected(
 ) -> None:
     interpreter = ScriptedInterpreter(
         {
-            "Ayer estuve pensando en Antoniola": InterpreterSuggestion(
+            "dime qué datos tienes de Antoniola": InterpreterSuggestion(
                 intent="person_query", term="Antonio"
             )
         }
     )
     service = _service(db_session, interpreter=interpreter)
-    result = await service.handle_user_message("Ayer estuve pensando en Antoniola")
+    result = await service.handle_user_message("dime qué datos tienes de Antoniola")
 
     assert result.intent == Intent.general_chat
     assert result.sources == []
@@ -380,13 +380,13 @@ async def test_interpreter_term_grounding_ignores_case_and_accents(
 ) -> None:
     interpreter = ScriptedInterpreter(
         {
-            "Ayer estuve pensando en maria": InterpreterSuggestion(
+            "dime qué datos tienes de maria": InterpreterSuggestion(
                 intent="person_query", term="María"
             )
         }
     )
     service = _service(db_session, interpreter=interpreter)
-    result = await service.handle_user_message("Ayer estuve pensando en maria")
+    result = await service.handle_user_message("dime qué datos tienes de maria")
 
     assert result.intent == Intent.person_query
     assert "María" in result.answer
@@ -398,13 +398,13 @@ async def test_interpreter_grounded_name_is_still_verified_and_used(
 ) -> None:
     interpreter = ScriptedInterpreter(
         {
-            "Ayer estuve pensando en Antonio": InterpreterSuggestion(
+            "dime qué datos tienes de Antonio": InterpreterSuggestion(
                 intent="person_query", term="Antonio"
             )
         }
     )
     service = _service(db_session, interpreter=interpreter)
-    result = await service.handle_user_message("Ayer estuve pensando en Antonio")
+    result = await service.handle_user_message("dime qué datos tienes de Antonio")
 
     assert result.intent == Intent.person_query
     assert "pareja de Carmen" in result.answer
@@ -463,14 +463,14 @@ async def test_sensitive_blocked_turn_breaks_pronoun_carry(
 
 
 def test_term_is_grounded_requires_a_whole_token_run() -> None:
-    assert term_is_grounded("Ayer estuve pensando en Antonio", "Antonio")
+    assert term_is_grounded("dime qué datos tienes de Antonio", "Antonio")
     assert term_is_grounded("antonio", "Antonio")
     assert term_is_grounded("Háblame de José", "Jose")
     assert term_is_grounded("HÁBLAME DE JOSÉ", "josé")
     assert term_is_grounded("¿Qué sabes de Paco García?", "paco garcia")
     assert term_is_grounded("Antonio's friend", "Antonio")
 
-    assert not term_is_grounded("Ayer estuve pensando en una persona", "Carmen")
+    assert not term_is_grounded("dime qué datos tienes de una persona", "Carmen")
     assert not term_is_grounded("Antoniola", "Antonio")
     assert not term_is_grounded("", "Carmen")
     assert not term_is_grounded("Carmen", None)
@@ -490,7 +490,7 @@ async def test_verifier_rejects_ungrounded_before_any_resolution() -> None:
 
     assert (
         await verifier.verify(
-            suggestion, message="Ayer estuve pensando en una persona"
+            suggestion, message="dime qué datos tienes de una persona"
         )
         is None
     )
