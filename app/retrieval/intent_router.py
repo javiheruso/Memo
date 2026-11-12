@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from app.domain.enums import Intent
@@ -8,21 +9,87 @@ from app.retrieval.relationship_roles import (
     parse_relationship_role_query,
 )
 
-_NAME = r"[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ-]*"
-_NAME_PHRASE = rf"{_NAME}(?:\s+{_NAME})*"
+# A name candidate is a short run of letter-only words. It intentionally does
+# not require capitalization: STT transcripts arrive lowercase and without
+# punctuation. Ordinary function words and generic nouns are rejected so
+# "háblame de la vida" never becomes a person term; an unresolved lowercase
+# candidate is also treated as ordinary conversation by the service.
+_NAME_TOKEN = r"[^\W\d_]+(?:[-'][^\W\d_]+)*"
+_NON_NAME_TOKENS = frozenset(
+    {
+        # Spanish function words and generic request vocabulary.
+        "la", "el", "los", "las", "lo", "un", "una", "unos", "unas",
+        "de", "del", "al", "a", "en", "con", "por", "para", "sobre",
+        "mi", "mis", "tu", "tus", "su", "sus", "él", "ella", "ellos",
+        "ellas", "ese", "esa", "eso", "esos", "esas", "este", "esta",
+        "ti", "mí", "me", "nos", "os", "vos", "yo", "tú", "usted",
+        "ustedes", "nosotros", "nosotras", "vosotros", "vosotras",
+        "estos", "estas", "aquel", "aquella", "que", "qué", "quien",
+        "quién", "cual", "cuál", "cuando", "cuándo", "donde", "dónde",
+        "como", "cómo", "cuanto", "cuánto", "y", "o", "u", "pero", "si",
+        "sí", "no", "muy", "más", "mas", "menos", "todo", "toda", "todos",
+        "todas", "algo", "nada", "ayer", "hoy", "mañana", "tarde",
+        "noche", "semana", "mes", "año", "vida", "casa", "playa",
+        "viaje", "historia", "tema", "cosa", "cosas", "familia",
+        "trabajo", "música", "musica", "comida", "salud", "tiempo",
+        "día", "dia", "pueblo", "ciudad", "mundo", "país", "pais",
+        "recuerdo", "recuerdos", "proyecto", "proyectos", "foto",
+        "fotos", "documento", "documentos", "dato", "datos", "asunto",
+        "parte", "lugar", "momento", "vez", "veces", "era", "eran", "es",
+        "fue", "son",
+        # English function words and generic request vocabulary.
+        "the", "of", "about", "and", "with", "for", "what", "which",
+        "where", "who", "how", "when", "like", "lives", "live", "lived",
+        "work", "works", "born", "does", "did", "is", "was", "are",
+    }
+)
+
+
+def _fold(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.casefold())
+    return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+_FOLDED_NON_NAME_TOKENS = frozenset(_fold(token) for token in _NON_NAME_TOKENS)
+_STOP_NAMES = "|".join(
+    re.escape(token)
+    for token in sorted(_NON_NAME_TOKENS, key=len, reverse=True)
+)
+_NAME_CANDIDATE = (
+    rf"{_NAME_TOKEN}(?:\s+(?!(?:{_STOP_NAMES})\b){_NAME_TOKEN}){{0,2}}"
+)
+
+
+def _clean_name_candidate(raw: str) -> str | None:
+    """Return the leading name-like words of ``raw``, or ``None``.
+
+    The regex only bounds the candidate length; this helper stops at the first
+    function word or generic noun. It never invents a name, and a candidate made
+    only of non-name words is rejected.
+    """
+    selected: list[str] = []
+    for token in raw.split():
+        if _fold(token) in _FOLDED_NON_NAME_TOKENS:
+            break
+        selected.append(token)
+        if len(selected) == 3:
+            break
+    if not selected:
+        return None
+    return " ".join(selected)
+
 
 _PERSON_QUESTION = re.compile(
     r"(?:quién|quien|who)\s+(?:es|era|fue|is|was)\s+([^?¿]+?)\s*[?¿]*$",
     re.IGNORECASE,
 )
-# Natural Spanish ways to ask about a person: "Háblame de Elena",
-# "Cuéntame sobre Miguel", "Dime algo de Elena". A proper-name subject is
-# required (capitalized, like `_NAME_PHRASE`) and the phrase must end after the
-# name, so generic requests ("Cuéntame un chiste", "Háblame de la vida") stay
-# general chat. The trailing courtesy clause is optional: "Háblame de Elena,
-# por favor".
+# Natural ways to ask about a person: "Háblame de Elena", "Cuéntame sobre
+# Miguel", "Me gustaría saber de Elena", "Tengo curiosidad por Miguel". Names
+# may be lowercase (STT) but must survive `_clean_name_candidate`, so generic
+# requests ("Cuéntame un chiste", "Háblame de la vida") stay general chat. The
+# trailing courtesy clause is optional: "Háblame de Elena, por favor".
 _PERSON_REQUEST_SUFFIX = (
-    rf"(?P<name>(?-i:{_NAME_PHRASE}))\s*(?:,\s*por\s+favor)?\s*[?.!¿¡]*$"
+    rf"(?P<name>{_NAME_CANDIDATE})\s*(?:,\s*por\s+favor)?\s*[?.!¿¡]*$"
 )
 _PERSON_ABOUT_REQUEST = re.compile(
     rf"^\s*[¿¡]?\s*(?:h[áa]blame|cu[ée]ntame|dime)\s+(?:algo\s+)?"
@@ -35,14 +102,35 @@ _PERSON_DESCRIBE_REQUEST = re.compile(
 )
 _PERSON_POLITE_REQUEST = re.compile(
     rf"^\s*[¿¡]?\s*(?:me\s+)?(?:puedes|podr[íi]as|puede|podr[íi]a)\s+"
-    rf"(?:hablar(?:me)?|contar(?:me)?|decir(?:me)?)\s+(?:algo\s+)?"
-    rf"(?:de|sobre|acerca\s+de)\s+{_PERSON_REQUEST_SUFFIX}",
+    rf"(?:hablar(?:me)?|contar(?:me)?|decir(?:me)?|describir(?:me)?)\s+"
+    rf"(?:algo\s+)?(?:de|sobre|acerca\s+de)\s+{_PERSON_REQUEST_SUFFIX}",
+    re.IGNORECASE,
+)
+_PERSON_INFO_SEEKING_REQUEST = re.compile(
+    rf"^\s*[¿¡]?\s*(?:me\s+gustar[íi]a|me\s+gustaria|quisiera|quiero|necesito)\s+"
+    rf"(?:saber|conocer|preguntar(?:te)?)\s+(?:algo\s+)?"
+    rf"(?:de|sobre|acerca\s+de|por)\s+{_PERSON_REQUEST_SUFFIX}",
+    re.IGNORECASE,
+)
+_PERSON_CURIOSITY_REQUEST = re.compile(
+    rf"^\s*[¿¡]?\s*(?:tengo\s+(?:mucha\s+)?curiosidad|me\s+interesa)\s+"
+    rf"(?:por|sobre|de)\s+{_PERSON_REQUEST_SUFFIX}",
+    re.IGNORECASE,
+)
+_PERSON_ENGLISH_REQUEST = re.compile(
+    rf"^\s*(?:tell\s+me\s+about|what\s+do\s+you\s+know\s+about|"
+    rf"can\s+you\s+tell\s+me\s+about|could\s+you\s+tell\s+me\s+about|"
+    rf"i\s+want\s+to\s+know\s+about|i'?d\s+like\s+to\s+know\s+about|"
+    rf"i\s+would\s+like\s+to\s+know\s+about)\s+{_PERSON_REQUEST_SUFFIX}",
     re.IGNORECASE,
 )
 _PERSON_REQUEST_PATTERNS = (
     _PERSON_ABOUT_REQUEST,
     _PERSON_DESCRIBE_REQUEST,
     _PERSON_POLITE_REQUEST,
+    _PERSON_INFO_SEEKING_REQUEST,
+    _PERSON_CURIOSITY_REQUEST,
+    _PERSON_ENGLISH_REQUEST,
 )
 # "¿Te acuerdas de cuando íbamos a bailar?" / "Do you remember when we went
 # dancing?" -> semantic memory retrieval. Checked before event markers so a
@@ -96,12 +184,13 @@ _TOPIC_SELECTION = re.compile(
     re.IGNORECASE,
 )
 _EVENT_MARKERS = re.compile(
-    r"\b(viene|vendrá|vienen|vendrán|cuándo|evento|eventos|quedada)\b",
+    r"\b(viene|vienen|vendr[áa]|vendr[áa]n|cu[áa]ndo|evento|eventos|quedada)\b",
     re.IGNORECASE,
 )
 _EVENT_PERSON = re.compile(
-    rf"(?:viene|vienen|vendrá|vendrán)\s+(?P<arrival>{_NAME})"
-    rf"|(?:evento|eventos|quedada)\b[^?¿]*?\b(?:tiene|hay|habrá|tendrá|es|son)\s+(?P<owner>{_NAME})",
+    rf"(?:viene|vienen|vendr[áa]|vendr[áa]n)\s+(?P<arrival>{_NAME_CANDIDATE})"
+    rf"|(?:evento|eventos|quedada)\b[^?¿]*?\b"
+    rf"(?:tiene|tienen|hay|habr[áa]|tendr[áa]|es|son)\s+(?P<owner>{_NAME_CANDIDATE})",
     re.IGNORECASE,
 )
 # Orientation: "¿Qué día es hoy?" / "¿Qué hora es?" / "What's the date?".
@@ -218,16 +307,16 @@ _PRONOUN_FOLLOW_UP_PATTERNS = (
     ),
 )
 _FACT_SUBJECT_PREPOSITION = re.compile(
-    rf"\b(?i:a|de|para|sobre)\s+(?P<name>{_NAME_PHRASE})"
+    rf"\b(?i:a|de|para|sobre)\s+(?P<name>{_NAME_CANDIDATE})"
 )
 _FACT_SUBJECT_VERB = re.compile(
     rf"\b(?i:tiene|tienen|prefiere|prefieren|naci[oó]|vivi[oó]|vive|"
     rf"trabaj[oó]|trabaja|dedicaba|dedica|opina|cree|piensa)\s+"
-    rf"(?P<name>{_NAME_PHRASE})"
+    rf"(?P<name>{_NAME_CANDIDATE})"
 )
-_FACT_SUBJECT_POSSESSIVE = re.compile(rf"(?P<name>{_NAME_PHRASE})'s\b")
+_FACT_SUBJECT_POSSESSIVE = re.compile(rf"(?P<name>{_NAME_CANDIDATE})'s\b")
 _FACT_SUBJECT_ENGLISH_AUX = re.compile(
-    rf"\b(?i:does|did|was|is|are)\s+(?P<name>{_NAME_PHRASE})"
+    rf"\b(?i:does|did|was|is|are)\s+(?P<name>{_NAME_CANDIDATE})"
 )
 _FACT_SUBJECT_PATTERNS = (
     _FACT_SUBJECT_PREPOSITION,
@@ -264,12 +353,120 @@ def is_explicit_pronoun_question(text: str) -> bool:
 
 def _extract_fact_subject(text: str) -> str | None:
     for pattern in _FACT_SUBJECT_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            term = match.group("name").strip()
-            if term:
-                return term
+        for match in pattern.finditer(text):
+            term = _clean_name_candidate(match.group("name"))
+            if term is None:
+                continue
+            # A question-topic word ("de comer", "su infancia") is not an
+            # explicit person subject, so elliptical follow-ups stay elliptical.
+            if classify_fact_question(term) is not None:
+                continue
+            return term
     return None
+
+
+# Request cues are the boundary between a personal lookup and a narrative.
+# They are deliberately language-level: interrogative words, imperative or
+# info-seeking verbs, recollection markers and question punctuation. A bare
+# third-person narrative ("María viene mañana") or a self-disclosure
+# ("Ayer estuve pensando en Carmen") has no cue and stays conversational.
+_REQUEST_CUE_PREFIX = re.compile(
+    r"^\s*[¿¡]?\s*(?:"
+    r"dime|d[íi]me|cu[ée]ntame|cuentame|h[áa]blame|hablame|descr[íi]beme|"
+    r"describeme|me\s+gustar[íi]a|me\s+gustaria|quisiera|quiero|necesito|"
+    r"puedes|podr[íi]as|puede|podr[íi]a|sabes|conoces|sabr[íi]as|"
+    r"conocer[íi]as|tengo\s+curiosidad|me\s+interesa|tell\s+me|"
+    r"what\s+do\s+you\s+know|can\s+you\s+tell|could\s+you\s+tell|"
+    r"i\s+want\s+to\s+know|i'?d\s+like\s+to\s+know|i\s+would\s+like\s+to\s+know"
+    r")\b",
+    re.IGNORECASE,
+)
+_INTERROGATIVE_START = re.compile(
+    r"^\s*[¿¡]?\s*(?:y\s+)?(?:qu[ée]|que|cu[áa]l|cuales|cual|"
+    r"cu[áa]ndo|cuando|d[óo]nde|donde|c[óo]mo|como|qui[ée]n|quien|"
+    r"qui[ée]nes|cu[áa]nto|cuanto|what|which|where|when|who|how)\b",
+    re.IGNORECASE,
+)
+_INTERROGATIVE_ANYWHERE = re.compile(
+    r"\b(?:qu[ée]|que|cu[áa]l|cuales|cual|cu[áa]ndo|cuando|d[óo]nde|"
+    r"donde|c[óo]mo|como|qui[ée]n|quien|qui[ée]nes|cu[áa]nto|cuanto|"
+    r"what|which|where|when|who|how)\b",
+    re.IGNORECASE,
+)
+# "¿Sabes que ...?" / "¿A que no sabes que ...?" states knowledge instead of
+# asking for stored data, so it must not promote a personal lookup.
+_KNOWLEDGE_CHECK = re.compile(
+    r"^\s*[¿¡]?\s*(?:a\s+que\s+no\s+)?(?:sabes|sab[íi]as|no\s+sabes|"
+    r"te\s+cuento)\s+que\b",
+    re.IGNORECASE,
+)
+# "¡Qué bien que ...!" / "¡Qué alegría!" are exclamations, not information
+# requests, even though they start with an interrogative word.
+_EXCLAMATION_START = re.compile(
+    r"^\s*[¿¡]?\s*(?:qu[ée]|que)\s+(?:bien|bueno|buena|bonito|bonita|"
+    r"grande|alegr[íi]a|gusto|pena|l[áa]stima|suerte|orgullo|rabia|miedo)\b",
+    re.IGNORECASE,
+)
+# A narrative preface ("Ayer vi a María, ¿qué crees?") does not turn a
+# recollection into a personal lookup just because a later clause has a
+# question word. "Cuando" is intentionally absent: "cuando viene María" is a
+# valid STT event request.
+_NARRATIVE_START = re.compile(
+    r"^\s*[¿]?\s*(?:ayer|anoche|hoy|antes|después|despues|estuve|estaba|"
+    r"estuvimos|vi|vimos|fui|fuimos|recuerdo|me\s+acuerdo)\b",
+    re.IGNORECASE,
+)
+
+
+# Candidate selection is a short answer to the previous ambiguity question,
+# not a narrative that happens to contain a candidate's name. Narrative markers
+# keep "Ayer vi a Paco García" from silently selecting a candidate.
+_NARRATIVE_SELECTION_MARKERS = re.compile(
+    r"\b(?:ayer|anoche|antes|después|despues|cuando|entonces|estuve|estaba|"
+    r"estuvimos|estuvo|vi|vimos|vio|fui|fuimos|ten[ií]a|viv[ií]a|"
+    r"vivi[oó]|recuerdo|acuerdo|viene|vinieron|vino|vendr[áa]|mañana|hoy|"
+    r"siempre|nunca|muri[oó]|falleci[oó])\b",
+    re.IGNORECASE,
+)
+_CANDIDATE_ORDINAL = re.compile(
+    r"^\s*(?:primer[oa]|segund[oa]|tercer[oa]|[uú]ltim[oa]|\d+)"
+    r"\s*[.!?]*$",
+    re.IGNORECASE,
+)
+_CANDIDATE_ARTICLES = re.compile(
+    r"^\s*(?:el|la|los|las|un|una)\s+(?:(?:de|del)\s+)?",
+    re.IGNORECASE,
+)
+# "él era el panadero" is a clarification of the previous candidate, not a
+# narrative sentence. The pronoun/copula lead-in is stripped before the name
+# check; narrative markers still reject a real recollection.
+_CANDIDATE_LEAD_IN = re.compile(
+    r"^\s*(?:él|ella|ese|esa)\s+(?:era|es|fue)\s+",
+    re.IGNORECASE,
+)
+
+
+def _has_explicit_request_cue(text: str) -> bool:
+    normalized = text.strip()
+    if (
+        _KNOWLEDGE_CHECK.match(normalized)
+        or _EXCLAMATION_START.match(normalized)
+        or _NARRATIVE_START.match(normalized)
+    ):
+        return False
+    if _REQUEST_CUE_PREFIX.match(normalized):
+        return True
+    if _INTERROGATIVE_START.match(normalized):
+        return True
+    if "?" in normalized or "¿" in normalized:
+        # A question mark is enough for an interrogative-word question or a
+        # yes/no event question ("¿Viene María hoy?"). A narrative question
+        # such as "¿Ayer vi a María?" has no cue and stays conversational.
+        if _INTERROGATIVE_ANYWHERE.search(normalized):
+            return True
+        if _EVENT_MARKERS.search(normalized):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -295,7 +492,13 @@ class IntentRouter:
     Fact questions are checked before event markers so "¿Cuándo nació Elena?"
     asks for a stored fact instead of an event. Natural request phrasings
     ("Háblame de Elena", "Cuéntame sobre Miguel") are person queries, but they
-    require a proper-name subject so generic chat is not widened.
+    require a plausible name subject so generic chat is not widened.
+
+    Fact and event intents additionally require :meth:`is_personal_lookup_request`.
+    A narrative event mention ("María viene mañana") or a personal comment
+    ("Ayer estuve pensando en Carmen") therefore stays ``general_chat`` and
+    never reaches entity resolution, in the deterministic path or through an
+    optional interpreter suggestion.
     """
 
     def route(self, text: str) -> RouteResult:
@@ -319,20 +522,21 @@ class IntentRouter:
                 relationship_role=relationship_role,
             )
 
+        lookup_requested = self.is_personal_lookup_request(normalized)
+
         match = _PERSON_QUESTION.search(normalized)
         if match:
-            term = match.group(1).strip()
+            term = _clean_name_candidate(match.group(1))
             if term:
                 return RouteResult(intent=Intent.person_query, term=term)
 
         # Natural request phrasings join the same top-priority person query
-        # bucket. They require a capitalized proper name, so they never steal
-        # generic chat ("Cuéntame un chiste") or memory recall ("¿Te acuerdas
-        # de cuando venía María?").
+        # bucket. They never steal generic chat ("Cuéntame un chiste") or
+        # memory recall ("¿Te acuerdas de cuando venía María?").
         for pattern in _PERSON_REQUEST_PATTERNS:
             match = pattern.search(normalized)
             if match:
-                term = match.group("name").strip()
+                term = _clean_name_candidate(match.group("name"))
                 if term:
                     return RouteResult(intent=Intent.person_query, term=term)
 
@@ -345,20 +549,26 @@ class IntentRouter:
             return RouteResult(intent=Intent.memory_query)
 
         fact_topic = classify_fact_question(normalized)
-        if fact_topic is not None and _FACT_QUESTION.search(normalized):
+        if (
+            lookup_requested
+            and fact_topic is not None
+            and _FACT_QUESTION.search(normalized)
+        ):
             term = _extract_fact_subject(normalized)
             if term:
                 return RouteResult(
                     intent=Intent.fact_query, term=term, fact_topic=fact_topic
                 )
 
-        if _EVENT_MARKERS.search(normalized):
+        if lookup_requested and _EVENT_MARKERS.search(normalized):
             term = None
             event_match = _EVENT_PERSON.search(normalized)
             if event_match:
-                term = event_match.group("arrival") or event_match.group("owner")
+                term = _clean_name_candidate(
+                    event_match.group("arrival") or event_match.group("owner")
+                )
             if term:
-                return RouteResult(intent=Intent.event_query, term=term.strip())
+                return RouteResult(intent=Intent.event_query, term=term)
             return RouteResult(intent=Intent.event_query)
 
         for pattern in _ORIENTATION_PATTERNS:
@@ -366,6 +576,61 @@ class IntentRouter:
                 return RouteResult(intent=Intent.orientation_query)
 
         return RouteResult(intent=Intent.general_chat)
+
+    def is_personal_lookup_request(self, text: str) -> bool:
+        """True only for a message that asks the assistant for personal data.
+
+        This is the explicit personal-lookup boundary. It recognizes direct and
+        natural request phrasings, questions with or without punctuation,
+        recollection and stored-knowledge requests, and role questions. It does
+        not recognize a bare name, a third-person narrative, a self-disclosure
+        or a general conversation turn, so those never reach entity resolution.
+        The caller still owns verified carry-over and pending-candidate
+        selection; this method only classifies the current text.
+        """
+        normalized = text.strip()
+        if not normalized:
+            return False
+        if parse_relationship_role_query(normalized) is not None:
+            return True
+        if _MEMORY_MARKERS.search(normalized):
+            return True
+        if _PERSONAL_KNOWLEDGE_MARKERS.search(normalized) and _is_question_like(
+            normalized
+        ):
+            return True
+
+        match = _PERSON_QUESTION.search(normalized)
+        if match and _clean_name_candidate(match.group(1)) is not None:
+            return True
+        for pattern in _PERSON_REQUEST_PATTERNS:
+            match = pattern.search(normalized)
+            if match and _clean_name_candidate(match.group("name")) is not None:
+                return True
+
+        if not _has_explicit_request_cue(normalized):
+            return False
+        return (
+            classify_fact_question(normalized) is not None
+            or _EVENT_MARKERS.search(normalized) is not None
+            or _extract_fact_subject(normalized) is not None
+        )
+
+    def is_candidate_selection(self, text: str) -> bool:
+        """True for a short reply that picks one pending ambiguity candidate.
+
+        Examples: "el panadero", "el segundo", "2", "Paco García". A narrative
+        sentence that merely mentions a candidate ("Ayer vi a Paco García") is
+        not a selection, so pending ambiguity is not silently collapsed.
+        """
+        normalized = text.strip().strip(" ¿¡")
+        if not normalized or _NARRATIVE_SELECTION_MARKERS.search(normalized):
+            return False
+        if _CANDIDATE_ORDINAL.match(normalized):
+            return True
+        candidate = _CANDIDATE_LEAD_IN.sub("", normalized, count=1)
+        candidate = _CANDIDATE_ARTICLES.sub("", candidate, count=1)
+        return _clean_name_candidate(candidate.strip(" .!?¿¡")) is not None
 
     def is_acceptance(self, text: str) -> bool:
         """True for a short acceptance/continuation reply.

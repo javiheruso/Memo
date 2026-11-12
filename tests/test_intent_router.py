@@ -85,7 +85,7 @@ def test_person_request_without_proper_name_stays_general_chat():
     for phrase in [
         "Háblame de la vida",
         "Háblame de ti",
-        "Háblame de elena",
+        "Háblame de mi familia",
         "Cuéntame un chiste",
         "Cuéntame sobre lo que pasó",
         "Cuéntame sobre el viaje",
@@ -95,6 +95,57 @@ def test_person_request_without_proper_name_stays_general_chat():
         result = IntentRouter().route(phrase)
         assert result.intent == Intent.general_chat, phrase
         assert result.term is None, phrase
+
+
+def test_lowercase_stt_person_requests_keep_working():
+    cases = [
+        ("hablame de elena", "elena"),
+        ("cuentame sobre miguel", "miguel"),
+        ("dime algo de paco garcia", "paco garcia"),
+        ("me gustaria saber sobre elena", "elena"),
+        ("quiero saber quien es miguel", "miguel"),
+        ("tengo curiosidad por antonio", "antonio"),
+    ]
+    for phrase, expected_term in cases:
+        result = IntentRouter().route(phrase)
+        assert result.intent == Intent.person_query, phrase
+        assert result.term == expected_term, phrase
+        assert IntentRouter().is_personal_lookup_request(phrase), phrase
+
+
+def test_narrative_mentions_are_not_personal_lookups():
+    for phrase in [
+        "Ayer vi a María en el mercado.",
+        "María viene mañana a visitarme.",
+        "Viene María el domingo.",
+        "Mi marido viene a recogerme.",
+        "El domingo viene mi hija.",
+        "Mi marido se llamaba Miguel.",
+        "Ayer estuve pensando en Carmen.",
+        "Hoy estuve recordando la mudanza de Carmen.",
+        "Qué bien que a María le gusta el mar.",
+        "¿Sabes que a María le gusta el mar?",
+        "¿Ayer vi a María?",
+    ]:
+        result = IntentRouter().route(phrase)
+        assert result.intent == Intent.general_chat, phrase
+        assert result.term is None, phrase
+        assert not IntentRouter().is_personal_lookup_request(phrase), phrase
+
+
+def test_explicit_event_and_fact_requests_survive_lowercase_and_no_punctuation():
+    event = IntentRouter().route("cuando viene maria")
+    assert event.intent == Intent.event_query
+    assert event.term == "maria"
+
+    events = IntentRouter().route("que eventos tiene antonio")
+    assert events.intent == Intent.event_query
+    assert events.term == "antonio"
+
+    fact = IntentRouter().route("que le gusta a elena")
+    assert fact.intent == Intent.fact_query
+    assert fact.term == "elena"
+    assert fact.fact_topic == FactTopic.preference
 
 
 def test_person_request_does_not_steal_memory_recall():
