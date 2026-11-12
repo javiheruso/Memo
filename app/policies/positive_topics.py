@@ -116,7 +116,7 @@ def may_offer_positive_topics(
     )
 
 
-def _is_offer_shape(text: str) -> bool:
+def is_topic_offer(text: str) -> bool:
     """True only for an explicit offer, not for every question.
 
     A content question about the topic the person chose ("¿Has estado en la
@@ -155,7 +155,7 @@ def positive_topic_violation(
         # preference must not become an offer. Stored topics remain grounded
         # factual mentions. A content question about the person's chosen topic
         # is discussion; only an explicit offer puts a topic back to them.
-        return _is_offer_shape(answer) and bool(proposed - grounded)
+        return is_topic_offer(answer) and bool(proposed - grounded)
     if surfaced and unexpected:
         return True
     return len(unexpected) > 1

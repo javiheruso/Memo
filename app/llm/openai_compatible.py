@@ -43,6 +43,7 @@ from app.llm.prompt_builder import allowed_sources, build_prompt
 from app.policies.positive_topics import (
     context_topic_grounding,
     is_open_topic_request,
+    is_topic_offer,
     mentioned_topics,
     positive_topic_violation,
 )
@@ -345,10 +346,15 @@ class OpenAICompatibleResponder(Responder):
                     "model claimed a personal experience of its own",
                     category=UNSUPPORTED_PERSONAL_CONTENT,
                 )
+            # When the person asks for a topic, an offer-shaped suggestion is
+            # exactly the bounded reply. Repetition, parroting, invented
+            # records and first-person/shared experience were already rejected
+            # above, so only a non-offer reply still breaks this contract.
             if (
                 not has_stored_data
                 and context.intent in (Intent.general_chat, Intent.unknown)
                 and is_open_topic_request(message or "")
+                and not is_topic_offer(response.text)
             ):
                 raise InvalidModelOutput(
                     "model did not follow the bounded topic-choice reply",

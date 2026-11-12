@@ -1285,10 +1285,58 @@ async def test_general_chat_does_not_continue_after_a_farewell() -> None:
 
 
 @pytest.mark.asyncio
-async def test_general_chat_open_topic_request_gets_a_neutral_suggestion() -> None:
+async def test_general_chat_open_topic_request_accepts_a_bounded_topic_offer() -> None:
     context = AnswerContext(intent=Intent.general_chat, term=None)
     async with _client_for(
         '{"answer": "¿Te apetece hablar de tus recetas favoritas?", '
+        '"sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="No se me ocurre nada; propón tú un tema."
+        )
+
+    assert response.text == "¿Te apetece hablar de tus recetas favoritas?"
+    assert response.sources == []
+
+
+@pytest.mark.asyncio
+async def test_general_chat_open_topic_request_accepts_a_second_topic_offer() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        '{"answer": "¿Te interesa alguna banda en particular o un género '
+        'musical?", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="No sé, dime tú algo interesante."
+        )
+
+    assert response.text == (
+        "¿Te interesa alguna banda en particular o un género musical?"
+    )
+    assert response.sources == []
+
+
+@pytest.mark.asyncio
+async def test_general_chat_open_topic_request_rejects_a_non_offer_reply() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        '{"answer": "Me encanta ver cómo el sol se pone sobre el agua. '
+        '¿Has visto un atardecer maravilloso alguna vez?", "sources": []}'
+    ) as client:
+        response = await _responder(client).respond(
+            context, message="Bueno, dejemos eso. ¿De qué podemos hablar?"
+        )
+
+    assert response.text == (
+        "Podemos hablar del tiempo, de la comida o de lo que tú prefieras."
+    )
+
+
+@pytest.mark.asyncio
+async def test_general_chat_open_topic_request_rejects_shared_experience_offer() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    async with _client_for(
+        '{"answer": "¿Te apetece hablar de cuando fuimos juntos a Valencia?", '
         '"sources": []}'
     ) as client:
         response = await _responder(client).respond(
