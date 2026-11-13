@@ -347,16 +347,16 @@ async def test_child_relative_follow_up_is_neutral_and_keeps_direction(
         "¿Y su hijo?", conversation_id=first.conversation_id
     )
 
-    for result in (daughter, son):
+    for result, asked_role, other_role in (
+        (daughter, "hija", "hijo"),
+        (son, "hijo", "hija"),
+    ):
         assert result.intent == Intent.person_query
         assert result.answer.startswith(
             "Tengo guardada a María como descendiente de Carmen"
         )
-        assert "el parentesco guardado no especifica el sexo ni el rol" in (
-            result.answer
-        )
-        assert "hija" not in result.answer
-        assert "hijo" not in result.answer
+        assert f"no puedo confirmar que sea su {asked_role}" in result.answer
+        assert other_role not in result.answer
         keys = _source_keys(result)
         assert ("person", str(active.id)) in keys
         assert ("person", str(child.id)) in keys
@@ -386,7 +386,7 @@ async def test_child_relative_follow_up_does_not_confirm_asked_daughter_role(
     )
 
     assert "descendiente de Carmen" in result.answer
-    assert "el parentesco guardado no especifica el sexo ni el rol" in result.answer
+    assert "no puedo confirmar que sea su hija" in result.answer
     assert "es hija" not in result.answer.lower()
     assert "es hijo" not in result.answer.lower()
     assert "hija de Carmen" not in result.answer.lower()
@@ -420,13 +420,16 @@ async def test_parent_relative_follow_up_is_neutral_and_not_reversed(
         "¿Y su hija?", conversation_id=first.conversation_id
     )
 
-    for result in (mother, father):
+    for result, asked_role, other_role in (
+        (mother, "madre", "padre"),
+        (father, "padre", "madre"),
+    ):
         assert result.intent == Intent.person_query
         assert result.answer.startswith(
             "Tengo guardada a María como progenitor de Carmen"
         )
-        assert "madre" not in result.answer
-        assert "padre" not in result.answer
+        assert f"no puedo confirmar que sea su {asked_role}" in result.answer
+        assert other_role not in result.answer
         assert ("relationship", str(relationship.id)) in _source_keys(result)
 
     assert daughter.answer == "No tengo guardado quién es su hija."

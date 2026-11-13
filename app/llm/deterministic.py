@@ -67,13 +67,17 @@ _RELATIVE_PLURAL_LABELS: dict[RelationshipType, str] = {
     RelationshipType.parent_of: "descendientes de",
     RelationshipType.child_of: "progenitores de",
 }
-# A directed parent/child row does not encode whether the other person is the
-# daughter/son or mother/father the follow-up asked about. State that limit
-# explicitly instead of letting a verified "descendiente" answer affirm the
-# gendered role in the question.
-_RELATIVE_ROLE_UNCERTAINTY = (
-    "el parentesco guardado no especifica el sexo ni el rol"
-)
+
+
+# A directed parent/child row proves the direction but not whether the other
+# person is the daughter/son or mother/father the follow-up asked about. Say
+# that Memo cannot confirm the requested role instead of describing stored
+# metadata, while keeping the neutral label taken from the relation.
+def _relative_role_confirmation_limit(role: str | None) -> str:
+    if role in _RELATIVE_FOLLOW_UP_ROLES:
+        return f"no puedo confirmar que sea su {role}"
+    return "no puedo confirmar ese parentesco"
+
 
 _GENERAL_REPLY = "Estoy aquí para conversar. Cuéntame de qué te apetece hablar."
 _UNKNOWN_REPLY = "No he entendido bien lo que has dicho. ¿Puedes repetirlo?"
@@ -603,7 +607,8 @@ class DeterministicResponder(Responder):
         if confirmed:
             text = (
                 f"Tengo guardada a {item.other_display_name} como {label} "
-                f"{active}{suffix}, pero {_RELATIVE_ROLE_UNCERTAINTY}."
+                f"{active}{suffix}, pero "
+                f"{_relative_role_confirmation_limit(context.relationship_role)}."
             )
         else:
             text = (
