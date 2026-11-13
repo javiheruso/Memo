@@ -213,6 +213,13 @@ class OpenAICompatibleResponder(Responder):
         history: Sequence[ConversationTurn] = (),
         style: ConversationStyle | None = None,
     ) -> Response:
+        # Date/time must come from the code-provided clock, not from the model
+        # or a previous conversation turn. Answer orientation queries with the
+        # deterministic responder before any model or history call.
+        if context.intent == Intent.orientation_query:
+            return await self._fallback.respond(
+                context, message=message, history=history, style=style
+            )
         try:
             prompt = build_prompt(
                 context, message=message, history=history, style=style

@@ -802,6 +802,12 @@ class DeterministicResponder(Responder):
 
     @staticmethod
     def _respond_orientation_query(context: AnswerContext) -> Response:
+        """Render the code-provided clock.
+
+        ``AnswerContext.now`` is UTC and the reply states UTC day/date/time.
+        Local-time rendering is a known limitation, not a model question: this
+        path never asks the provider or reads a previous turn.
+        """
         now = _as_utc(context.now)
         weekday = _WEEKDAYS[now.weekday()]
         month = _MONTHS[now.month - 1]

@@ -763,9 +763,10 @@ hora es?", "What's the date?"). The router precedence is `person_query` >
 orientation patterns are end-anchored so "¿Qué día viene María?" stays an
 event query. The answer is built from a code-provided clock carried in
 `AnswerContext.now` (UTC): the deterministic responder renders the weekday,
-date and time from it, and the prompt builder hands that same trusted clock to
-the LLM path, so a date/time statement is grounded in the application's clock,
-never the model's own knowledge.
+date and time from it. The LLM responder delegates `orientation_query` to that
+deterministic responder before any model or history call, so the current clock
+can never be answered from the model's knowledge or a previous turn. The clock
+is still UTC; local-time rendering remains a known limitation.
 
 ### Fact and preference queries
 
