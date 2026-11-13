@@ -55,6 +55,19 @@ _RELATION_LABELS: dict[RelationshipType, str] = {
     RelationshipType.other: "conocido de",
 }
 
+# Relative follow-ups ("¿Y su hija?", "¿Y su madre?") are matched by stored
+# relation direction. The labels stay neutral because neither the stored type
+# nor the person name carries a gender.
+_RELATIVE_FOLLOW_UP_ROLES = frozenset({"hija", "hijo", "madre", "padre"})
+_RELATIVE_SINGULAR_LABELS: dict[RelationshipType, str] = {
+    RelationshipType.parent_of: "descendiente de",
+    RelationshipType.child_of: "progenitor de",
+}
+_RELATIVE_PLURAL_LABELS: dict[RelationshipType, str] = {
+    RelationshipType.parent_of: "descendientes de",
+    RelationshipType.child_of: "progenitores de",
+}
+
 _GENERAL_REPLY = "Estoy aquí para conversar. Cuéntame de qué te apetece hablar."
 _UNKNOWN_REPLY = "No he entendido bien lo que has dicho. ¿Puedes repetirlo?"
 _EVENT_ASK_WHOSE = "¿De quién quieres saber sus eventos?"
@@ -422,6 +435,8 @@ class DeterministicResponder(Responder):
         rows never reach this method.
         """
         role = context.relationship_role
+        if role in _RELATIVE_FOLLOW_UP_ROLES:
+            return self._respond_relative_follow_up(context)
         if context.person is None:
             return Response(text="Antes de responder, dime de quién estamos hablando.")
 
@@ -515,6 +530,80 @@ class DeterministicResponder(Responder):
                 seen.add(key)
                 sources.append(ResponseSourceRef(entity_type, entity_id, usage_type))
         return sources
+
+    def _respond_relative_follow_up(self, context: AnswerContext) -> Response:
+        """Answer a directed parent/child follow-up with neutral wording.
+
+        The match already came from one active person's stored rows and the
+        requested direction. This method never turns a different name into the
+        requested role, never picks one of several people, and never reads
+        gender from the relation or the name.
+        """
+        if context.person is None:
+            return Response(text="Antes de responder, dime de quién estamos hablando.")
+
+        verified = [
+            item
+            for item in context.verified_relations
+            if is_answerable_relationship_status(item.status)
+        ]
+        probable = [
+            item
+            for item in context.probable_relations
+            if is_answerable_relationship_status(item.status)
+        ]
+        if not verified and not probable:
+            return Response(
+                text=f"No tengo guardado quién es su {context.relationship_role}.",
+                sources=[ResponseSourceRef("person", context.person.id, "subject")],
+            )
+        return self._relative_follow_up_answer(
+            context,
+            verified or probable,
+            confirmed=bool(verified),
+        )
+
+    @classmethod
+    def _relative_follow_up_answer(
+        cls, context: AnswerContext, items, *, confirmed: bool
+    ) -> Response:
+        active = context.person.display_name
+        names: list[str] = []
+        for item in items:
+            if item.other_display_name not in names:
+                names.append(item.other_display_name)
+        sources = cls._relationship_query_sources(context, items)
+        first_type = items[0].relationship_type
+
+        if len(names) > 1:
+            label = _RELATIVE_PLURAL_LABELS.get(first_type, "familiares de")
+            listed = ", ".join(names)
+            if confirmed:
+                text = (
+                    f"Tengo guardadas varias personas como {label} {active}: "
+                    f"{listed}. No sé cuál es."
+                )
+            else:
+                text = (
+                    f"Tengo anotadas varias personas posibles como {label} "
+                    f"{active}: {listed}, pero ninguna está confirmada."
+                )
+            return Response(text=text, sources=sources)
+
+        label = _RELATIVE_SINGULAR_LABELS.get(first_type, "familiar de")
+        item = items[0]
+        suffix = _source_suffix(item.source_type)
+        if confirmed:
+            text = (
+                f"Tengo guardada a {item.other_display_name} como {label} "
+                f"{active}{suffix}."
+            )
+        else:
+            text = (
+                f"Creo que tengo guardada a {item.other_display_name} como "
+                f"{label} {active}, pero no está confirmado{suffix}."
+            )
+        return Response(text=text, sources=sources)
 
     def _respond_fact_query(self, context: AnswerContext) -> Response:
         """Answer a scoped fact/preference question from stored facts only.

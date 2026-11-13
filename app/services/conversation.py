@@ -22,7 +22,7 @@ from app.domain.conversation_context import (
     bound_conversation_history,
 )
 from app.domain.conversation_window import ConversationWindow
-from app.domain.enums import Intent
+from app.domain.enums import Intent, RelationshipType
 from app.domain.provisional_referent import (
     ProvisionalReferent,
     project_provisional_referent,
@@ -79,7 +79,10 @@ from app.retrieval.interpreter_verifier import (
     InterpreterVerifier,
     VerifiedInterpreterRoute,
 )
-from app.retrieval.relationship_roles import RelationshipRoleQuery
+from app.retrieval.relationship_roles import (
+    RelationshipRoleQuery,
+    RelativeFollowUpQuery,
+)
 from app.retrieval.semantic_retriever import SemanticRetriever
 from app.retrieval.structured_retriever import PersonData, StructuredRetriever
 from app.services.claim_ingestion import ClaimIngestionService
@@ -169,6 +172,35 @@ def _recent_turns_touch_sensitive(
         matches_topic(turn.text, topic)
         for turn in turns[-2:]
         for topic in topics
+    )
+
+
+def _matches_relative_follow_up(
+    relationship,
+    person_id: uuid.UUID,
+    query: RelativeFollowUpQuery,
+) -> bool:
+    """True when a stored row has the direction the follow-up asks about.
+
+    ``person_id`` is the active person. For "su hija/su hijo" the active person
+    must be the parent side; for "su madre/su padre" it must be the child side.
+    No gender is read from the person name or any literal.
+    """
+    active_is_a = relationship.person_a_id == person_id
+    if query.active_is_parent:
+        return (
+            active_is_a
+            and relationship.relationship_type == RelationshipType.parent_of
+        ) or (
+            not active_is_a
+            and relationship.relationship_type == RelationshipType.child_of
+        )
+    return (
+        active_is_a
+        and relationship.relationship_type == RelationshipType.child_of
+    ) or (
+        not active_is_a
+        and relationship.relationship_type == RelationshipType.parent_of
     )
 
 
@@ -448,6 +480,7 @@ class ConversationService:
             # or multiple candidate persons.
             follow_up_resolution: Resolution | None = None
             follow_up_topic: str | None = None
+            relative_follow_up: RelativeFollowUpQuery | None = None
             interpreter_applied = False
             if continuation is None and route.intent in (
                 Intent.general_chat,
@@ -481,12 +514,13 @@ class ConversationService:
                                 follow_up_topic = possessive_route.follow_up_topic
                                 route = possessive_route
                     else:
-                        # Pronoun follow-ups ("¿Y ella?", "¿Qué sabes de él?")
-                        # also need an immediately previous resolved person.
-                        # After an ambiguous or unrelated turn there is none, so
-                        # the turn stays conversational and nothing leaks.
-                        pronoun_route = self._router.route_pronoun_follow_up(text)
-                        if pronoun_route is not None:
+                        # Relative follow-ups ("¿Y su hija?", "¿Y su madre?")
+                        # are state-gated on the immediately previous resolved
+                        # person. They match a directed parent/child row and
+                        # never choose between multiple people or carry across
+                        # an unrelated or ambiguous turn.
+                        relative_route = self._router.route_relative_follow_up(text)
+                        if relative_route is not None:
                             subject_id = window.last_resolved_person()
                             if subject_id is not None:
                                 subject = await self._people.get(subject_id)
@@ -494,7 +528,26 @@ class ConversationService:
                                     follow_up_resolution = Resolution.from_people(
                                         subject.display_name, [subject]
                                     )
-                                    route = pronoun_route
+                                    relative_follow_up = relative_route
+                                    route = RouteResult(
+                                        intent=Intent.person_query,
+                                        term=subject.display_name,
+                                    )
+                        else:
+                            # Pronoun follow-ups ("¿Y ella?", "¿Qué sabes de él?")
+                            # also need an immediately previous resolved person.
+                            # After an ambiguous or unrelated turn there is none,
+                            # so the turn stays conversational and nothing leaks.
+                            pronoun_route = self._router.route_pronoun_follow_up(text)
+                            if pronoun_route is not None:
+                                subject_id = window.last_resolved_person()
+                                if subject_id is not None:
+                                    subject = await self._people.get(subject_id)
+                                    if subject is not None:
+                                        follow_up_resolution = Resolution.from_people(
+                                            subject.display_name, [subject]
+                                        )
+                                        route = pronoun_route
 
             # Only a turn the deterministic router and carry-over rules left
             # unresolved may use the verified interpreter route. The explicit
@@ -534,6 +587,11 @@ class ConversationService:
                     context = replace(context, accepted_offer=True)
                 resolution = continuation.resolution
                 follow_up_topic = continuation.follow_up_topic
+            elif relative_follow_up is not None and follow_up_resolution is not None:
+                context = await self._relative_follow_up_context(
+                    relative_follow_up, follow_up_resolution
+                )
+                resolution = follow_up_resolution
             elif route.relationship_role is not None:
                 context = await self._relationship_query_context(
                     route.relationship_role, window
@@ -990,6 +1048,37 @@ class ConversationService:
         ]
         return self._context_builder.build_from_relationship_query(
             active_person, role_query.role, matching
+        )
+
+    async def _relative_follow_up_context(
+        self,
+        query: RelativeFollowUpQuery,
+        resolution: Resolution,
+    ) -> AnswerContext:
+        """Build one active person's directed parent/child follow-up context.
+
+        Only relationships that match the requested direction are passed to the
+        context builder. Pending and rejected rows keep their existing status
+        handling; multiple answerable people stay multiple and are never
+        collapsed into one.
+        """
+        if resolution.person is None:
+            return self._context_builder.build_from_relationship_query(
+                None, query.role, []
+            )
+        person = await self._people.get(resolution.person.id)
+        if person is None:
+            return self._context_builder.build_from_relationship_query(
+                None, query.role, []
+            )
+        relationships = await self._relationships.for_person(person.id)
+        matching = [
+            relationship
+            for relationship in relationships
+            if _matches_relative_follow_up(relationship, person.id, query)
+        ]
+        return self._context_builder.build_from_relationship_query(
+            person, query.role, matching
         )
 
     def _should_interpret(

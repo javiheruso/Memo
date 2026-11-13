@@ -6,6 +6,7 @@ from app.domain.enums import Intent
 from app.retrieval.fact_topics import FactTopic, classify_fact_question
 from app.retrieval.relationship_roles import (
     RelationshipRoleQuery,
+    RelativeFollowUpQuery,
     parse_relationship_role_query,
 )
 
@@ -249,6 +250,15 @@ _POSSESSIVE_FOLLOW_UP = re.compile(
     r"|(?:qu[ée]|que)\s+(?:sabes|conoces|tienes|hay)\s+(?:de|sobre|acerca\s+de)"
     r"|(?:c[óo]mo|como)\s+(?:era|fue)"
     r")\s+(?:sus|su)\s+(?P<topic>[^?.!¿¡]+?)\s*[?.!¿¡]*$",
+    re.IGNORECASE,
+)
+# A relative follow-up keeps the previous resolved person and asks about one
+# close family link: "¿Y su hija?", "¿Y su padre?". It is deliberately narrow:
+# only these four nouns and no extra content, so an unrelated possessive
+# sentence stays general chat. The caller supplies the active person and
+# refuses the turn when there is no verified carry-over.
+_RELATIVE_FOLLOW_UP = re.compile(
+    r"^\s*[¿¡]?\s*(?:y\s+)?su\s+(?P<role>hija|hijo|madre|padre)\s*[?.!¿¡]*$",
     re.IGNORECASE,
 )
 # Natural Spanish labels used when a carried-topic follow-up has no matching
@@ -704,6 +714,27 @@ class IntentRouter:
             term=None,
             fact_topic=topic,
             follow_up_topic=FOLLOW_UP_TOPIC_LABELS.get(topic),
+        )
+
+    def route_relative_follow_up(self, text: str) -> RelativeFollowUpQuery | None:
+        """Classify "¿Y su hija/hijo/madre/padre?" without choosing a subject.
+
+        The method only recognizes the four unambiguous close-family nouns. It
+        never infers gender from names or stored data: the caller matches the
+        directed parent/child relation and the responder renders a neutral
+        label. The immediately previous resolved person must be supplied by the
+        caller; without one the turn stays conversational.
+        """
+        normalized = text.strip()
+        if not normalized:
+            return None
+        match = _RELATIVE_FOLLOW_UP.match(normalized)
+        if match is None:
+            return None
+        role = _fold(match.group("role"))
+        return RelativeFollowUpQuery(
+            role=role,
+            active_is_parent=role in ("hija", "hijo"),
         )
 
     def route_pronoun_follow_up(self, text: str) -> RouteResult | None:
