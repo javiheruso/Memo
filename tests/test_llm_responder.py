@@ -968,7 +968,7 @@ async def test_person_fact_attributed_to_another_person_falls_back() -> None:
     async with _client_for(payload) as client:
         response = await _responder(client).respond(context)
 
-    assert response.text == "Elena Ruiz era hijo de Tomás Vidal."
+    assert response.text == "Elena Ruiz era descendiente de Tomás Vidal."
     assert "arquitect" not in response.text
     assert {source.entity_type for source in response.sources} == {
         "person",
@@ -1001,8 +1001,8 @@ async def test_reversed_relationship_claim_falls_back_to_stored_direction() -> N
     async with _client_for(payload) as client:
         response = await _responder(client).respond(context)
 
-    assert response.text == "Elena Ruiz era hijo de Tomás Vidal."
-    assert "Tomás Vidal era hijo" not in response.text
+    assert response.text == "Elena Ruiz era descendiente de Tomás Vidal."
+    assert "Tomás Vidal era descendiente" not in response.text
 
 
 @pytest.mark.asyncio
@@ -1424,3 +1424,30 @@ async def test_general_chat_repeated_question_is_caught_across_a_non_question_tu
         )
 
     assert response.text == "Te escucho."
+
+
+@pytest.mark.asyncio
+async def test_orientation_query_uses_code_clock_before_any_model_call() -> None:
+    capture: list[httpx.Request] = []
+    context = AnswerContext(
+        intent=Intent.orientation_query,
+        term=None,
+        now=datetime(2026, 8, 31, 14, 5, tzinfo=UTC),
+    )
+    payload = '{"answer": "Hoy es domingo y son las 23:00.", "sources": []}'
+
+    async with _client_for(payload, capture=capture) as client:
+        response = await _responder(client).respond(
+            context,
+            message="¿Qué día es hoy?",
+            history=(
+                ConversationTurn(role="user", text="¿Viene María el domingo?"),
+                ConversationTurn(role="assistant", text="Sí, viene el domingo."),
+            ),
+        )
+
+    assert response.text == (
+        "Hoy es lunes, 31 de agosto de 2026 y son las 14:05."
+    )
+    assert response.sources == []
+    assert capture == []

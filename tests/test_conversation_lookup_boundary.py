@@ -320,6 +320,117 @@ async def test_ambiguous_name_and_candidate_selection_survive_narrative_noise(
 
 
 # --------------------------------------------------------------------------
+# State-gated correction of an unresolved personal lookup
+# --------------------------------------------------------------------------
+
+
+async def test_correction_after_unresolved_lookup_uses_normal_resolution(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    service = _service(db_session)
+    unresolved = await service.handle_user_message("¿Quién era Eustaquio?")
+    assert unresolved.intent == Intent.person_query
+    assert unresolved.gap_created is True
+
+    result = await service.handle_user_message(
+        "No, Eustaquio no; Antonio.",
+        conversation_id=unresolved.conversation_id,
+    )
+
+    assert result.intent == Intent.person_query
+    assert "Antonio" in result.answer
+    assert "Eustaquio" not in result.answer
+    assert ("person", str(seed.person_ids["antonio"])) in _source_keys(result)
+    assert result.gap is None
+    assert result.gap_created is False
+    # The correction is a lookup, never a declarative claim.
+    assert await _claims(db_session, result.conversation_id) == []
+
+
+async def test_correction_is_not_applied_after_a_resolved_answer(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    service = _service(db_session)
+    resolved = await service.handle_user_message("Háblame de Carmen")
+    assert resolved.intent == Intent.person_query
+
+    result = await service.handle_user_message(
+        "No, Eustaquio no; Antonio.",
+        conversation_id=resolved.conversation_id,
+    )
+
+    assert result.intent == Intent.general_chat
+    assert result.sources == []
+    assert "Antonio" not in result.answer
+
+
+async def test_non_person_correction_stays_general_chat(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    service = _service(db_session)
+    unresolved = await service.handle_user_message("¿Quién era Eustaquio?")
+
+    result = await service.handle_user_message(
+        "No, café no; té.",
+        conversation_id=unresolved.conversation_id,
+    )
+
+    assert result.intent == Intent.general_chat
+    assert result.sources == []
+    assert result.gap is None
+
+
+async def test_correction_to_an_ambiguous_name_is_not_collapsed(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    service = _service(db_session)
+    unresolved = await service.handle_user_message("¿Quién era Eustaquio?")
+
+    result = await service.handle_user_message(
+        "No, Eustaquio no; Paco.",
+        conversation_id=unresolved.conversation_id,
+    )
+
+    assert result.intent == Intent.general_chat
+    assert result.ambiguity is None
+    assert result.sources == []
+
+
+async def test_correction_requires_the_immediately_previous_unresolved_lookup(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    service = _service(db_session)
+    unresolved = await service.handle_user_message("¿Quién era Eustaquio?")
+    stale = await service.handle_user_message(
+        "Hoy hace buen día.", conversation_id=unresolved.conversation_id
+    )
+
+    result = await service.handle_user_message(
+        "No, Eustaquio no; Antonio.",
+        conversation_id=stale.conversation_id,
+    )
+
+    assert result.intent == Intent.general_chat
+    assert result.sources == []
+
+
+async def test_correction_rejected_name_must_match_the_previous_lookup(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    service = _service(db_session)
+    unresolved = await service.handle_user_message("¿Quién era Eustaquio?")
+
+    result = await service.handle_user_message(
+        "No, Miguel no; Antonio.",
+        conversation_id=unresolved.conversation_id,
+    )
+
+    assert result.intent == Intent.general_chat
+    assert result.sources == []
+    assert "Antonio" not in result.answer
+
+
+# --------------------------------------------------------------------------
 # Continuity: verified carry, acceptance, topic change and memory recall
 # --------------------------------------------------------------------------
 

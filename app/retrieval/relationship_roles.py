@@ -22,6 +22,20 @@ class RelationshipRoleQuery:
     relationship_types: tuple[RelationshipType, ...]
 
 
+@dataclass(frozen=True)
+class RelativeFollowUpQuery:
+    """A third-person possessive follow-up about the active person.
+
+    The stored relationship types are directed but carry no gender. The caller
+    therefore matches by direction only and answers with a neutral label.
+    """
+
+    role: str
+    # True for "su hija/su hijo": the active person is the parent side. False
+    # for "su madre/su padre": the active person is the child side.
+    active_is_parent: bool
+
+
 _ROLE_SPECS: dict[str, RelationshipRoleQuery] = {
     "marido": RelationshipRoleQuery("marido", (RelationshipType.spouse_of,)),
     "esposo": RelationshipRoleQuery("esposo", (RelationshipType.spouse_of,)),

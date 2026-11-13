@@ -390,3 +390,55 @@ def test_possessive_follow_up_ignores_explicit_subject():
 def test_possessive_follow_up_requires_recognizable_topic():
     assert IntentRouter().route_possessive_follow_up("Háblame sobre su casa") is None
     assert IntentRouter().route_possessive_follow_up("Hola") is None
+
+
+def test_routes_only_the_four_close_relative_follow_ups():
+    router = IntentRouter()
+    cases = {
+        "¿Y su hija?": ("hija", True),
+        "¿Y su hijo?": ("hijo", True),
+        "¿Y su madre?": ("madre", False),
+        "¿Y su padre?": ("padre", False),
+        "su hija": ("hija", True),
+    }
+    for phrase, (role, active_is_parent) in cases.items():
+        query = router.route_relative_follow_up(phrase)
+        assert query is not None, phrase
+        assert query.role == role, phrase
+        assert query.active_is_parent is active_is_parent, phrase
+
+
+def test_relative_follow_up_rejects_extra_content_and_other_relatives():
+    router = IntentRouter()
+    for phrase in (
+        "¿Y su nieta?",
+        "¿Y su hija mayor?",
+        "Háblame de su hija",
+        "¿Y su perro?",
+        "Hola",
+    ):
+        assert router.route_relative_follow_up(phrase) is None, phrase
+
+
+def test_parses_narrow_person_correction_shape():
+    router = IntentRouter()
+    correction = router.route_person_correction("No, Eustaquio no; Antonio.")
+    assert correction is not None
+    assert correction.old_term == "Eustaquio"
+    assert correction.new_term == "Antonio"
+
+    food = router.route_person_correction("No, café no; té")
+    assert food is not None
+    assert food.old_term == "café"
+    assert food.new_term == "té"
+
+
+def test_person_correction_rejects_other_shapes_and_repeated_names():
+    router = IntentRouter()
+    for phrase in (
+        "No, Eustaquio no, Antonio",
+        "No, Eustaquio; Antonio",
+        "No, Eustaquio no; Eustaquio",
+        "Hola",
+    ):
+        assert router.route_person_correction(phrase) is None, phrase

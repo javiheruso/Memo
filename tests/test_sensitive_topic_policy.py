@@ -16,11 +16,23 @@ TOPIC = SensitiveTopic(
     triggers=("murió",),
 )
 
+# Fictional/test-only profile configuration at the original
+# tests/test_sensitive_topic_policy.py path. This is not a real profile: it
+# models the fictional Antonio configuration that originally listed "hospital"
+# as a death trigger. Hospital is an illness signal, not a death signal;
+# keeping the two topics separate prevents a hospital mention from requesting
+# "la muerte de Antonio" while explicit death requests keep their protection.
 PERSON_TOPIC = SensitiveTopic(
     topic="la muerte de Antonio",
     handling="Do not initiate; redirect gently if asked.",
-    triggers=("muerte", "fallecimiento", "hospital", "despedida"),
+    triggers=("muerte", "fallecimiento", "despedida"),
 )
+PERSON_ILLNESS_TOPIC = SensitiveTopic(
+    topic="la enfermedad de Antonio",
+    handling="Do not initiate; redirect gently if asked.",
+    triggers=("hospital", "enfermedad", "enfermo", "enferma"),
+)
+PERSON_PROFILE_TOPICS = (PERSON_TOPIC, PERSON_ILLNESS_TOPIC)
 
 
 def test_matches_full_phrase_theme_and_subject_only_cases() -> None:
@@ -93,22 +105,42 @@ def test_answer_leak_detection_respects_the_requested_topic() -> None:
 
 
 def test_generic_sensitive_vocabulary_does_not_request_person_topic() -> None:
-    evaluation = evaluate("Rosa estuvo en el hospital", (PERSON_TOPIC,))
+    evaluation = evaluate("Rosa estuvo en el hospital", PERSON_PROFILE_TOPICS)
 
     assert evaluation.generic_reference is True
     assert evaluation.requested is not None
     assert evaluation.requested.topic == "un tema sensible"
     assert evaluation.requested.topic != "la muerte de Antonio"
-    assert evaluation.blocked == (PERSON_TOPIC,)
+    assert evaluation.blocked == PERSON_PROFILE_TOPICS
 
 
 def test_person_reference_and_explicit_configured_topic_still_request_it() -> None:
     assert (
-        evaluate("Antonio estuvo en el hospital", (PERSON_TOPIC,)).requested
+        evaluate("Antonio estuvo en el hospital", PERSON_PROFILE_TOPICS).requested
+        == PERSON_ILLNESS_TOPIC
+    )
+    assert (
+        evaluate("la muerte de Antonio", PERSON_PROFILE_TOPICS).requested
         == PERSON_TOPIC
     )
-    assert evaluate("la muerte de Antonio", (PERSON_TOPIC,)).requested == PERSON_TOPIC
-    assert evaluate("Antonio murió", (PERSON_TOPIC,)).requested == PERSON_TOPIC
+    assert evaluate("Antonio murió", PERSON_PROFILE_TOPICS).requested == PERSON_TOPIC
+
+
+def test_hospital_mention_never_requests_antonio_death() -> None:
+    """Regression for the original fictional profile trigger collision.
+
+    The exact origin/main test profile at this path listed ``hospital`` as a
+    trigger for ``la muerte de Antonio``. The corrected fictional profile keeps
+    illness and death triggers separate without weakening explicit death
+    protection.
+    """
+    evaluation = evaluate("Antonio estuvo en el hospital", PERSON_PROFILE_TOPICS)
+
+    assert evaluation.requested == PERSON_ILLNESS_TOPIC
+    assert PERSON_TOPIC not in (evaluation.requested,)
+    assert "muerte" not in (evaluation.requested.topic or "").lower()
+    assert matches_topic("Antonio estuvo en el hospital", PERSON_TOPIC) is False
+    assert matches_topic("Antonio murió", PERSON_TOPIC) is True
 
 
 def test_generic_reference_context_never_carries_the_personal_label() -> None:
@@ -124,7 +156,7 @@ def test_generic_reference_context_never_carries_the_personal_label() -> None:
             )
         ],
     )
-    evaluation = evaluate("Rosa estuvo en el hospital", (PERSON_TOPIC,))
+    evaluation = evaluate("Rosa estuvo en el hospital", PERSON_PROFILE_TOPICS)
 
     result = apply_to_context(context, evaluation)
 

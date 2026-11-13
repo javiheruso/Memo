@@ -278,3 +278,299 @@ async def test_voice_flow_shares_relationship_resolution(
     assert second.transcript is None
     assert "Miguel" in second.answer
     assert "marido" in second.answer
+
+
+# --------------------------------------------------------------------------
+# State-gated relative follow-ups ("¿Y su hija/madre?")
+# --------------------------------------------------------------------------
+
+
+async def _seed_relative(
+    db: AsyncSession,
+    *,
+    relationship_type: RelationshipType,
+    status: RelationshipStatus = RelationshipStatus.verified,
+    active_name: str = "Carmen",
+    other_name: str = "María",
+    active_is_person_a: bool = True,
+):
+    persons = PersonRepository(db)
+    active = await persons.create(PersonCreate(first_name=active_name))
+    other = await persons.create(PersonCreate(first_name=other_name))
+    source = await SourceRepository(db).create(
+        SourceCreate(
+            source_type=SourceType.family_member,
+            person_id=active.id,
+            description="Family records",
+        )
+    )
+    person_a, person_b = (
+        (active, other) if active_is_person_a else (other, active)
+    )
+    relationship = await RelationshipRepository(db).create(
+        RelationshipCreate(
+            person_a_id=person_a.id,
+            person_b_id=person_b.id,
+            relationship_type=relationship_type,
+            status=status,
+            source_id=source.id,
+        )
+    )
+    return active, other, relationship, source
+
+
+async def _resolve_active(service: ConversationService, name: str = "Carmen"):
+    result = await service.handle_user_message(f"¿Quién era {name}?")
+    assert result.intent == Intent.person_query
+    return result
+
+
+def _source_keys(result):
+    return {(source.entity_type, str(source.entity_id)) for source in result.sources}
+
+
+async def test_child_relative_follow_up_is_neutral_and_keeps_direction(
+    db_session: AsyncSession,
+) -> None:
+    active, child, relationship, seed_source = await _seed_relative(
+        db_session,
+        relationship_type=RelationshipType.child_of,
+        active_is_person_a=False,
+    )
+    service = _service(db_session)
+    first = await _resolve_active(service, active.first_name)
+
+    daughter = await service.handle_user_message(
+        "¿Y su hija?", conversation_id=first.conversation_id
+    )
+    son = await service.handle_user_message(
+        "¿Y su hijo?", conversation_id=first.conversation_id
+    )
+
+    for result, asked_role, other_role in (
+        (daughter, "hija", "hijo"),
+        (son, "hijo", "hija"),
+    ):
+        assert result.intent == Intent.person_query
+        assert result.answer.startswith(
+            "Tengo guardada a María como descendiente de Carmen"
+        )
+        assert f"no puedo confirmar que sea su {asked_role}" in result.answer
+        assert other_role not in result.answer
+        keys = _source_keys(result)
+        assert ("person", str(active.id)) in keys
+        assert ("person", str(child.id)) in keys
+        assert ("relationship", str(relationship.id)) in keys
+        assert ("source", str(seed_source.id)) in keys
+
+
+async def test_child_relative_follow_up_does_not_confirm_asked_daughter_role(
+    db_session: AsyncSession,
+) -> None:
+    """A verified child_of row is proof of a descendant, not of a daughter.
+
+    The user asked for ``hija`` but the stored relation carries no sex or role
+    evidence, so the answer must state that limit instead of affirming the
+    gendered role. Direction and provenance stay intact.
+    """
+    active, child, relationship, seed_source = await _seed_relative(
+        db_session,
+        relationship_type=RelationshipType.child_of,
+        active_is_person_a=False,
+    )
+    service = _service(db_session)
+    first = await _resolve_active(service, active.first_name)
+
+    result = await service.handle_user_message(
+        "¿Y su hija?", conversation_id=first.conversation_id
+    )
+
+    assert "descendiente de Carmen" in result.answer
+    assert "no puedo confirmar que sea su hija" in result.answer
+    assert "es hija" not in result.answer.lower()
+    assert "es hijo" not in result.answer.lower()
+    assert "hija de Carmen" not in result.answer.lower()
+    keys = _source_keys(result)
+    assert ("person", str(active.id)) in keys
+    assert ("person", str(child.id)) in keys
+    assert ("relationship", str(relationship.id)) in keys
+    assert ("source", str(seed_source.id)) in keys
+
+
+async def test_parent_relative_follow_up_is_neutral_and_not_reversed(
+    db_session: AsyncSession,
+) -> None:
+    active, parent, relationship, _ = await _seed_relative(
+        db_session,
+        relationship_type=RelationshipType.child_of,
+        active_is_person_a=True,
+    )
+    service = _service(db_session)
+    first = await _resolve_active(service, active.first_name)
+
+    mother = await service.handle_user_message(
+        "¿Y su madre?", conversation_id=first.conversation_id
+    )
+    father = await service.handle_user_message(
+        "¿Y su padre?", conversation_id=first.conversation_id
+    )
+    # The stored row says Carmen is the child, not the parent, so a daughter
+    # question must not turn the parent into a daughter.
+    daughter = await service.handle_user_message(
+        "¿Y su hija?", conversation_id=first.conversation_id
+    )
+
+    for result, asked_role, other_role in (
+        (mother, "madre", "padre"),
+        (father, "padre", "madre"),
+    ):
+        assert result.intent == Intent.person_query
+        assert result.answer.startswith(
+            "Tengo guardada a María como progenitor de Carmen"
+        )
+        assert f"no puedo confirmar que sea su {asked_role}" in result.answer
+        assert other_role not in result.answer
+        assert ("relationship", str(relationship.id)) in _source_keys(result)
+
+    assert daughter.answer == "No tengo guardado quién es su hija."
+    assert "María" not in daughter.answer
+
+
+async def test_relative_follow_up_requires_previous_resolved_person(
+    db_session: AsyncSession,
+) -> None:
+    await _seed_relative(
+        db_session,
+        relationship_type=RelationshipType.child_of,
+        active_is_person_a=False,
+    )
+    service = _service(db_session)
+
+    result = await service.handle_user_message("¿Y su hija?")
+
+    assert result.intent == Intent.general_chat
+    assert result.sources == []
+    assert "María" not in result.answer
+
+
+async def test_relative_follow_up_does_not_carry_across_a_stale_turn(
+    db_session: AsyncSession,
+) -> None:
+    await _seed_relative(
+        db_session,
+        relationship_type=RelationshipType.child_of,
+        active_is_person_a=False,
+    )
+    service = _service(db_session)
+    first = await _resolve_active(service)
+
+    stale = await service.handle_user_message(
+        "Hoy hace buen día.", conversation_id=first.conversation_id
+    )
+    result = await service.handle_user_message(
+        "¿Y su hija?", conversation_id=stale.conversation_id
+    )
+
+    assert result.intent == Intent.general_chat
+    assert result.sources == []
+    assert "María" not in result.answer
+
+
+async def test_relative_follow_up_does_not_collapse_multiple_people(
+    db_session: AsyncSession,
+) -> None:
+    active, child, first_relationship, _ = await _seed_relative(
+        db_session,
+        relationship_type=RelationshipType.child_of,
+        active_is_person_a=False,
+    )
+    second_child = await PersonRepository(db_session).create(
+        PersonCreate(first_name="Pedro")
+    )
+    second_relationship = await RelationshipRepository(db_session).create(
+        RelationshipCreate(
+            person_a_id=second_child.id,
+            person_b_id=active.id,
+            relationship_type=RelationshipType.child_of,
+            status=RelationshipStatus.verified,
+        )
+    )
+    service = _service(db_session)
+    first = await _resolve_active(service)
+
+    result = await service.handle_user_message(
+        "¿Y su hija?", conversation_id=first.conversation_id
+    )
+
+    assert result.intent == Intent.person_query
+    assert "María" in result.answer
+    assert "Pedro" in result.answer
+    assert "No sé cuál es" in result.answer
+    keys = _source_keys(result)
+    assert ("relationship", str(first_relationship.id)) in keys
+    assert ("relationship", str(second_relationship.id)) in keys
+
+
+async def test_relative_follow_up_reports_honest_absence(
+    db_session: AsyncSession,
+) -> None:
+    active, _, _, _ = await _seed_relative(
+        db_session,
+        relationship_type=RelationshipType.friend_of,
+        other_name="Miguel",
+    )
+    service = _service(db_session)
+    first = await _resolve_active(service, active.first_name)
+
+    result = await service.handle_user_message(
+        "¿Y su madre?", conversation_id=first.conversation_id
+    )
+
+    assert result.answer == "No tengo guardado quién es su madre."
+    assert [(source.entity_type, source.usage_type) for source in result.sources] == [
+        ("person", "subject")
+    ]
+
+
+async def test_relative_follow_up_withholds_pending_relation(
+    db_session: AsyncSession,
+) -> None:
+    active, child, _, _ = await _seed_relative(
+        db_session,
+        relationship_type=RelationshipType.child_of,
+        status=RelationshipStatus.pending,
+        active_is_person_a=False,
+    )
+    service = _service(db_session)
+    first = await _resolve_active(service)
+
+    result = await service.handle_user_message(
+        "¿Y su hija?", conversation_id=first.conversation_id
+    )
+
+    assert result.answer == "No tengo guardado quién es su hija."
+    assert child.display_name not in result.answer
+    assert [(source.entity_type, source.usage_type) for source in result.sources] == [
+        ("person", "subject")
+    ]
+
+
+async def test_relative_follow_up_marks_probable_relation_as_unconfirmed(
+    db_session: AsyncSession,
+) -> None:
+    await _seed_relative(
+        db_session,
+        relationship_type=RelationshipType.child_of,
+        status=RelationshipStatus.probable,
+        active_is_person_a=False,
+    )
+    service = _service(db_session)
+    first = await _resolve_active(service)
+
+    result = await service.handle_user_message(
+        "¿Y su hija?", conversation_id=first.conversation_id
+    )
+
+    assert "María" in result.answer
+    assert "descendiente de Carmen" in result.answer
+    assert "no está confirmado" in result.answer
