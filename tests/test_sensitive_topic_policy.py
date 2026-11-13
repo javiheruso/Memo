@@ -16,9 +16,12 @@ TOPIC = SensitiveTopic(
     triggers=("murió",),
 )
 
-# Fictional/test profile configuration. Hospital is an illness signal, not a
-# death signal; keeping them separate prevents a generic hospital mention from
-# requesting "la muerte de Antonio".
+# Fictional/test-only profile configuration at the original
+# tests/test_sensitive_topic_policy.py path. This is not a real profile: it
+# models the fictional Antonio configuration that originally listed "hospital"
+# as a death trigger. Hospital is an illness signal, not a death signal;
+# keeping the two topics separate prevents a hospital mention from requesting
+# "la muerte de Antonio" while explicit death requests keep their protection.
 PERSON_TOPIC = SensitiveTopic(
     topic="la muerte de Antonio",
     handling="Do not initiate; redirect gently if asked.",
@@ -121,6 +124,23 @@ def test_person_reference_and_explicit_configured_topic_still_request_it() -> No
         == PERSON_TOPIC
     )
     assert evaluate("Antonio murió", PERSON_PROFILE_TOPICS).requested == PERSON_TOPIC
+
+
+def test_hospital_mention_never_requests_antonio_death() -> None:
+    """Regression for the original fictional profile trigger collision.
+
+    The exact origin/main test profile at this path listed ``hospital`` as a
+    trigger for ``la muerte de Antonio``. The corrected fictional profile keeps
+    illness and death triggers separate without weakening explicit death
+    protection.
+    """
+    evaluation = evaluate("Antonio estuvo en el hospital", PERSON_PROFILE_TOPICS)
+
+    assert evaluation.requested == PERSON_ILLNESS_TOPIC
+    assert PERSON_TOPIC not in (evaluation.requested,)
+    assert "muerte" not in (evaluation.requested.topic or "").lower()
+    assert matches_topic("Antonio estuvo en el hospital", PERSON_TOPIC) is False
+    assert matches_topic("Antonio murió", PERSON_TOPIC) is True
 
 
 def test_generic_reference_context_never_carries_the_personal_label() -> None:

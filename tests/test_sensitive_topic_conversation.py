@@ -17,6 +17,7 @@ from app.schemas.profile import ConversationProfileCreate, SensitiveTopicCreate
 from app.schemas.source import SourceCreate
 from app.services.conversation import ConversationService
 from tests.fixtures.universe import SeedUniverse
+from tests.test_sensitive_topic_policy import PERSON_PROFILE_TOPICS
 
 
 async def _seed_family_memories(session: AsyncSession):
@@ -166,6 +167,10 @@ async def test_service_suppresses_responder_that_initiates_blocked_topic(
 async def _seed_fictional_health_profile(
     session: AsyncSession, seed: SeedUniverse
 ) -> None:
+    # Use the same fictional/test-only profile configuration as the policy
+    # regression (the original profile path), not a second hand-written copy.
+    # This exercises the real profile repository and conversation path while
+    # reviewing the fictional config that originally mapped hospital to death.
     await ConversationProfileRepository(session).create(
         ConversationProfileCreate(
             person_id=seed.person_ids["carmen"],
@@ -173,15 +178,11 @@ async def _seed_fictional_health_profile(
             positive_topics=["la playa"],
             sensitive_topics=[
                 SensitiveTopicCreate(
-                    topic="la muerte de Antonio",
-                    handling="Do not initiate; redirect gently if asked.",
-                    triggers=["murió", "muerte", "fallecimiento"],
-                ),
-                SensitiveTopicCreate(
-                    topic="la enfermedad de Antonio",
-                    handling="Do not initiate; redirect gently if asked.",
-                    triggers=["hospital", "enfermedad", "enfermo", "enferma"],
-                ),
+                    topic=topic.topic,
+                    handling=topic.handling,
+                    triggers=list(topic.triggers),
+                )
+                for topic in PERSON_PROFILE_TOPICS
             ],
             is_fictional=True,
             is_active=True,
