@@ -67,6 +67,13 @@ _RELATIVE_PLURAL_LABELS: dict[RelationshipType, str] = {
     RelationshipType.parent_of: "descendientes de",
     RelationshipType.child_of: "progenitores de",
 }
+# A directed parent/child row does not encode whether the other person is the
+# daughter/son or mother/father the follow-up asked about. State that limit
+# explicitly instead of letting a verified "descendiente" answer affirm the
+# gendered role in the question.
+_RELATIVE_ROLE_UNCERTAINTY = (
+    "el parentesco guardado no especifica el sexo ni el rol"
+)
 
 _GENERAL_REPLY = "Estoy aquí para conversar. Cuéntame de qué te apetece hablar."
 _UNKNOWN_REPLY = "No he entendido bien lo que has dicho. ¿Puedes repetirlo?"
@@ -596,7 +603,7 @@ class DeterministicResponder(Responder):
         if confirmed:
             text = (
                 f"Tengo guardada a {item.other_display_name} como {label} "
-                f"{active}{suffix}."
+                f"{active}{suffix}, pero {_RELATIVE_ROLE_UNCERTAINTY}."
             )
         else:
             text = (

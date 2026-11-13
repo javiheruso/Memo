@@ -352,6 +352,9 @@ async def test_child_relative_follow_up_is_neutral_and_keeps_direction(
         assert result.answer.startswith(
             "Tengo guardada a María como descendiente de Carmen"
         )
+        assert "el parentesco guardado no especifica el sexo ni el rol" in (
+            result.answer
+        )
         assert "hija" not in result.answer
         assert "hijo" not in result.answer
         keys = _source_keys(result)
@@ -359,6 +362,39 @@ async def test_child_relative_follow_up_is_neutral_and_keeps_direction(
         assert ("person", str(child.id)) in keys
         assert ("relationship", str(relationship.id)) in keys
         assert ("source", str(seed_source.id)) in keys
+
+
+async def test_child_relative_follow_up_does_not_confirm_asked_daughter_role(
+    db_session: AsyncSession,
+) -> None:
+    """A verified child_of row is proof of a descendant, not of a daughter.
+
+    The user asked for ``hija`` but the stored relation carries no sex or role
+    evidence, so the answer must state that limit instead of affirming the
+    gendered role. Direction and provenance stay intact.
+    """
+    active, child, relationship, seed_source = await _seed_relative(
+        db_session,
+        relationship_type=RelationshipType.child_of,
+        active_is_person_a=False,
+    )
+    service = _service(db_session)
+    first = await _resolve_active(service, active.first_name)
+
+    result = await service.handle_user_message(
+        "¿Y su hija?", conversation_id=first.conversation_id
+    )
+
+    assert "descendiente de Carmen" in result.answer
+    assert "el parentesco guardado no especifica el sexo ni el rol" in result.answer
+    assert "es hija" not in result.answer.lower()
+    assert "es hijo" not in result.answer.lower()
+    assert "hija de Carmen" not in result.answer.lower()
+    keys = _source_keys(result)
+    assert ("person", str(active.id)) in keys
+    assert ("person", str(child.id)) in keys
+    assert ("relationship", str(relationship.id)) in keys
+    assert ("source", str(seed_source.id)) in keys
 
 
 async def test_parent_relative_follow_up_is_neutral_and_not_reversed(
