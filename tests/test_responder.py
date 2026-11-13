@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+from app.domain.conversation_context import ConversationStyle, ConversationTurn
 from app.domain.enums import (
     EpistemicKind,
     EventStatus,
@@ -510,3 +511,83 @@ async def test_orientation_naive_clock_is_treated_as_utc():
     assert "jueves" in response.text
     assert "1 de enero de 2026" in response.text
     assert "09:00" in response.text
+
+
+@pytest.mark.asyncio
+async def test_generic_sensitive_reference_gets_empathy_without_topic_redirect():
+    context = AnswerContext(
+        intent=Intent.general_chat,
+        sensitive_topic_requested="un tema sensible",
+        sensitive_topic_generic=True,
+        sensitive_redirect_topic="la costura",
+    )
+    response = await responder.respond(
+        context, message="Mi hermana Amparo se murió hace dos años."
+    )
+
+    assert response.text == (
+        "Lo siento. No quiero inventar detalles sobre eso; si te apetece, "
+        "cuéntame cómo te sientes."
+    )
+    assert "costura" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_generic_sensitive_question_does_not_redirect_to_a_profile_topic():
+    context = AnswerContext(
+        intent=Intent.general_chat,
+        sensitive_topic_requested="un tema sensible",
+        sensitive_topic_generic=True,
+        sensitive_redirect_topic="la costura",
+    )
+    response = await responder.respond(context, message="¿Te acuerdas del hospital?")
+
+    assert response.text == (
+        "No quiero inventar detalles sobre eso. Si te apetece, cuéntame cómo "
+        "te sientes."
+    )
+    assert "costura" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_general_chat_discusses_the_topic_the_person_chose():
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    style = ConversationStyle(
+        positive_topics=("la costura",),
+        offer_positive_topics=False,
+    )
+    response = await responder.respond(
+        context, message="Prefiero hablar de la costura.", style=style
+    )
+
+    assert response.text == "¿Qué es lo que más te gusta de la costura?"
+
+
+@pytest.mark.asyncio
+async def test_general_chat_refuses_to_invent_a_personal_memory():
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    response = await responder.respond(
+        context, message="Invéntate un recuerdo mío de verdad."
+    )
+
+    assert response.text == (
+        "No puedo inventar recuerdos tuyos. Prefiero no inventar detalles."
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_topic_suggestion_does_not_repeat_the_previous_one():
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    history = (
+        ConversationTurn(
+            role="assistant",
+            text="Podemos hablar del tiempo, de la comida o de lo que tú prefieras.",
+        ),
+    )
+    response = await responder.respond(
+        context, message="No se me ocurre nada; propón tú un tema.", history=history
+    )
+
+    assert response.text == (
+        "¿Y si hablamos de música o de alguna película que te guste?"
+    )

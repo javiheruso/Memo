@@ -11,7 +11,8 @@ from app.domain.enums import (
     RelationshipStatus,
     RelationshipType,
 )
-from app.models import Event, Fact, Person, Relationship
+from app.domain.provisional_referent import ProvisionalReferent
+from app.models import Event, Fact, Memory, Person, Relationship
 from app.policies.trust import (
     epistemic_kind_for_fact,
     epistemic_kind_for_relationship,
@@ -102,6 +103,7 @@ class AnswerContext:
     term: str | None = None
     resolution: ResolutionKind | None = None
     follow_up_topic: str | None = None
+    accepted_offer: bool = False
     relationship_role: str | None = None
     candidates: list[PersonCandidate] = field(default_factory=list)
     person: PersonCandidate | None = None
@@ -113,8 +115,16 @@ class AnswerContext:
     media: list[MediaItem] = field(default_factory=list)
     policies: list[str] = field(default_factory=list)
     sensitive_topic_requested: str | None = None
+    # True when only generic sensitive vocabulary matched a person-specific
+    # configured topic. The requested label is then a neutral stand-in, not the
+    # configured personal topic.
+    sensitive_topic_generic: bool = False
     sensitive_redirect_topic: str | None = None
     blocked_sensitive_topics: tuple[str, ...] = ()
+    # A user-authored, unverified conversational referent. It is deliberately
+    # not an entity item: it has no id, never appears in ``allowed_sources`` and
+    # can never become a fact, relationship, memory, claim, source or gap.
+    provisional_referent: ProvisionalReferent | None = None
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -279,6 +289,43 @@ class ContextBuilder:
             relationship_role=role,
         )
 
+    def build_from_memories(
+        self,
+        memories: list[Memory],
+        *,
+        term: str | None = None,
+        intent: Intent = Intent.memory_query,
+        filtered_count: int = 0,
+    ) -> AnswerContext:
+        """Wrap already-safe memory rows as ``memory`` epistemic items.
+
+        Used by both semantic recall and verified continuation from a previous
+        assistant offer. Sensitivity filtering is the caller's responsibility;
+        ``filtered_count`` only records how many rows were withheld.
+        """
+        items = [
+            MemoryItem(
+                entity_id=memory.id,
+                title=memory.title,
+                narrative=memory.narrative,
+                memory_status=memory.memory_status,
+                epistemic=EpistemicKind.memory,
+            )
+            for memory in memories
+        ]
+        policies: list[str] = []
+        if filtered_count:
+            policies.append(
+                "sensitive_content_filtered: "
+                f"{filtered_count} semantic memories excluded"
+            )
+        return AnswerContext(
+            intent=intent,
+            term=term,
+            memories=items,
+            policies=policies,
+        )
+
     def build_from_semantic_memories(
         self,
         result: SemanticSearchResult,
@@ -293,27 +340,11 @@ class ContextBuilder:
         ever presented as a verified fact. A note is added to ``policies`` when
         hits were excluded.
         """
-        memories = [
-            MemoryItem(
-                entity_id=hit.memory.id,
-                title=hit.memory.title,
-                narrative=hit.memory.narrative,
-                memory_status=hit.memory.memory_status,
-                epistemic=EpistemicKind.memory,
-            )
-            for hit in result.hits
-        ]
-        policies: list[str] = []
-        if result.filtered_count:
-            policies.append(
-                "sensitive_content_filtered: "
-                f"{result.filtered_count} semantic memories excluded"
-            )
-        return AnswerContext(
-            intent=intent,
+        return self.build_from_memories(
+            [hit.memory for hit in result.hits],
             term=term,
-            memories=memories,
-            policies=policies,
+            intent=intent,
+            filtered_count=result.filtered_count,
         )
 
     @staticmethod

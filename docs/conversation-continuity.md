@@ -68,6 +68,53 @@ message. The check:
 Rejected suggestions produce no sources and no knowledge gap. The rejection log
 contains no message text, term, or entity id.
 
+## Phase 2 provisional conversational referent
+
+A second, deliberately narrow continuity mechanism projects at most one
+provisional referent from the user-authored turns already present in the
+bounded conversation window (plus the current user message). It lives in
+`app/domain/provisional_referent.py` as a pure projection: no ORM object,
+query, cache, table, migration, dependency or dependency on assistant text.
+
+The projection carries:
+
+- the surface name or expression the person used (`María`, `mi vecina`);
+- the conversational description or relationship they attached (`vecina`);
+- the unverified user-authored origin sentence;
+- optionally, separate fields for a verified registered identity supplied only
+  by an existing resolution procedure.
+
+The projection never infers a registered identity from a matching name. A
+referent is not an entity: it has no database id, is not an `AnswerContext`
+item, never appears in `allowed_sources` or `response_sources`, and can never
+become a fact, relationship, memory, claim, source or knowledge gap. The claim
+pipeline is unchanged and remains candidate-only.
+
+Clear/block rules: a later correction supersedes the earlier description; a
+clear topic shift, an explicit lookup of a different person, a sensitive turn,
+an unresolved ambiguity, or the origin leaving the window clears the carry.
+Assistant turns can never establish or update a referent.
+
+For conversational (`general_chat`/`unknown`) turns only, the referent is
+rendered for the model in a dedicated `PROVISIONAL CONVERSATION REFERENT
+(unverified, conversation-only; NOT stored data)` block, separate from
+CONTEXT, untrusted history and allowed source ids. The block instructs the
+model not to look it up or infer any stored fact, relationship, identity,
+source, place, age or event, and never to cite it.
+
+When an explicit lookup names the same surface as a provisional referent, and
+the existing resolver would select one registered person, the service asks one
+concise identity clarification instead of silently selecting that person. The
+clarification has no retrieval answer, sources or knowledge gap. An unknown
+name keeps its existing not-found/gap behavior, and an ambiguous name keeps the
+existing ambiguity behavior.
+
+Limits: this is not general semantic reference resolution, not a memory store,
+and not a global LLM safety mechanism. It reduces a bounded conflation failure;
+it does not make general chat factually safe. The real-Qwen evaluation still
+observed personal general-chat inventions and repetitions, reported separately
+as limitations rather than fixed in this phase.
+
 ## Contract changes
 
 | Surface | Before | After |

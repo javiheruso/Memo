@@ -112,6 +112,48 @@ async def test_semantic_retrieval_uses_pgvector_on_postgres(
 
 
 @_NEEDS_POSTGRES
+async def test_pgvector_semantic_search_filters_below_relevance_floor(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    """The pgvector path applies the same relevance floor as SQLite.
+
+    ``similarity_search`` returns ``1 / (1 + L2)``; for unit vectors an
+    unrelated strong-token overlap (cosine 0.15) maps below the calibrated
+    floor, while a topical match (cosine 0.45) clears it.
+    """
+    embedder = DeterministicEmbedder()
+    text = (
+        "Bailes de los sábados Carmen y Antonio bailaban juntos en el salón "
+        "del pueblo los sábados."
+    )
+    memory = Memory(
+        title="Bailes de los sábados",
+        narrative=(
+            "Carmen y Antonio bailaban juntos en el salón del pueblo "
+            "los sábados."
+        ),
+        memory_status=MemoryStatus.recurring,
+        sensitivity_level=SensitivityLevel.low,
+        source_id=seed.source_ids["shared_by_carmen"],
+        embedding=await embedder.embed(text),
+    )
+    db_session.add(memory)
+    await db_session.commit()
+
+    retriever = SemanticRetriever(
+        embedder=embedder, memory_repo=MemoryRepository(db_session)
+    )
+
+    weak = await retriever.search("¿Recuerdas aquella boda en el pueblo?")
+    assert weak.hits == []
+
+    strong = await retriever.search(
+        "¿Recuerdas cuando bailaban en el salón del pueblo?"
+    )
+    assert [hit.memory.id for hit in strong.hits] == [memory.id]
+
+
+@_NEEDS_POSTGRES
 async def test_pgvector_filters_sensitivity_before_the_limit(
     db_session: AsyncSession, seed: SeedUniverse
 ) -> None:

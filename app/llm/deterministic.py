@@ -13,6 +13,7 @@ Events are phrased by their own status: a planned or confirmed event is never
 presented as already completed.
 """
 
+import difflib
 import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -26,6 +27,10 @@ from app.domain.enums import (
     SourceType,
 )
 from app.llm.base import Responder, Response
+from app.policies.positive_topics import (
+    is_open_topic_request,
+    mentioned_topics,
+)
 from app.policies.trust import (
     is_answerable_fact_status,
     is_answerable_relationship_status,
@@ -84,6 +89,56 @@ _PERSONAL_COMMENT = re.compile(
     r"\b(?:me|mi|mis|estoy|tengo|quiero|siento|creo|necesito|prefiero|he)\b",
     re.IGNORECASE,
 )
+_TOPIC_REJECTION = re.compile(
+    r"\b(?:no\s+me\s+(?:apetece|gusta|interesa)|prefiero\s+no|"
+    r"no\s+quiero|dejemos|cambiemos\s+de\s+tema|otro\s+tema)\b",
+    re.IGNORECASE,
+)
+_INVENT_MEMORY_REQUEST = re.compile(
+    r"\b(?:inv[eé]ntate|inventa(?:te|r|s|e)?|invento)\b[^.!?]*\brecuerd",
+    re.IGNORECASE,
+)
+_DO_YOU_KNOW = re.compile(
+    r"^\s*[¿¡]?\s*(?:t[uú]\s+)?(?:sabes|sabe)\s+"
+    r"(?:si|qu[eé]|qui[eé]n|cu[aá]ndo|d[oó]nde|c[oó]mo)\b",
+    re.IGNORECASE,
+)
+_TOPIC_SUGGESTIONS = (
+    "Podemos hablar del tiempo, de la comida o de lo que tú prefieras.",
+    "¿Y si hablamos de música o de alguna película que te guste?",
+    "Podemos hablar de recetas, de viajes o de lo que te apetezca.",
+)
+
+
+def is_farewell_message(text: str) -> bool:
+    """True for a short spoken farewell."""
+    return _FAREWELL.search(text) is not None
+
+
+def is_invent_memory_request(text: str) -> bool:
+    """True when the person explicitly asks for an invented memory."""
+    return _INVENT_MEMORY_REQUEST.search(text) is not None
+
+
+def is_do_you_know_question(text: str) -> bool:
+    """True when the person asks whether the assistant knows a personal fact."""
+    return _DO_YOU_KNOW.search(text) is not None
+
+
+def _topic_suggestion(history: Sequence[ConversationTurn]) -> str:
+    """Pick a neutral topic suggestion the assistant has not already used."""
+    previous = [turn.text for turn in history if turn.role == "assistant"]
+    for candidate in _TOPIC_SUGGESTIONS:
+        if not any(
+            difflib.SequenceMatcher(
+                None, candidate.lower(), text.lower()
+            ).ratio()
+            >= 0.9
+            for text in previous
+        ):
+            return candidate
+    return _TOPIC_SUGGESTIONS[0]
+
 
 _SOURCE_LABELS: dict[str, str] = {
     SourceType.user.value: "lo que me contó la propia persona",
@@ -131,7 +186,7 @@ class DeterministicResponder(Responder):
         style: ConversationStyle | None = None,
     ) -> Response:
         if context.sensitive_topic_requested is not None:
-            return self._sensitive_topic_response(context)
+            return self._sensitive_topic_response(context, message=message)
         if context.intent == Intent.general_chat:
             return self._respond_general_chat(
                 message=message, history=history, style=style
@@ -169,14 +224,35 @@ class DeterministicResponder(Responder):
         text = (message or "").strip()
         if not text:
             return Response(text=_GENERAL_REPLY)
-        if _AFFIRMATION.search(text):
-            return Response(text=_AFFIRMATION_REPLY)
-        if _NEGATION.search(text):
-            return Response(text=_NEGATION_REPLY)
         if _THANKS.search(text):
             return Response(text=_THANKS_REPLY)
         if _FAREWELL.search(text):
             return Response(text=_FAREWELL_REPLY)
+        if _INVENT_MEMORY_REQUEST.search(text):
+            return Response(
+                text=(
+                    "No puedo inventar recuerdos tuyos. "
+                    "Prefiero no inventar detalles."
+                )
+            )
+        if style is not None and style.positive_topics and not _TOPIC_REJECTION.search(
+            text
+        ):
+            chosen = mentioned_topics(text, style.positive_topics)
+            if chosen:
+                return Response(
+                    text=f"¿Qué es lo que más te gusta de {chosen[0]}?"
+                )
+        if is_open_topic_request(text):
+            return Response(text=_topic_suggestion(history))
+        if _DO_YOU_KNOW.search(text):
+            return Response(text="No, no tengo información sobre eso.")
+        if _TOPIC_REJECTION.search(text):
+            return Response(text="Entiendo. Hablamos de otra cosa.")
+        if _AFFIRMATION.search(text):
+            return Response(text=_AFFIRMATION_REPLY)
+        if _NEGATION.search(text):
+            return Response(text=_NEGATION_REPLY)
         if _PERSONAL_COMMENT.search(text):
             return Response(text=_PERSONAL_COMMENT_REPLY)
         if history:
@@ -184,14 +260,32 @@ class DeterministicResponder(Responder):
         return Response(text=_GENERAL_REPLY)
 
     @staticmethod
-    def _sensitive_topic_response(context: AnswerContext) -> Response:
+    def _sensitive_topic_response(
+        context: AnswerContext, *, message: str | None = None
+    ) -> Response:
         """Careful acknowledgement that never invents details.
 
         The reply names the topic only because the person raised it, states
         that Memo will not invent details, and offers a safer configured
         subject when one exists. It never cites a memory or a fact, so an
         explicit question cannot pull high-sensitivity details into the answer.
+        A generic sensitive reference is acknowledged with empathy instead of
+        the configured personal label or a profile-topic redirect.
         """
+        if context.sensitive_topic_generic:
+            if message and ("?" in message or "¿" in message):
+                return Response(
+                    text=(
+                        "No quiero inventar detalles sobre eso. Si te apetece, "
+                        "cuéntame cómo te sientes."
+                    )
+                )
+            return Response(
+                text=(
+                    "Lo siento. No quiero inventar detalles sobre eso; si te "
+                    "apetece, cuéntame cómo te sientes."
+                )
+            )
         topic = context.sensitive_topic_requested
         redirect = context.sensitive_redirect_topic
         if redirect:
@@ -600,10 +694,13 @@ class DeterministicResponder(Responder):
         if not context.memories:
             return Response(text="No tengo guardado ese recuerdo todavía.")
         lines = " ".join(
-            f"Recuerdo guardado: '{item.narrative}'" for item in context.memories
+            f"'{item.narrative}'" for item in context.memories
         )
         return Response(
-            text=f"Tengo un recuerdo guardado que encaja con eso: {lines}",
+            text=(
+                "No sé si te refieres a esto, pero tengo guardado este "
+                f"recuerdo: {lines}"
+            ),
             sources=[
                 ResponseSourceRef(
                     "memory", item.entity_id, item.epistemic.value

@@ -342,7 +342,7 @@ async def test_valid_verified_person_suggestion_is_used(
     payload = _suggestion(intent="person_query", term="Carmen")
     async with _client_for(payload, capture=capture) as client:
         result = await _service(db_session, _interpreter(client)).handle_user_message(
-            "Ayer estuve pensando en Carmen"
+            "dime sobre la vida de Carmen"
         )
 
     assert result.intent == Intent.person_query
@@ -365,7 +365,7 @@ async def test_valid_verified_fact_suggestion_retrieves_only_its_topic(
     )
     async with _client_for(payload) as client:
         result = await _service(db_session, _interpreter(client)).handle_user_message(
-            "Ayer estuve recordando la mudanza de Carmen"
+            "dime sobre la mudanza de Carmen"
         )
 
     assert result.intent == Intent.fact_query
@@ -384,7 +384,7 @@ async def test_verified_fact_suggestion_without_data_keeps_no_gap(
     )
     async with _client_for(payload) as client:
         result = await _service(db_session, _interpreter(client)).handle_user_message(
-            "Ayer estuve recordando la infancia de Carmen"
+            "dime sobre la infancia de Carmen"
         )
 
     assert result.intent == Intent.fact_query
@@ -400,7 +400,7 @@ async def test_invalid_schema_falls_back_to_deterministic_behavior(
     invalid["answer"] = "Carmen nació en 1940."
     async with _client_for(json.dumps(invalid)) as client:
         result = await _service(db_session, _interpreter(client)).handle_user_message(
-            "Ayer estuve pensando en Carmen"
+            "dime sobre la vida de Carmen"
         )
 
     assert result.intent == Intent.general_chat
@@ -415,7 +415,7 @@ async def test_unknown_name_falls_back_without_source_or_gap(
     payload = _suggestion(intent="person_query", term="Eustaquio")
     async with _client_for(payload) as client:
         result = await _service(db_session, _interpreter(client)).handle_user_message(
-            "Ayer estuve pensando en Eustaquio"
+            "dime sobre la vida de Eustaquio"
         )
 
     assert result.intent == Intent.general_chat
@@ -433,7 +433,7 @@ async def test_ambiguous_name_is_surfaced_never_selected(
     payload = _suggestion(intent="person_query", term="Paco")
     async with _client_for(payload) as client:
         result = await _service(db_session, _interpreter(client)).handle_user_message(
-            "Ayer estuve pensando en Paco"
+            "dime sobre la vida de Paco"
         )
 
     assert result.intent == Intent.person_query
@@ -527,10 +527,10 @@ async def test_interpreter_runs_at_most_once_per_unresolved_turn(
     payload = _suggestion(intent="person_query", term="Carmen")
     async with _client_for(payload, capture=capture) as client:
         service = _service(db_session, _interpreter(client))
-        first = await service.handle_user_message("Ayer estuve pensando en Carmen")
+        first = await service.handle_user_message("dime sobre la vida de Carmen")
         assert len(capture) == 1
         await service.handle_user_message(
-            "Hoy estuve pensando en Carmen",
+            "dime sobre la vida de Carmen",
             conversation_id=first.conversation_id,
         )
 
@@ -547,7 +547,7 @@ async def test_history_is_current_conversation_only_across_turns(
         other = await service.handle_user_message("¿Quién era Luisa?")
         current = await service.handle_user_message("¿Quién era Carmen?")
         await service.handle_user_message(
-            "Ayer estuve pensando en Carmen",
+            "dime sobre la vida de Carmen",
             conversation_id=current.conversation_id,
         )
 
@@ -575,7 +575,7 @@ async def test_history_is_bounded_and_refilters_sensitive_turns(
             "Carmen murió ayer", conversation_id=first.conversation_id
         )
         await service.handle_user_message(
-            "Ayer estuve pensando en la familia",
+            "dime sobre la historia de Carmen",
             conversation_id=first.conversation_id,
         )
 
@@ -596,7 +596,7 @@ async def test_timeout_and_http_failure_fall_back_cleanly(
         error=httpx.TimeoutException("timed out"), capture=capture
     ) as client:
         result = await _service(db_session, _interpreter(client)).handle_user_message(
-            "Ayer estuve pensando en Carmen"
+            "dime sobre la vida de Carmen"
         )
     assert len(capture) == 1
     assert result.intent == Intent.general_chat
@@ -605,7 +605,7 @@ async def test_timeout_and_http_failure_fall_back_cleanly(
     capture.clear()
     async with _client_for("ignored", status=500, capture=capture) as client:
         result = await _service(db_session, _interpreter(client)).handle_user_message(
-            "Hoy estuve pensando en Carmen"
+            "dime sobre la vida de Carmen"
         )
     assert len(capture) == 1
     assert result.intent == Intent.general_chat
@@ -625,7 +625,7 @@ async def test_interpreter_failure_logs_no_conversation_or_model_text(
     ) as client:
         result = await _service(
             db_session, _interpreter(client, api_key="super-secret-key")
-        ).handle_user_message(f"Ayer estuve pensando en Carmen {marker}")
+        ).handle_user_message(f"dime sobre la vida de Carmen {marker}")
 
     log = caplog.text
     assert result.intent == Intent.general_chat

@@ -1,4 +1,5 @@
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -22,6 +23,11 @@ from app.domain.conversation_context import (
 )
 from app.domain.conversation_window import ConversationWindow
 from app.domain.enums import Intent
+from app.domain.provisional_referent import (
+    ProvisionalReferent,
+    project_provisional_referent,
+    surfaces_match,
+)
 from app.embeddings.base import Embedder
 from app.llm.base import Responder, Response
 from app.llm.interpreter import (
@@ -33,6 +39,11 @@ from app.llm.interpreter import (
     bound_interpreter_history,
 )
 from app.models import ConversationProfile, KnowledgeGap, Person
+from app.policies.positive_topics import (
+    context_topic_grounding,
+    may_offer_positive_topics,
+    positive_topic_violation,
+)
 from app.policies.sensitive_topics import (
     SPONTANEOUS_SUPPRESSION_REPLY,
     SensitiveTopic,
@@ -41,6 +52,10 @@ from app.policies.sensitive_topics import (
     apply_to_context,
     evaluate,
     matches_topic,
+)
+from app.policies.trust import (
+    filter_sensitive_memories,
+    is_answerable_fact_status,
 )
 from app.repositories.conversation import (
     ConversationAccessDenied,
@@ -66,7 +81,7 @@ from app.retrieval.interpreter_verifier import (
 )
 from app.retrieval.relationship_roles import RelationshipRoleQuery
 from app.retrieval.semantic_retriever import SemanticRetriever
-from app.retrieval.structured_retriever import StructuredRetriever
+from app.retrieval.structured_retriever import PersonData, StructuredRetriever
 from app.services.claim_ingestion import ClaimIngestionService
 
 logger = logging.getLogger(__name__)
@@ -77,6 +92,97 @@ def _log_interpreter_failure(exc: Exception) -> None:
     logger.warning(
         "interpreter verification failed; keeping deterministic routing (category=%s)",
         type(exc).__name__,
+    )
+
+
+_OFFER_MARKERS = re.compile(
+    r"\b(?:podemos|puedo|quieres|quiere|te\s+gustar[íi]a|te\s+apetece|"
+    r"te\s+interesa|si\s+quieres|te\s+cuento|hablamos\s+de)\b",
+    re.IGNORECASE,
+)
+
+
+def _with_grounded_subject(
+    context: AnswerContext, sources: list[ResponseSourceRef]
+) -> list[ResponseSourceRef]:
+    """Keep the verified answer subject citable for pronoun continuity.
+
+    A generative responder may cite the relation, fact or memory it paraphrased
+    and forget the person the answer is about. A later "¿Y él?"/"¿Y ella?"
+    resolves the person from the previous assistant turn's ``subject`` source,
+    so a person/fact answer must always carry its verified subject even when the
+    model omitted it. The subject is part of the answer, so this stays truthful;
+    it is never invented, because it comes from the resolved ``AnswerContext``.
+    """
+    person = context.person
+    if person is None or not sources or context.intent not in (
+        Intent.person_query,
+        Intent.fact_query,
+    ):
+        return sources
+    if any(
+        source.entity_type == "person" and source.entity_id == person.id
+        for source in sources
+    ):
+        return sources
+    return [
+        *sources,
+        ResponseSourceRef(
+            entity_type="person",
+            entity_id=person.id,
+            usage_type="subject",
+        ),
+    ]
+
+
+def _term_looks_like_proper_name(term: str | None) -> bool:
+    """True when a term keeps at least one capitalized letter.
+
+    STT transcripts are lowercase by nature, so a lowercase term that matches
+    no stored person is not a reliable identity reference. The service keeps
+    that turn conversational instead of opening a knowledge gap for what may be
+    an ordinary word. Proper-cased explicit lookups keep the existing gap
+    behavior.
+    """
+    return bool(term) and any(char.isupper() for char in term)
+
+
+def _turn_is_offer(text: str) -> bool:
+    """True when an assistant turn asked or offered something.
+
+    A question mark or a generic offer phrase is the signal; the exact topic
+    words are never interpreted here.
+    """
+    return (
+        "?" in text
+        or "¿" in text
+        or _OFFER_MARKERS.search(text) is not None
+    )
+
+
+def _recent_turns_touch_sensitive(
+    turns, topics: tuple[SensitiveTopic, ...]
+) -> bool:
+    if not topics:
+        return False
+    return any(
+        matches_topic(turn.text, topic)
+        for turn in turns[-2:]
+        for topic in topics
+    )
+
+
+def _without_source_ids(data: PersonData, excluded: set[uuid.UUID]) -> PersonData:
+    """Drop entities already presented by the previous assistant turn."""
+    return replace(
+        data,
+        relationships=[
+            item for item in data.relationships if item.id not in excluded
+        ],
+        facts=[item for item in data.facts if item.id not in excluded],
+        memories=[item for item in data.memories if item.id not in excluded],
+        events=[item for item in data.events if item.id not in excluded],
+        media=[item for item in data.media if item.id not in excluded],
     )
 
 
@@ -97,6 +203,8 @@ def _topics_from_profile(
 
 def _style_from_profile(
     profile: ConversationProfile | None,
+    *,
+    offer_positive_topics: bool,
 ) -> ConversationStyle | None:
     """Return only the verified profile style sent to a responder."""
     if profile is None:
@@ -105,6 +213,22 @@ def _style_from_profile(
         preferred_name=profile.preferred_name,
         conversational_style=profile.conversational_style,
         positive_topics=tuple(profile.positive_topics or ()),
+        offer_positive_topics=offer_positive_topics,
+    )
+
+
+def _may_offer_profile_topics(
+    positive_topics: tuple[str, ...],
+    message: str,
+    window: ConversationWindow | None,
+    intent: Intent,
+) -> bool:
+    prior_turn_texts = tuple(turn.text for turn in window.turns) if window else ()
+    return may_offer_positive_topics(
+        topics=positive_topics,
+        message=message,
+        prior_turn_texts=prior_turn_texts,
+        intent=intent,
     )
 
 
@@ -112,6 +236,55 @@ def _style_from_profile(
 # (person/memory/event/orientation queries) ask the system for information; the
 # user's declarative statements live in general chat.
 _INGEST_INTENTS = {Intent.general_chat, Intent.unknown}
+
+# A user can accept an offer the assistant made without any stored entity
+# behind it. The reply is a stable, honest no-data statement: it never repeats
+# the offer and never implies that projects or records exist.
+_NO_STORED_CONTINUATION_REPLY = (
+    "No tengo nada guardado sobre eso todavía. No quiero inventar detalles."
+)
+
+# A provisional, user-introduced referent can share a surface name with a
+# registered person. When that happens, an explicit lookup must not silently
+# select the registered person; the service asks one concise identity question
+# instead, without retrieving, citing or opening a knowledge gap.
+def _provisional_identity_clarification(referent: ProvisionalReferent) -> str:
+    description = (
+        f", tu {referent.description}" if referent.description else ""
+    )
+    # For a name, repeat it so the two possible identities are explicit. For an
+    # expression-only surface ("mi vecina") that would read awkwardly, so ask
+    # about "esa persona" instead.
+    starts_with_article = referent.surface.casefold().startswith(
+        ("mi ", "una ", "la ", "un ")
+    )
+    if starts_with_article:
+        return (
+            f"Para no confundirme: antes me hablaste de "
+            f"{referent.surface}{description}. ¿Te refieres a esa persona o a "
+            "otra?"
+        )
+    return (
+        f"Para no confundirme: antes me hablaste de "
+        f"{referent.surface}{description}. ¿Te refieres a esa "
+        f"{referent.surface} o a otra persona?"
+    )
+
+
+@dataclass(frozen=True)
+class _Continuation:
+    """Verified continuation of an accepted offer.
+
+    ``no_stored_data`` is a fail-closed path: the service returns a fixed
+    honest reply without calling the responder, so a generative model cannot
+    restart the offer/acceptance loop.
+    """
+
+    route: RouteResult
+    context: AnswerContext | None = None
+    resolution: Resolution | None = None
+    follow_up_topic: str | None = None
+    no_stored_data: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,11 +324,12 @@ class ConversationService:
         self._people = PersonRepository(session)
         self._resolver = EntityResolver(self._people)
         self._memory_repo = MemoryRepository(session)
+        self._facts = FactRepository(session)
         self._relationships = RelationshipRepository(session)
         self._structured_retriever = StructuredRetriever(
             person_repo=self._people,
             relationship_repo=self._relationships,
-            fact_repo=FactRepository(session),
+            fact_repo=self._facts,
             memory_repo=self._memory_repo,
             event_repo=EventRepository(session),
             media_repo=MediaRepository(session),
@@ -208,6 +382,7 @@ class ConversationService:
         owner_session_id: str | None = None,
     ) -> ChatResult:
         route = self._router.route(text)
+        lookup_requested = self._router.is_personal_lookup_request(text)
         profile = await self._profiles.get_active()
         sensitive_topics = _topics_from_profile(profile)
         sensitive_evaluation = evaluate(text, sensitive_topics)
@@ -220,7 +395,11 @@ class ConversationService:
         # and every later continuity decision derives from this same snapshot.
         window = await self._load_turn_window(conversation_id, owner_session_id)
         responder_history = self._responder_history(window, sensitive_topics)
-        style = _style_from_profile(profile)
+        provisional_referent = self._project_provisional_referent(
+            window, text, sensitive_topics
+        )
+        # A disambiguation turn is a person query, never an offer opportunity.
+        style = _style_from_profile(profile, offer_positive_topics=False)
 
         interpreter_route: VerifiedInterpreterRoute | None = None
         if self._should_interpret(text, route, window, sensitive_evaluation):
@@ -236,7 +415,9 @@ class ConversationService:
                 window = ConversationWindow(conversation_id=conversation.id)
 
             pending = window.pending_person_candidates()
-            if pending:
+            if pending and (
+                lookup_requested or self._router.is_candidate_selection(text)
+            ):
                 person = await self._disambiguation.resolve(text, pending)
                 if person is not None:
                     return await self._disambiguation_turn(
@@ -249,6 +430,17 @@ class ConversationService:
                         style=style,
                     )
 
+            # A short acceptance ("sí", "claro", "cuéntame", "ese mismo") or a
+            # topic selection ("sobre costura") only means something when the
+            # immediately previous assistant turn offered or asked something.
+            # The continuation is always built from stored sources cited by
+            # that turn, never from the offer text itself.
+            continuation: _Continuation | None = None
+            if route.intent in (Intent.general_chat, Intent.unknown):
+                continuation = await self._accepted_offer_continuation(
+                    text, window, sensitive_topics
+                )
+
             # Elliptical follow-ups ("¿Y de comer?", "¿Y dónde vivió?") keep the
             # subject of the immediately previous resolved fact answer. The
             # repository refuses to carry a subject across any other intent or
@@ -257,7 +449,10 @@ class ConversationService:
             follow_up_resolution: Resolution | None = None
             follow_up_topic: str | None = None
             interpreter_applied = False
-            if route.intent in (Intent.general_chat, Intent.event_query):
+            if continuation is None and route.intent in (
+                Intent.general_chat,
+                Intent.event_query,
+            ):
                 follow_up_route = self._router.route_fact_follow_up(text)
                 if follow_up_route is not None:
                     subject_id = window.last_fact_subject()
@@ -305,8 +500,10 @@ class ConversationService:
             # unresolved may use the verified interpreter route. The explicit
             # follow-up above always wins.
             if (
-                interpreter_route is not None
+                continuation is None
+                and interpreter_route is not None
                 and follow_up_resolution is None
+                and lookup_requested
                 and route.intent in (Intent.general_chat, Intent.unknown)
             ):
                 route = interpreter_route.route
@@ -314,9 +511,30 @@ class ConversationService:
                 follow_up_topic = interpreter_route.route.follow_up_topic
                 interpreter_applied = True
 
+            # A provisional referent that shares its surface with a registered
+            # person makes an explicit lookup genuinely ambiguous. Ask one
+            # identity question instead of silently selecting the registered
+            # person, and do not retrieve, cite or open a knowledge gap.
+            # The internal resolution check only decides whether a registered
+            # conflict exists; it is not used to answer or cite anything.
+            conflict = await self._provisional_conflict_resolution(
+                route, provisional_referent, lookup_requested
+            )
+            if conflict is not None and provisional_referent is not None:
+                return await self._provisional_conflict_turn(
+                    conversation.id, text, route, provisional_referent
+                )
+
             resolution: Resolution | None = None
             context: AnswerContext
-            if route.relationship_role is not None:
+            if continuation is not None:
+                route = continuation.route
+                context = continuation.context or AnswerContext(intent=route.intent)
+                if continuation.context is not None:
+                    context = replace(context, accepted_offer=True)
+                resolution = continuation.resolution
+                follow_up_topic = continuation.follow_up_topic
+            elif route.relationship_role is not None:
                 context = await self._relationship_query_context(
                     route.relationship_role, window
                 )
@@ -330,26 +548,43 @@ class ConversationService:
                 Intent.event_query,
                 Intent.fact_query,
             ) and (route.term or follow_up_resolution):
-                resolution = follow_up_resolution or await self._resolver.resolve(
-                    route.term
-                )
-                if resolution.kind == ResolutionKind.resolved:
-                    if route.intent == Intent.fact_query:
-                        data = await self._structured_retriever.retrieve_facts(
-                            resolution.person.id,
-                            topic=route.fact_topic or FactTopic.general,
+                if follow_up_resolution is None and not lookup_requested:
+                    # Defensive boundary: a narrative or self-disclosure term
+                    # never reaches entity resolution.
+                    route = RouteResult(intent=Intent.general_chat)
+                    context = AnswerContext(intent=route.intent)
+                else:
+                    resolution = follow_up_resolution or await self._resolver.resolve(
+                        route.term
+                    )
+                    if (
+                        follow_up_resolution is None
+                        and resolution.kind == ResolutionKind.not_found
+                        and not _term_looks_like_proper_name(route.term)
+                    ):
+                        # A lowercase STT term that matches no stored person is
+                        # not a reliable identity reference. Keep the turn
+                        # conversational and open no knowledge gap.
+                        route = RouteResult(intent=Intent.general_chat)
+                        resolution = None
+                        context = AnswerContext(intent=route.intent)
+                    elif resolution.kind == ResolutionKind.resolved:
+                        if route.intent == Intent.fact_query:
+                            data = await self._structured_retriever.retrieve_facts(
+                                resolution.person.id,
+                                topic=route.fact_topic or FactTopic.general,
+                            )
+                        else:
+                            data = await self._structured_retriever.retrieve(
+                                resolution.person.id
+                            )
+                        context = self._context_builder.build_from_person_data(
+                            data, resolution, intent=route.intent
                         )
                     else:
-                        data = await self._structured_retriever.retrieve(
-                            resolution.person.id
+                        context = self._context_builder.build_from_resolution(
+                            resolution, route.intent
                         )
-                    context = self._context_builder.build_from_person_data(
-                        data, resolution, intent=route.intent
-                    )
-                else:
-                    context = self._context_builder.build_from_resolution(
-                        resolution, route.intent
-                    )
             else:
                 context = AnswerContext(intent=route.intent, term=route.term)
 
@@ -359,13 +594,37 @@ class ConversationService:
             context = apply_to_context(
                 context, sensitive_evaluation, positive_topics=positive_topics
             )
-            answer = await self._respond(
-                context,
-                sensitive_evaluation,
-                conversation.id,
-                message=text,
-                history=responder_history,
-                style=style,
+            if (
+                provisional_referent is not None
+                and route.intent in (Intent.general_chat, Intent.unknown)
+                and context.sensitive_topic_requested is None
+            ):
+                # Conversation-only hint. It is not an AnswerContext item and
+                # never reaches allowed_sources or response_sources.
+                context = replace(
+                    context, provisional_referent=provisional_referent
+                )
+            if continuation is not None and continuation.no_stored_data:
+                # Fail closed: a generative responder must never be able to
+                # turn a baseless offer into a repeated offer/acceptance loop.
+                answer = Response(text=_NO_STORED_CONTINUATION_REPLY)
+            else:
+                style = _style_from_profile(
+                    profile,
+                    offer_positive_topics=_may_offer_profile_topics(
+                        positive_topics, text, window, route.intent
+                    ),
+                )
+                answer = await self._respond(
+                    context,
+                    sensitive_evaluation,
+                    conversation.id,
+                    message=text,
+                    history=responder_history,
+                    style=style,
+                )
+            answer = replace(
+                answer, sources=_with_grounded_subject(context, answer.sources)
             )
 
             user_message = await self._conversations.add_message(
@@ -396,8 +655,10 @@ class ConversationService:
             if (
                 route.relationship_role is None
                 and not interpreter_applied
+                and lookup_requested
                 and context.resolution == ResolutionKind.not_found
                 and route.term
+                and _term_looks_like_proper_name(route.term)
             ):
                 gap, gap_created = await self._gaps.upsert(
                     gap_type="person_unknown",
@@ -427,6 +688,149 @@ class ConversationService:
             gap_created=gap_created,
         )
 
+    async def _accepted_offer_continuation(
+        self,
+        text: str,
+        window: ConversationWindow | None,
+        sensitive_topics: tuple[SensitiveTopic, ...],
+    ) -> _Continuation | None:
+        """Continue a previous offer from stored sources, or fail closed.
+
+        Continuation facts, memories and people come from the sources the
+        previous answer actually cited. The offer text is not authority. When
+        no cited source yields verified context, the caller returns an honest
+        no-data reply without invoking a generative responder.
+        """
+        if window is None or not self._router.is_continuation_reply(text):
+            return None
+        offer_turn = window.latest_assistant_turn
+        if offer_turn is None:
+            return None
+        memory_continuation = (
+            offer_turn.intent == Intent.memory_query.value
+            and bool(offer_turn.sources)
+        )
+        if not (_turn_is_offer(offer_turn.text) or memory_continuation):
+            return None
+        # An ambiguity is unresolved until the person names a candidate; never
+        # let an acceptance pick one of them.
+        if window.pending_person_candidates():
+            return None
+        # Never carry an acceptance across a sensitive-topic boundary.
+        if _recent_turns_touch_sensitive(window.turns, sensitive_topics):
+            return None
+
+        sources = offer_turn.sources
+        excluded = {source.entity_id for source in sources}
+
+        memory_ids = [
+            source.entity_id
+            for source in sources
+            if source.entity_type == "memory"
+        ]
+        if memory_ids:
+            memories = []
+            filtered = 0
+            for memory_id in memory_ids:
+                memory = await self._memory_repo.get(memory_id)
+                if memory is None:
+                    continue
+                safe, blocked = filter_sensitive_memories([memory])
+                filtered += len(blocked)
+                memories.extend(safe)
+            if memories:
+                return _Continuation(
+                    route=RouteResult(intent=Intent.memory_query),
+                    context=self._context_builder.build_from_memories(
+                        memories, filtered_count=filtered
+                    ),
+                )
+
+        fact_ids = [
+            source.entity_id
+            for source in sources
+            if source.entity_type == "fact"
+        ]
+        if fact_ids:
+            facts = [
+                fact
+                for fact_id in fact_ids
+                if (fact := await self._facts.get(fact_id)) is not None
+                and is_answerable_fact_status(fact.status)
+            ]
+            if facts:
+                subject = await self._people.get(facts[0].subject_person_id)
+                if subject is not None:
+                    resolution = Resolution.from_people(
+                        subject.display_name, [subject]
+                    )
+                    context = self._context_builder.build_from_person_data(
+                        PersonData(
+                            person=subject,
+                            relationships=[],
+                            facts=facts,
+                            memories=[],
+                            events=[],
+                            media=[],
+                        ),
+                        resolution,
+                        intent=Intent.fact_query,
+                    )
+                    return _Continuation(
+                        route=RouteResult(
+                            intent=Intent.fact_query,
+                            term=subject.display_name,
+                            fact_topic=FactTopic.general,
+                        ),
+                        context=context,
+                        resolution=resolution,
+                    )
+
+        person_ids = [
+            source.entity_id
+            for source in sources
+            if source.entity_type == "person"
+            and source.usage_type == "subject"
+        ] or [
+            source.entity_id
+            for source in sources
+            if source.entity_type == "person"
+        ]
+        if person_ids:
+            person = await self._people.get(person_ids[0])
+            if person is not None:
+                data = await self._structured_retriever.retrieve(person.id)
+                data = _without_source_ids(data, excluded)
+                safe_memories, _ = filter_sensitive_memories(data.memories)
+                data = replace(data, memories=safe_memories)
+                if (
+                    data.relationships
+                    or data.facts
+                    or data.memories
+                    or data.events
+                    or data.media
+                ):
+                    resolution = Resolution.from_people(
+                        person.display_name, [person]
+                    )
+                    return _Continuation(
+                        route=RouteResult(
+                            intent=Intent.person_query,
+                            term=person.display_name,
+                        ),
+                        context=self._context_builder.build_from_person_data(
+                            data, resolution, intent=Intent.person_query
+                        ),
+                        resolution=resolution,
+                    )
+
+        # The offer itself is untrusted text, not a stored source. Without a
+        # cited source there is no verified context to continue from.
+        return _Continuation(
+            route=RouteResult(intent=Intent.general_chat),
+            no_stored_data=True,
+        )
+
     async def _load_turn_window(
         self,
         conversation_id: uuid.UUID | None,
@@ -447,6 +851,111 @@ class ConversationService:
         if window is None and owner_session_id is not None:
             raise ConversationAccessDenied
         return window
+
+    def _lookup_term_for(self, text: str) -> str | None:
+        """Return an explicit lookup term, or ``None`` for conversational text.
+
+        Used only to decide whether a referral target changed. It never
+        resolves, retrieves or persists anything.
+        """
+        if not text.strip() or not self._router.is_personal_lookup_request(text):
+            return None
+        route = self._router.route(text)
+        if route.intent in (
+            Intent.person_query,
+            Intent.fact_query,
+            Intent.event_query,
+        ):
+            return route.term
+        return None
+
+    def _project_provisional_referent(
+        self,
+        window: ConversationWindow | None,
+        text: str,
+        sensitive_topics: tuple[SensitiveTopic, ...],
+    ) -> ProvisionalReferent | None:
+        """Project the unverified referent for this turn from user turns only.
+
+        The projection is pure and bounded by the existing window. Assistant
+        text never participates, and an unresolved ambiguity blocks carry-over.
+        """
+        return project_provisional_referent(
+            window,
+            current_message=text,
+            is_sensitive=lambda value: evaluate(
+                value, sensitive_topics
+            ).requested
+            is not None,
+            ambiguity_pending=bool(
+                window is not None and window.pending_person_candidates()
+            ),
+            lookup_term_for=self._lookup_term_for,
+        )
+
+    async def _provisional_conflict_resolution(
+        self,
+        route: RouteResult,
+        referent: ProvisionalReferent | None,
+        lookup_requested: bool,
+    ) -> Resolution | None:
+        """Return the registered resolution a provisional referent shadows.
+
+        Only an explicit lookup of the same surface can conflict, and only when
+        the normal resolver would actually select one registered person. An
+        unknown name keeps its existing not-found/gap behavior, and an
+        ambiguous name keeps the existing ambiguity behavior.
+        """
+        if (
+            referent is None
+            or not lookup_requested
+            or not route.term
+            or route.relationship_role is not None
+            or route.intent
+            not in (Intent.person_query, Intent.fact_query, Intent.event_query)
+        ):
+            return None
+        if not surfaces_match(route.term, referent.surface):
+            return None
+        resolution = await self._resolver.resolve(route.term)
+        if resolution.kind != ResolutionKind.resolved or resolution.person is None:
+            return None
+        if (
+            referent.verified_person_id is not None
+            and referent.verified_person_id == resolution.person.id
+        ):
+            return None
+        return resolution
+
+    async def _provisional_conflict_turn(
+        self,
+        conversation_id: uuid.UUID,
+        text: str,
+        route: RouteResult,
+        referent: ProvisionalReferent,
+    ) -> ChatResult:
+        """Ask one identity clarification without lookup, sources or a gap."""
+        await self._conversations.add_message(
+            conversation_id,
+            speaker="user",
+            text=text,
+            intent=route.intent.value,
+            commit=False,
+        )
+        answer = _provisional_identity_clarification(referent)
+        await self._conversations.add_message(
+            conversation_id,
+            speaker="assistant",
+            text=answer,
+            intent=route.intent.value,
+            commit=False,
+        )
+        return ChatResult(
+            conversation_id=conversation_id,
+            intent=route.intent,
+            answer=answer,
+            sources=[],
+        )
 
     async def _relationship_query_context(
         self,
@@ -495,11 +1004,14 @@ class ConversationService:
         Already-resolved deterministic routes, pending ambiguity, resolved
         carry-over, pronoun-only follow-ups, configured sensitive-topic
         requests, and empty or oversized text never reach the optional network
-        call.
+        call. A narrative or self-disclosure is not an explicit personal lookup
+        either, so the interpreter is not asked to promote it into one.
         """
         if self._interpreter is None:
             return False
         if route.intent not in (Intent.general_chat, Intent.unknown):
+            return False
+        if not self._router.is_personal_lookup_request(text):
             return False
         max_input_chars = getattr(
             self._interpreter,
@@ -660,6 +1172,9 @@ class ConversationService:
             history=history,
             style=style,
         )
+        answer = replace(
+            answer, sources=_with_grounded_subject(context, answer.sources)
+        )
         assistant_message = await self._conversations.add_message(
             conversation_id,
             speaker="assistant",
@@ -704,6 +1219,24 @@ class ConversationService:
             logger.warning(
                 "responder output in conversation %s mentioned a blocked "
                 "sensitive topic; replacing it with a safe reply",
+                conversation_id,
+            )
+            return Response(text=SPONTANEOUS_SUPPRESSION_REPLY)
+        if (
+            style is not None
+            and style.positive_topics
+            and context.sensitive_topic_requested is None
+            and positive_topic_violation(
+                answer=answer.text,
+                message=message or "",
+                topics=style.positive_topics,
+                offer_allowed=style.offer_positive_topics,
+                grounded_text=context_topic_grounding(context),
+            )
+        ):
+            logger.warning(
+                "responder output in conversation %s broke the bounded "
+                "positive-topic policy; replacing it with a safe reply",
                 conversation_id,
             )
             return Response(text=SPONTANEOUS_SUPPRESSION_REPLY)

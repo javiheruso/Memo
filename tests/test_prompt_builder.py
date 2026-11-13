@@ -197,6 +197,8 @@ def test_unknown_person_allows_no_sources() -> None:
     assert "Eustaquio" in prompt.user
     assert allowed_sources(context) == {}
     assert "never invent" in prompt.system
+    # The no-data follow-up rule is limited to general_chat/unknown turns.
+    assert "Stored data available this turn: none" not in prompt.user
 
 
 def test_system_instructions_enforce_trust_model() -> None:
@@ -207,6 +209,13 @@ def test_system_instructions_enforce_trust_model() -> None:
     assert "present a planned or confirmed event as already completed" in system
     assert "candidates" in system
     assert "JSON" in system
+    # The follow-up example must not seed the model with a concrete person
+    # name that is absent from CONTEXT; a real demo answer copied it verbatim.
+    assert "Elena" not in system
+    assert "Never use a name that is not in CONTEXT" in system
+    # Person/fact answers must keep their verified subject citable so a
+    # pronoun follow-up stays grounded in the real-LLM path.
+    assert "always include the subject person id" in system
 
 
 def test_prompt_exposes_no_db_mechanism() -> None:
@@ -290,3 +299,111 @@ def test_prompt_keeps_untrusted_history_separate_from_facts_and_sources() -> Non
         ("person", str(person.id)),
         ("fact", str(fact.entity_id)),
     }
+
+
+def test_general_chat_without_data_allows_one_generic_follow_up() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    prompt = build_prompt(context, message="Hola, hoy hace un día precioso.")
+
+    assert "Stored data available this turn: none" in prompt.user
+    assert "at most one brief follow-up that follows the person's current topic" in prompt.system
+    assert "general_chat or unknown turn" in prompt.system
+    assert "Never imply, recall, invent or claim a personal fact" in prompt.system
+    assert "shared experience" in prompt.system
+    assert allowed_sources(context) == {}
+
+
+def test_general_chat_prompt_does_not_mark_stored_data_when_context_has_memory() -> None:
+    context = AnswerContext(
+        intent=Intent.general_chat,
+        term=None,
+        memories=[_memory()],
+    )
+    prompt = build_prompt(context)
+
+    assert "Stored data available this turn: none" not in prompt.user
+    assert allowed_sources(context) == {
+        ("memory", str(context.memories[0].entity_id)): "memory"
+    }
+
+
+def test_unknown_turn_without_data_allows_the_same_bounded_follow_up() -> None:
+    context = AnswerContext(intent=Intent.unknown, term=None)
+    prompt = build_prompt(context, message="No sé qué decir.")
+
+    assert "Stored data available this turn: none" in prompt.user
+    assert "at most one brief follow-up that follows the person's current topic" in prompt.system
+
+
+def test_positive_topics_are_withheld_when_not_offerable() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    prompt = build_prompt(
+        context,
+        message="Prefiero hablar de mi familia.",
+        style=ConversationStyle(
+            positive_topics=("la costura", "la playa"),
+            offer_positive_topics=False,
+        ),
+    )
+
+    assert "Do not offer profile positive topics this turn" in prompt.user
+    assert "Positive topics that may be offered gently" not in prompt.user
+    assert "la costura" not in prompt.user
+    assert "la playa" not in prompt.user
+
+
+def test_prompt_requires_provenance_when_context_has_stored_data() -> None:
+    context = AnswerContext(
+        intent=Intent.fact_query,
+        person=_person("Antonio"),
+        term="Antonio",
+    )
+    prompt = build_prompt(context, message="¿Qué opina Antonio de la política?")
+
+    assert "include at least the id the answer is based on" in prompt.system
+    assert "Use an empty \"sources\" list only when CONTEXT has no stored data" in (
+        prompt.system
+    )
+    assert "You may return an empty \"sources\" list" not in prompt.system
+
+
+def test_memory_prompt_requires_reusing_the_stored_wording() -> None:
+    context = AnswerContext(intent=Intent.memory_query, memories=[_memory()])
+    prompt = build_prompt(context, message="¿Te acuerdas de las tardes de pesca?")
+
+    assert "reuse the memory's own wording" in prompt.system
+    assert "Add no detail, person or event that is absent" in prompt.system
+
+
+def test_prompt_separates_user_authored_experience_from_stored_data() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    prompt = build_prompt(
+        context, message="Mi vecina Rosa se rompió la cadera y la operan el jueves."
+    )
+
+    combined = prompt.system + "\n" + prompt.user
+    assert "You are a companion, not a person" in combined
+    assert "unverified and user-authored" in combined
+    assert "acknowledge it with empathy" in combined
+    assert "never claim you already knew it" in combined
+    assert "Do not claim to feel what the person feels" in combined
+
+
+def test_prompt_discusses_a_topic_the_person_just_chose() -> None:
+    context = AnswerContext(intent=Intent.general_chat, term=None)
+    prompt = build_prompt(
+        context,
+        message="Prefiero hablar de la playa.",
+        style=ConversationStyle(
+            positive_topics=("la playa",),
+            offer_positive_topics=False,
+        ),
+    )
+
+    assert "When the person names or chooses a topic, discuss that topic" in (
+        prompt.system
+    )
+    assert "you may acknowledge and discuss that chosen topic naturally" in (
+        prompt.user
+    )
+    assert "never ask permission to talk about it" in prompt.user

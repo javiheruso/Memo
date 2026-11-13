@@ -152,34 +152,18 @@ def _family_triggers(topic: str) -> set[str]:
     return triggers
 
 
-@dataclass(frozen=True)
-class SensitiveTopic:
-    topic: str
-    handling: str | None = None
-    triggers: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class SensitiveTopicEvaluation:
-    requested: SensitiveTopic | None
-    blocked: tuple[SensitiveTopic, ...]
-
-    @property
-    def has_topics(self) -> bool:
-        return self.requested is not None or bool(self.blocked)
-
-
-def matches_topic(text: str, topic: SensitiveTopic) -> bool:
-    """True when ``text`` explicitly references ``topic``."""
+def _phrase_or_words_match(text: str, topic: SensitiveTopic) -> bool:
     folded = _fold(text)
     phrase = _fold(topic.topic).strip()
     if phrase and phrase in folded:
         return True
 
     topic_words = _significant_words(topic.topic)
-    if topic_words and topic_words.issubset(_words(text)):
-        return True
+    return bool(topic_words and topic_words.issubset(_words(text)))
 
+
+def _trigger_matches(text: str, topic: SensitiveTopic) -> bool:
+    folded = _fold(text)
     triggers = {_fold(item).strip() for item in topic.triggers if item.strip()}
     triggers.update(_family_triggers(topic.topic))
     words = _words(text)
@@ -194,23 +178,117 @@ def matches_topic(text: str, topic: SensitiveTopic) -> bool:
     return False
 
 
+def _topic_identity_words(topic: SensitiveTopic) -> set[str]:
+    """Proper-name tokens that identify a person named in a topic label.
+
+    ``la muerte de Antonio`` and ``Antonio`` carry an identity anchor;
+    ``deudas de la familia`` and ``la enfermedad`` do not. Capitalization is
+    read from the configured label, and theme vocabulary is excluded so a
+    sentence-initial capital ("Muerte de Antonio") is not mistaken for a name.
+    """
+    raw_tokens = re.findall(r"[^\W\d_]+", topic.topic)
+    if not raw_tokens:
+        return set()
+
+    non_names = set(_STOPWORDS)
+    non_names.update(_fold(item) for item in topic.triggers if item.strip())
+    for roots, triggers in _TOPIC_FAMILIES:
+        non_names.update(roots)
+        non_names.update(triggers)
+
+    anchors: set[str] = set()
+    for token in raw_tokens:
+        if not token[:1].isupper():
+            continue
+        folded = _fold(token)
+        if folded and folded not in non_names:
+            anchors.add(folded)
+    return anchors
+
+
+def _matches_requested_topic(text: str, topic: SensitiveTopic) -> bool:
+    """True only when the turn actually references this specific topic.
+
+    A person-specific topic (one whose label carries a proper name) is not
+    requested by generic sensitive vocabulary alone. ``Rosa estuvo en el
+    hospital`` must not request ``la muerte de Antonio``; ``Antonio estuvo en
+    el hospital`` and the explicit label still do.
+    """
+    if _phrase_or_words_match(text, topic):
+        return True
+
+    anchors = _topic_identity_words(topic)
+    if anchors and not anchors.issubset(_words(text)):
+        return False
+    return _trigger_matches(text, topic)
+
+
+@dataclass(frozen=True)
+class SensitiveTopic:
+    topic: str
+    handling: str | None = None
+    triggers: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SensitiveTopicEvaluation:
+    requested: SensitiveTopic | None
+    blocked: tuple[SensitiveTopic, ...]
+    # True when only generic sensitive vocabulary matched a person-specific
+    # configured topic. In that case ``requested`` is a neutral label, never
+    # the configured personal topic.
+    generic_reference: bool = False
+
+    @property
+    def has_topics(self) -> bool:
+        return self.requested is not None or bool(self.blocked)
+
+
+# Neutral stand-in used when the person raised generic sensitive vocabulary
+# without identifying the configured person. It keeps the careful response and
+# blocking behavior without exposing the configured personal label.
+_GENERIC_SENSITIVE_TOPIC = "un tema sensible"
+
+
+def matches_topic(text: str, topic: SensitiveTopic) -> bool:
+    """True when ``text`` references ``topic`` in any form.
+
+    This broad check is used for leak detection and context withholding. The
+    narrower :func:`_matches_requested_topic` decides whether a person-specific
+    topic was actually raised by the person.
+    """
+    return _phrase_or_words_match(text, topic) or _trigger_matches(text, topic)
+
+
 def evaluate(text: str, topics: tuple[SensitiveTopic, ...]) -> SensitiveTopicEvaluation:
     """Classify a user turn against the configured sensitive topics.
 
     The first explicitly referenced topic is considered requested; every other
-    configured topic remains blocked for that turn.
+    configured topic remains blocked for that turn. Generic sensitive vocabulary
+    that does not identify the person named by a configured topic is treated as
+    a neutral sensitive reference: it never becomes ``requested`` under that
+    personal label, but the topic stays blocked.
     """
     requested_index: int | None = None
     for index, topic in enumerate(topics):
-        if matches_topic(text, topic):
+        if _matches_requested_topic(text, topic):
             requested_index = index
             break
 
     requested = topics[requested_index] if requested_index is not None else None
+    generic_reference = False
+    if requested is None and any(matches_topic(text, topic) for topic in topics):
+        requested = SensitiveTopic(topic=_GENERIC_SENSITIVE_TOPIC)
+        generic_reference = True
+
     blocked = tuple(
         topic for index, topic in enumerate(topics) if index != requested_index
     )
-    return SensitiveTopicEvaluation(requested=requested, blocked=blocked)
+    return SensitiveTopicEvaluation(
+        requested=requested,
+        blocked=blocked,
+        generic_reference=generic_reference,
+    )
 
 
 def _mentions_blocked_topic(text: str, evaluation: SensitiveTopicEvaluation) -> bool:
@@ -296,6 +374,7 @@ def apply_to_context(
         sensitive_topic_requested=(
             evaluation.requested.topic if evaluation.requested is not None else None
         ),
+        sensitive_topic_generic=evaluation.generic_reference,
         sensitive_redirect_topic=redirect_topic,
         blocked_sensitive_topics=tuple(topic.topic for topic in evaluation.blocked),
     )

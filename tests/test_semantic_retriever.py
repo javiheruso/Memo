@@ -59,6 +59,71 @@ async def test_semantic_search_without_match_returns_empty(
 
 
 @_SKIP_ON_POSTGRES
+async def test_semantic_search_rejects_unrelated_shared_token_recall(
+    retriever: SemanticRetriever, db_session: AsyncSession, seed: SeedUniverse
+):
+    """A single incidental shared token must not surface an unrelated memory.
+
+    Reproduces "¿Te acuerdas de cuando fuimos juntos a Valencia?" against the
+    Spanish dancing memory: only "juntos" overlaps, so the calibrated floor
+    must keep it out. The same memory must still be recalled by a question
+    about its actual content.
+    """
+    repo = MemoryRepository(db_session)
+    dancing = await repo.create(
+        MemoryCreate(
+            title="Bailes de los sábados",
+            narrative=(
+                "Carmen y Antonio bailaban juntos en el salón del pueblo "
+                "los sábados."
+            ),
+            memory_status=MemoryStatus.recurring,
+            sensitivity_level=SensitivityLevel.low,
+            source_id=seed.source_ids["shared_by_carmen"],
+        )
+    )
+
+    unrelated = await retriever.search(
+        "¿Te acuerdas de cuando fuimos juntos a Valencia?"
+    )
+    assert unrelated.hits == []
+
+    recall = await retriever.search(
+        "¿Te acuerdas de cuando bailábamos en el salón del pueblo?"
+    )
+    assert [hit.memory.id for hit in recall.hits] == [dancing.id]
+
+
+@_SKIP_ON_POSTGRES
+async def test_semantic_search_requires_calibrated_relevance_floor(
+    retriever: SemanticRetriever, db_session: AsyncSession, seed: SeedUniverse
+):
+    """Weak topical overlap is not enough; a clear topical match is."""
+    repo = MemoryRepository(db_session)
+    dancing = await repo.create(
+        MemoryCreate(
+            title="Bailes de los sábados",
+            narrative=(
+                "Carmen y Antonio bailaban juntos en el salón del pueblo "
+                "los sábados."
+            ),
+            memory_status=MemoryStatus.recurring,
+            sensitivity_level=SensitivityLevel.low,
+            source_id=seed.source_ids["shared_by_carmen"],
+        )
+    )
+
+    weak = await retriever.search("¿Recuerdas aquella boda en el pueblo?")
+    assert weak.hits == []
+
+    strong = await retriever.search(
+        "¿Recuerdas cuando bailaban en el salón del pueblo?"
+    )
+    assert [hit.memory.id for hit in strong.hits] == [dancing.id]
+    assert strong.hits[0].score >= 0.20
+
+
+@_SKIP_ON_POSTGRES
 async def test_semantic_search_filters_sensitive_memories(
     retriever: SemanticRetriever, seed: SeedUniverse
 ):

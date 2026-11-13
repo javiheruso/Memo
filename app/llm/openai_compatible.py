@@ -3,14 +3,18 @@
 Calls any OpenAI-compatible ``/chat/completions`` endpoint with a prompt built
 exclusively from the ``AnswerContext`` (no database handle or tool is ever
 exposed), parses the model's JSON answer, validates every returned source id
-against the context's allowed set, and on any invalid output or
-provider/network problem falls back to the deterministic responder for that
-turn. A model mistake can therefore degrade a turn to the conservative text
-responder but can never inject an invented source into ``response_sources``.
+against the context's allowed set, and checks that the written claims are
+supported by the context. Answer classes whose wording cannot be attributed
+deterministically (memory prose, multi-subject relations, explicit sensitive
+topics) and unsupported claims fall back to the deterministic responder for
+that turn. A model mistake can therefore degrade a turn to the conservative
+text responder but can never inject an invented source into
+``response_sources``.
 """
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
@@ -22,47 +26,149 @@ import httpx
 
 from app.core.config import Settings
 from app.domain.conversation_context import ConversationStyle, ConversationTurn
+from app.domain.enums import Intent
 from app.llm.base import Responder, Response
-from app.llm.deterministic import DeterministicResponder
+from app.llm.claim_grounding import (
+    HONEST_NO_DATA,
+    answer_needs_deterministic_responder,
+    content_tokens,
+)
+from app.llm.deterministic import (
+    DeterministicResponder,
+    is_do_you_know_question,
+    is_farewell_message,
+    is_invent_memory_request,
+)
 from app.llm.prompt_builder import allowed_sources, build_prompt
+from app.policies.positive_topics import (
+    context_topic_grounding,
+    is_open_topic_request,
+    is_topic_offer,
+    mentioned_topics,
+    positive_topic_violation,
+)
 from app.repositories.conversation import ResponseSourceRef
 from app.retrieval.context_builder import AnswerContext
+from app.retrieval.entity_resolver import ResolutionKind
 
 logger = logging.getLogger(__name__)
+
+# Output contract shared with the prompt. Ollama turns this into a grammar, so
+# the model cannot omit ``answer``/``sources``, use a non-object shape, or cite
+# an id outside the current allowed set. The dynamic enum is derived from the
+# same context the prompt renders; validation still runs fail-closed afterwards.
+def _response_schema(
+    allowed: dict[tuple[str, str], str],
+) -> dict[str, Any]:
+    if allowed:
+        entity_types = sorted({entity_type for entity_type, _ in allowed})
+        entity_ids = sorted({entity_id for _, entity_id in allowed})
+        sources_schema: dict[str, Any] = {
+            "type": "array",
+            "description": "Only the exact ids listed under 'Allowed source ids'.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "entity_type": {
+                        "type": "string",
+                        "enum": entity_types,
+                        "description": "Allowed entity type from the context list.",
+                    },
+                    "entity_id": {
+                        "type": "string",
+                        "enum": entity_ids,
+                        "description": "Exact allowed UUID from the context list.",
+                    },
+                },
+                "required": ["entity_type", "entity_id"],
+                "additionalProperties": False,
+            },
+        }
+    else:
+        sources_schema = {
+            "type": "array",
+            "maxItems": 0,
+            "description": "Must be empty: the context has no stored data.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "entity_type": {"type": "string"},
+                    "entity_id": {"type": "string"},
+                },
+                "required": ["entity_type", "entity_id"],
+                "additionalProperties": False,
+            },
+        }
+    return {
+        "type": "object",
+        "properties": {
+            "answer": {
+                "type": "string",
+                "description": "Natural Spanish reply for the person.",
+            },
+            "sources": sources_schema,
+        },
+        "required": ["answer", "sources"],
+        "additionalProperties": False,
+    }
+
+
+# Safe, stable fallback categories. They describe why a turn degraded to the
+# deterministic responder without recording prompts, model text, source ids or
+# credentials, so an evaluation can aggregate them.
+INVALID_JSON_OR_SCHEMA = "invalid_json_or_schema"
+UNALLOWED_SOURCE = "unallowed_source"
+UNSUPPORTED_PERSONAL_CONTENT = "unsupported_personal_content"
+POSITIVE_TOPIC_OR_REPETITION = "positive_topic_or_repetition"
+TIMEOUT_OR_TRANSPORT = "timeout_or_transport"
+OTHER_INTERNAL = "other_internal"
 
 
 class InvalidModelOutput(ValueError):
     """Raised when model output cannot be turned into a trusted response."""
 
+    def __init__(
+        self, message: str, *, category: str = INVALID_JSON_OR_SCHEMA
+    ) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def _fallback_category(exc: Exception) -> str:
+    if isinstance(exc, InvalidModelOutput):
+        return exc.category
+    if isinstance(exc, httpx.HTTPError):
+        return TIMEOUT_OR_TRANSPORT
+    return OTHER_INTERNAL
+
 
 def _log_fallback(exc: Exception) -> None:
     """Log a safe fallback signal without prompts, bodies, or credentials.
 
-    Only the failure category/class and, when the provider answered with an
-    HTTP error, the status code are recorded. Exception messages are never
-    logged because they may embed model output, provider response text, or
-    request details.
+    Only the failure category and, when the provider answered with an HTTP
+    error, the status code are recorded. Exception messages are never logged
+    because they may embed model output, provider response text, or request
+    details.
     """
-    category = (
-        "invalid_model_output"
-        if isinstance(exc, InvalidModelOutput)
-        else "http_status_error"
-        if isinstance(exc, httpx.HTTPStatusError)
-        else type(exc).__name__
-    )
+    category = _fallback_category(exc)
     status = (
         exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
     )
+    extra: dict[str, Any] = {"fallback_category": category}
+    if status is not None:
+        extra["http_status"] = status
     if status is None:
         logger.warning(
             "LLM responder fell back to deterministic (category=%s)",
             category,
+            extra=extra,
         )
     else:
         logger.warning(
             "LLM responder fell back to deterministic (category=%s, http_status=%s)",
             category,
             status,
+            extra=extra,
         )
 
 
@@ -115,8 +221,241 @@ class OpenAICompatibleResponder(Responder):
                 {"role": "system", "content": prompt.system},
                 {"role": "user", "content": prompt.user},
             ]
-            raw = await self._call_model(messages)
-            return self._validate_response(raw, context)
+            raw = await self._call_model(
+                messages, allowed=allowed_sources(context)
+            )
+            response = self._validate_response(raw, context)
+            has_stored_data = bool(allowed_sources(context))
+            # A memory query may retrieve a weak candidate that the model
+            # rightly refuses. An explicit, source-free no-data answer is safe:
+            # it makes no personal claim and cannot misattribute a stored item.
+            source_free_memory_no_data = (
+                context.intent == Intent.memory_query
+                and bool(context.memories)
+                and not response.sources
+                and HONEST_NO_DATA.search(response.text) is not None
+                and not _asks_question(response.text)
+            )
+            if (
+                context.resolution == ResolutionKind.ambiguous
+                and context.candidates
+                and not _asks_question(response.text)
+            ):
+                raise InvalidModelOutput(
+                    "model did not ask which candidate the person means",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if has_stored_data and not response.sources:
+                if context.resolution == ResolutionKind.ambiguous and _asks_question(
+                    response.text
+                ):
+                    response = Response(
+                        text=response.text,
+                        sources=[
+                            ResponseSourceRef(
+                                "person", candidate.id, "candidate"
+                            )
+                            for candidate in context.candidates
+                        ],
+                    )
+                elif _only_subject_available(
+                    context
+                ) and HONEST_NO_DATA.search(response.text):
+                    response = Response(
+                        text=response.text,
+                        sources=[
+                            ResponseSourceRef(
+                                "person", context.person.id, "subject"
+                            )
+                        ],
+                    )
+                elif source_free_memory_no_data:
+                    pass
+                else:
+                    raise InvalidModelOutput(
+                        "model cited no context source although stored data exists",
+                        category=UNSUPPORTED_PERSONAL_CONTENT,
+                    )
+            if (
+                style is not None
+                and context.sensitive_topic_requested is None
+                and positive_topic_violation(
+                    answer=response.text,
+                    message=message or "",
+                    topics=style.positive_topics,
+                    offer_allowed=style.offer_positive_topics,
+                    grounded_text=context_topic_grounding(context),
+                )
+            ):
+                raise InvalidModelOutput(
+                    "model broke the bounded positive-topic suggestion policy",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and _NO_STORED_DATA_RECORD_CLAIM.search(response.text)
+            ):
+                raise InvalidModelOutput(
+                    "model claimed stored records although no stored data exists",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and context.sensitive_topic_requested is None
+                and _UNVERIFIED_ABSENCE_CLAIM.search(response.text)
+            ):
+                raise InvalidModelOutput(
+                    "model asserted an unverified absence or death without "
+                    "stored context",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if (
+                not has_stored_data
+                and _similar_to_previous(response.text, history)
+            ):
+                raise InvalidModelOutput(
+                    "model repeated the previous answer with no stored data",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and _repeats_previous_question(response.text, history)
+            ):
+                raise InvalidModelOutput(
+                    "model repeated a question from the previous turn",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and _parrots_current_message(response.text, message)
+            ):
+                raise InvalidModelOutput(
+                    "model repeated the person's message back to them",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and _FIRST_PERSON_EXPERIENCE.search(response.text)
+            ):
+                raise InvalidModelOutput(
+                    "model claimed a personal experience of its own",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            # When the person asks for a topic, an offer-shaped suggestion is
+            # exactly the bounded reply. Repetition, parroting, invented
+            # records and first-person/shared experience were already rejected
+            # above, so only a non-offer reply still breaks this contract.
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and is_open_topic_request(message or "")
+                and not is_topic_offer(response.text)
+            ):
+                raise InvalidModelOutput(
+                    "model did not follow the bounded topic-choice reply",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and is_do_you_know_question(message or "")
+            ):
+                raise InvalidModelOutput(
+                    "model did not answer an explicit do-you-know question "
+                    "with an honest no-data reply",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and is_invent_memory_request(message or "")
+            ):
+                raise InvalidModelOutput(
+                    "model answered an explicit request to invent a memory",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if (
+                not has_stored_data
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and is_farewell_message(message or "")
+                and _asks_question(response.text)
+            ):
+                raise InvalidModelOutput(
+                    "model asked a question after a farewell",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                style is not None
+                and style.positive_topics
+                and context.intent in (Intent.general_chat, Intent.unknown)
+                and context.sensitive_topic_requested is None
+            ):
+                chosen = mentioned_topics(message or "", style.positive_topics)
+                if chosen and not mentioned_topics(response.text, chosen):
+                    raise InvalidModelOutput(
+                        "model ignored the topic the person just chose",
+                        category=POSITIVE_TOPIC_OR_REPETITION,
+                    )
+            if context.accepted_offer and _repeats_offer_or_question(
+                response.text, history
+            ):
+                raise InvalidModelOutput(
+                    "model repeated the offer or asked again after acceptance",
+                    category=POSITIVE_TOPIC_OR_REPETITION,
+                )
+            if (
+                context.intent == Intent.memory_query
+                and not context.memories
+                and context.sensitive_topic_requested is None
+            ):
+                if (
+                    response.text.strip().endswith(("?", "¿"))
+                    or _MEMORY_NO_DATA_OFFER.search(response.text)
+                ):
+                    raise InvalidModelOutput(
+                        "model offered or asked a question with no stored memory",
+                        category=UNSUPPORTED_PERSONAL_CONTENT,
+                    )
+                if not HONEST_NO_DATA.search(response.text):
+                    raise InvalidModelOutput(
+                        "model claimed a memory although none is stored",
+                        category=UNSUPPORTED_PERSONAL_CONTENT,
+                    )
+            if (
+                context.intent == Intent.memory_query
+                and context.memories
+                and not source_free_memory_no_data
+                and not _memory_answer_is_grounded(
+                    response.text, context.memories
+                )
+            ):
+                raise InvalidModelOutput(
+                    "model memory answer added details absent from the source",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            if not source_free_memory_no_data and not _cites_answer_content(
+                context, response.sources
+            ):
+                raise InvalidModelOutput(
+                    "model did not cite the stored content its intent answers from",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            # An allowed source id proves the entity was visible, not that the
+            # written sentence is supported by it. Reject generated claims that
+            # the deterministic responder cannot verify.
+            if not source_free_memory_no_data and answer_needs_deterministic_responder(
+                context, response.text, message
+            ):
+                raise InvalidModelOutput(
+                    "generated answer cannot be deterministically grounded",
+                    category=UNSUPPORTED_PERSONAL_CONTENT,
+                )
+            return response
         except (httpx.HTTPError, InvalidModelOutput) as exc:
             # Fail closed: the deterministic responder handles this turn.
             _log_fallback(exc)
@@ -124,12 +463,29 @@ class OpenAICompatibleResponder(Responder):
                 context, message=message, history=history, style=style
             )
 
-    async def _call_model(self, messages: list[dict[str, str]]) -> str:
+    async def _call_model(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        allowed: dict[tuple[str, str], str] | None = None,
+    ) -> str:
         url = f"{self._base_url}/chat/completions"
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": 0,
+            # Ollama (and OpenAI structured outputs) can constrain generation to
+            # this exact object shape. That removes avoidable JSON/schema
+            # failures without trusting the output: every field, source id and
+            # policy check is still validated fail-closed below.
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "memo_reply",
+                    "strict": True,
+                    "schema": _response_schema(allowed or {}),
+                },
+            },
         }
         headers = {"Content-Type": "application/json"}
         if self._api_key:
@@ -146,47 +502,63 @@ class OpenAICompatibleResponder(Responder):
             content = response.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise InvalidModelOutput(
-                "model response did not match the chat completions shape"
+                "model response did not match the chat completions shape",
+                category=INVALID_JSON_OR_SCHEMA,
             ) from exc
         if not isinstance(content, str) or not content.strip():
-            raise InvalidModelOutput("model returned an empty answer")
+            raise InvalidModelOutput(
+                "model returned an empty answer", category=INVALID_JSON_OR_SCHEMA
+            )
         return content
 
     def _validate_response(self, raw: str, context: AnswerContext) -> Response:
         payload = _parse_json_payload(raw)
         if payload is None:
-            raise InvalidModelOutput("model output is not a JSON object")
+            raise InvalidModelOutput(
+                "model output is not a JSON object", category=INVALID_JSON_OR_SCHEMA
+            )
 
         answer = payload.get("answer")
         if not isinstance(answer, str) or not answer.strip():
-            raise InvalidModelOutput("model output has no text answer")
+            raise InvalidModelOutput(
+                "model output has no text answer", category=INVALID_JSON_OR_SCHEMA
+            )
 
         raw_sources = payload.get("sources", [])
         if not isinstance(raw_sources, list):
-            raise InvalidModelOutput("model output 'sources' is not a list")
+            raise InvalidModelOutput(
+                "model output 'sources' is not a list",
+                category=INVALID_JSON_OR_SCHEMA,
+            )
 
         allowed = allowed_sources(context)
         sources: list[ResponseSourceRef] = []
         for entry in raw_sources:
             if not isinstance(entry, dict):
-                raise InvalidModelOutput("model output contains a malformed source")
+                raise InvalidModelOutput(
+                    "model output contains a malformed source",
+                    category=INVALID_JSON_OR_SCHEMA,
+                )
             entity_type = entry.get("entity_type")
             entity_id = entry.get("entity_id")
             if not isinstance(entity_type, str) or not isinstance(entity_id, str):
                 raise InvalidModelOutput(
-                    "model output source is missing entity_type or entity_id"
+                    "model output source is missing entity_type or entity_id",
+                    category=INVALID_JSON_OR_SCHEMA,
                 )
             try:
                 parsed_id = uuid.UUID(entity_id)
             except (ValueError, TypeError) as exc:
                 raise InvalidModelOutput(
-                    f"model output has an invalid source id: {entity_id!r}"
+                    f"model output has an invalid source id: {entity_id!r}",
+                    category=INVALID_JSON_OR_SCHEMA,
                 ) from exc
             usage = allowed.get((entity_type, str(parsed_id)))
             if usage is None:
                 raise InvalidModelOutput(
                     "model output references a source not in the context: "
-                    f"{entity_type}/{entity_id}"
+                    f"{entity_type}/{entity_id}",
+                    category=UNALLOWED_SOURCE,
                 )
             sources.append(
                 ResponseSourceRef(
@@ -194,6 +566,231 @@ class OpenAICompatibleResponder(Responder):
                 )
             )
         return Response(text=answer.strip(), sources=sources)
+
+
+def _asks_question(text: str) -> bool:
+    return "?" in text or "¿" in text
+
+
+def _only_subject_available(context: AnswerContext) -> bool:
+    """True when CONTEXT carries only a verified subject person.
+
+    In that case an honest "I have no stored data" answer still concerns that
+    person, so adding the subject source keeps provenance and pronoun
+    continuity without accepting any factual claim.
+    """
+    if context.person is None:
+        return False
+    if context.intent not in (Intent.person_query, Intent.fact_query):
+        return False
+    return not (
+        context.candidates
+        or context.verified_relations
+        or context.probable_relations
+        or context.facts
+        or context.memories
+        or context.events
+        or context.media
+    )
+
+
+def _memory_answer_is_grounded(answer: str, memories) -> bool:
+    """True when the answer adds no content absent from the memory texts.
+
+    Memory narratives are exact stored text. This remains a defensive check
+    behind the deterministic memory-query gate.
+    """
+    allowed: set[str] = set()
+    for memory in memories:
+        allowed |= content_tokens(f"{memory.title or ''} {memory.narrative}")
+    return content_tokens(answer) <= allowed
+
+
+def _normalize_reply(text: str) -> str:
+    return " ".join(text.lower().split()).strip(" .!?¿¡")
+
+
+def _previous_assistant_text(
+    history: Sequence[ConversationTurn],
+) -> str | None:
+    previous = next(
+        (turn for turn in reversed(history) if turn.role == "assistant"),
+        None,
+    )
+    return previous.text if previous is not None else None
+
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+
+def _question_text(text: str) -> str:
+    """Return the question part of an answer, or the last sentence.
+
+    The model often prefixes a question with a repeated statement. Comparing
+    the whole answer then hides an exact duplicate question, so the comparison
+    is scoped to the part from the last opening question mark.
+    """
+    index = text.rfind("¿")
+    if index != -1:
+        return text[index:]
+    parts = _SENTENCE_BOUNDARY.split(text.strip())
+    return parts[-1] if parts else text
+
+
+def _similar_to_previous(answer: str, history: Sequence[ConversationTurn]) -> bool:
+    previous = _previous_assistant_text(history)
+    if previous is None:
+        return False
+    ratio = difflib.SequenceMatcher(
+        None,
+        _normalize_reply(answer),
+        _normalize_reply(previous),
+    ).ratio()
+    return ratio >= 0.9
+
+
+def _parrots_current_message(answer: str, message: str | None) -> bool:
+    """True when the answer's first sentence copies the person's message."""
+    if not message:
+        return False
+    first = _SENTENCE_BOUNDARY.split(answer.strip(), maxsplit=1)[0]
+    normalized_answer = _normalize_reply(first)
+    normalized_message = _normalize_reply(message)
+    if len(normalized_message) < 12:
+        return False
+    return (
+        difflib.SequenceMatcher(
+            None, normalized_answer, normalized_message
+        ).ratio()
+        >= 0.75
+    )
+
+
+def _repeats_previous_question(
+    answer: str, history: Sequence[ConversationTurn]
+) -> bool:
+    """Detect a near-duplicate follow-up question in recent turns.
+
+    Two content questions that share most of their words ("¿Te gusta leer
+    sobre playas y océanos?" / "¿Te interesa leer sobre playas y océanos?")
+    are repetition, not continuity. This is narrow on purpose: it requires
+    both turns to be questions and a high lexical overlap on the question
+    itself, not on a repeated prefix. The bounded responder history is small,
+    so checking every assistant question in it catches repeats separated by a
+    short non-question turn without growing the window.
+    """
+    if not _asks_question(answer):
+        return False
+    answer_question = _question_text(answer)
+    answer_tokens = content_tokens(answer_question)
+    for turn in reversed(history):
+        if turn.role != "assistant" or not _asks_question(turn.text):
+            continue
+        previous_question = _question_text(turn.text)
+        previous_tokens = content_tokens(previous_question)
+        if answer_tokens and previous_tokens:
+            overlap = len(answer_tokens & previous_tokens) / len(
+                answer_tokens | previous_tokens
+            )
+            if overlap >= 0.5:
+                return True
+        if (
+            difflib.SequenceMatcher(
+                None,
+                _normalize_reply(answer_question),
+                _normalize_reply(previous_question),
+            ).ratio()
+            >= 0.7
+        ):
+            return True
+    return False
+
+
+def _repeats_offer_or_question(
+    answer: str, history: Sequence[ConversationTurn]
+) -> bool:
+    """Detect the acceptance-loop failure in a model answer.
+
+    After the person accepts, a new question or a near-copy of a previous
+    assistant *offer* is not a continuation. A memory answer may legitimately
+    repeat the cited narrative when that is the only stored content, so a
+    near-copy is rejected only when the previous turn was itself an offer or
+    question.
+    """
+    stripped = answer.strip()
+    if stripped.endswith(("?", "¿")):
+        return True
+    previous = _previous_assistant_text(history)
+    if previous is None or not _is_offer_or_question(previous):
+        return False
+    return _similar_to_previous(answer, history)
+
+
+def _is_offer_or_question(text: str) -> bool:
+    return text.strip().endswith(("?", "¿")) or bool(
+        _MEMORY_NO_DATA_OFFER.search(text)
+    )
+
+
+def _cites_answer_content(
+    context: AnswerContext, sources: Sequence[ResponseSourceRef]
+) -> bool:
+    """Require the response to cite the stored content its intent answers from.
+
+    A fact/event/memory answer that cites only an unrelated entity is not a
+    grounded answer, even when its source id is allowed. This is a coverage
+    check, not a new source: validation above already rejected invented ids.
+    """
+    cited = {source.entity_type for source in sources}
+    if context.intent == Intent.fact_query and context.facts:
+        return "fact" in cited
+    if context.intent == Intent.event_query and context.events:
+        return "event" in cited
+    if context.intent == Intent.memory_query and context.memories:
+        return "memory" in cited
+    return True
+
+
+_MEMORY_NO_DATA_OFFER = re.compile(
+    r"\b(?:podemos|puedo|quieres|quiere|te\s+gustar[íi]a|te\s+apetece|"
+    r"te\s+interesa|si\s+quieres|te\s+cuento|hablamos\s+de)\b",
+    re.IGNORECASE,
+)
+
+# A spontaneous turn with no stored data must never imply that Memo holds the
+# person's projects, memories, records, or archives. This is deliberately
+# generic: it protects the trust boundary without naming any profile topic.
+_NO_STORED_DATA_RECORD_CLAIM = re.compile(
+    r"\b(?:proyect\w*|recuerd\w*|memori\w*|registr\w*|archiv\w*|guardad\w*)\b",
+    re.IGNORECASE,
+)
+
+# A companion cannot have its own past. A first-person past-experience claim
+# ("me ha gustado", "he ido", "fuimos", "estuve", "me pasó") is a false shared
+# or personal experience, not a conversational acknowledgement. Present-tense
+# states and opinions ("estoy bien", "me gusta el mar") are allowed.
+_FIRST_PERSON_EXPERIENCE = re.compile(
+    r"\b(?:yo\s+)?(?:tambi[eé]n\s+)?(?:me\s+ha\s+gustado|"
+    r"me\s+gustaron|he\s+(?:ido|estado|vivido|hecho|visto|visitado|"
+    r"pasado|disfrutado)|hemos\s+(?:ido|estado|vivido|hecho|visto|"
+    r"visitado|pasado|disfrutado)|me\s+(?:pas[oó]|pasaba|ocurri[oó]|"
+    r"sucedi[oó])|fui|fuimos|estuve|estuvimos|hice|"
+    r"hicimos|viv[ií]|vivimos|conoc[ií]|conocimos)\b",
+    re.IGNORECASE,
+)
+
+# A general-chat turn without stored data must not confirm that an unresolved
+# person is absent or dead. The pattern is deliberately narrow: it matches
+# assertions such as "ya no está", "murió" or "falleció", and not the noun
+# "muerte" used by the careful sensitive-topic copy.
+_UNVERIFIED_ABSENCE_CLAIM = re.compile(
+    r"\b(?:ya\s+)?no\s+est[aá](?=\s*[.!?]|\s*$)"
+    r"|\bno\s+est[aá]\s+(?:con\s+nosotros|entre\s+nosotros|aqu[ií]|vivo|viva)\b"
+    r"|\b(?:ha\s+)?(?:muerto|fallecido)\b"
+    r"|\b(?:muri[oó]|falleci[oó])\b"
+    r"|\bse\s+nos\s+fue\b",
+    re.IGNORECASE,
+)
 
 
 def _parse_json_payload(raw: str) -> dict[str, Any] | None:

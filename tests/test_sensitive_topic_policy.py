@@ -16,6 +16,12 @@ TOPIC = SensitiveTopic(
     triggers=("murió",),
 )
 
+PERSON_TOPIC = SensitiveTopic(
+    topic="la muerte de Antonio",
+    handling="Do not initiate; redirect gently if asked.",
+    triggers=("muerte", "fallecimiento", "hospital", "despedida"),
+)
+
 
 def test_matches_full_phrase_theme_and_subject_only_cases() -> None:
     assert matches_topic("Háblame del fallecimiento de Miguel.", TOPIC) is True
@@ -84,3 +90,59 @@ def test_answer_leak_detection_respects_the_requested_topic() -> None:
 
     assert answer_leaks_blocked_topic("Miguel murió en 1998", blocked) is True
     assert answer_leaks_blocked_topic("Miguel murió en 1998", requested) is False
+
+
+def test_generic_sensitive_vocabulary_does_not_request_person_topic() -> None:
+    evaluation = evaluate("Rosa estuvo en el hospital", (PERSON_TOPIC,))
+
+    assert evaluation.generic_reference is True
+    assert evaluation.requested is not None
+    assert evaluation.requested.topic == "un tema sensible"
+    assert evaluation.requested.topic != "la muerte de Antonio"
+    assert evaluation.blocked == (PERSON_TOPIC,)
+
+
+def test_person_reference_and_explicit_configured_topic_still_request_it() -> None:
+    assert (
+        evaluate("Antonio estuvo en el hospital", (PERSON_TOPIC,)).requested
+        == PERSON_TOPIC
+    )
+    assert evaluate("la muerte de Antonio", (PERSON_TOPIC,)).requested == PERSON_TOPIC
+    assert evaluate("Antonio murió", (PERSON_TOPIC,)).requested == PERSON_TOPIC
+
+
+def test_generic_reference_context_never_carries_the_personal_label() -> None:
+    context = AnswerContext(
+        intent=Intent.general_chat,
+        memories=[
+            MemoryItem(
+                entity_id=uuid.uuid4(),
+                title="La despedida de Antonio",
+                narrative="Carmen recuerda la muerte de Antonio.",
+                memory_status=MemoryStatus.consolidated,
+                epistemic=EpistemicKind.memory,
+            )
+        ],
+    )
+    evaluation = evaluate("Rosa estuvo en el hospital", (PERSON_TOPIC,))
+
+    result = apply_to_context(context, evaluation)
+
+    assert result.sensitive_topic_requested == "un tema sensible"
+    assert result.sensitive_topic_generic is True
+    assert "la muerte de Antonio" not in (result.sensitive_topic_requested or "")
+    # The filter still withholds content that mentions the blocked topic.
+    assert result.memories == []
+    assert (
+        answer_leaks_blocked_topic("Carmen recuerda la muerte de Antonio.", evaluation)
+        is True
+    )
+
+
+def test_non_person_topics_keep_generic_vocabulary_matching() -> None:
+    family_debts = SensitiveTopic(topic="deudas de la familia", triggers=("deuda",))
+
+    evaluation = evaluate("Prefiero no hablar de deudas", (family_debts,))
+
+    assert evaluation.generic_reference is False
+    assert evaluation.requested == family_debts
