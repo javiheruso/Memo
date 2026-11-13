@@ -16,6 +16,7 @@ from app.schemas.person import PersonCreate
 from app.schemas.profile import ConversationProfileCreate, SensitiveTopicCreate
 from app.schemas.source import SourceCreate
 from app.services.conversation import ConversationService
+from tests.fixtures.universe import SeedUniverse
 
 
 async def _seed_family_memories(session: AsyncSession):
@@ -160,3 +161,61 @@ async def test_service_suppresses_responder_that_initiates_blocked_topic(
     assert result.answer == SPONTANEOUS_SUPPRESSION_REPLY
     assert "fallecimiento" not in result.answer.lower()
     assert result.sources == []
+
+
+async def _seed_fictional_health_profile(
+    session: AsyncSession, seed: SeedUniverse
+) -> None:
+    await ConversationProfileRepository(session).create(
+        ConversationProfileCreate(
+            person_id=seed.person_ids["carmen"],
+            preferred_name="Carmen",
+            positive_topics=["la playa"],
+            sensitive_topics=[
+                SensitiveTopicCreate(
+                    topic="la muerte de Antonio",
+                    handling="Do not initiate; redirect gently if asked.",
+                    triggers=["murió", "muerte", "fallecimiento"],
+                ),
+                SensitiveTopicCreate(
+                    topic="la enfermedad de Antonio",
+                    handling="Do not initiate; redirect gently if asked.",
+                    triggers=["hospital", "enfermedad", "enfermo", "enferma"],
+                ),
+            ],
+            is_fictional=True,
+            is_active=True,
+        )
+    )
+
+
+async def test_fictional_profile_keeps_death_and_illness_separate(
+    db_session: AsyncSession, seed: SeedUniverse
+) -> None:
+    await _seed_fictional_health_profile(db_session, seed)
+    service = ConversationService(
+        db_session, DeterministicResponder(), embedder=DeterministicEmbedder()
+    )
+
+    illness = await service.handle_user_message("Antonio estuvo en el hospital.")
+    assert "enfermedad de Antonio" in illness.answer
+    assert "muerte" not in illness.answer.lower()
+    assert "No quiero inventar detalles" in illness.answer
+    assert illness.sources == []
+
+    generic = await service.handle_user_message(
+        "Rosa estuvo en el hospital.",
+        conversation_id=illness.conversation_id,
+    )
+    assert "Antonio" not in generic.answer
+    assert "muerte" not in generic.answer.lower()
+    assert "No quiero inventar detalles" in generic.answer
+    assert generic.sources == []
+
+    death = await service.handle_user_message(
+        "¿Te acuerdas de la muerte de Antonio?",
+        conversation_id=generic.conversation_id,
+    )
+    assert "muerte de Antonio" in death.answer
+    assert "No quiero inventar detalles" in death.answer
+    assert death.sources == []
