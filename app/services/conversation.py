@@ -482,9 +482,30 @@ class ConversationService:
             follow_up_topic: str | None = None
             relative_follow_up: RelativeFollowUpQuery | None = None
             interpreter_applied = False
-            if continuation is None and route.intent in (
-                Intent.general_chat,
-                Intent.event_query,
+            # "No, Eustaquio no; Antonio" only corrects an immediately previous
+            # unresolved person lookup whose term matches the rejected name.
+            # The new name goes through the normal resolver, so ambiguity and
+            # unknown names never become a guess or a verified fact.
+            correction_resolution: Resolution | None = None
+            if continuation is None and route.intent == Intent.general_chat:
+                correction = self._router.route_person_correction(text)
+                if correction is not None:
+                    unresolved_term = self._unresolved_lookup_term(window)
+                    if unresolved_term is not None and surfaces_match(
+                        unresolved_term, correction.old_term
+                    ):
+                        candidate = await self._resolver.resolve(correction.new_term)
+                        if candidate.kind == ResolutionKind.resolved:
+                            correction_resolution = candidate
+                            follow_up_resolution = candidate
+                            route = RouteResult(
+                                intent=Intent.person_query,
+                                term=correction.new_term,
+                            )
+            if (
+                continuation is None
+                and correction_resolution is None
+                and route.intent in (Intent.general_chat, Intent.event_query)
             ):
                 follow_up_route = self._router.route_fact_follow_up(text)
                 if follow_up_route is not None:
@@ -926,6 +947,46 @@ class ConversationService:
         ):
             return route.term
         return None
+
+    def _unresolved_lookup_term(self, window: ConversationWindow | None) -> str | None:
+        """Return the term of an immediately previous unresolved person lookup.
+
+        The correction is state-gated: the latest assistant turn must be a
+        person query that resolved nobody, and the user turn before it must be
+        an explicit personal lookup with a term. An ambiguous answer carries
+        candidate sources and therefore never qualifies.
+        """
+        if window is None:
+            return None
+        turn = window.latest_assistant_turn
+        if turn is None or turn.intent != Intent.person_query.value:
+            return None
+        if any(source.entity_type == "person" for source in turn.sources):
+            return None
+
+        turns = list(window.turns)
+        index = next(
+            (
+                position
+                for position in range(len(turns) - 1, -1, -1)
+                if turns[position].message_id == turn.message_id
+            ),
+            None,
+        )
+        if index is None:
+            return None
+        previous_user = next(
+            (item for item in reversed(turns[:index]) if item.speaker == "user"),
+            None,
+        )
+        if previous_user is None:
+            return None
+        if not self._router.is_personal_lookup_request(previous_user.text):
+            return None
+        previous_route = self._router.route(previous_user.text)
+        if previous_route.intent != Intent.person_query or not previous_route.term:
+            return None
+        return previous_route.term
 
     def _project_provisional_referent(
         self,

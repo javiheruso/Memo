@@ -418,3 +418,27 @@ def test_relative_follow_up_rejects_extra_content_and_other_relatives():
         "Hola",
     ):
         assert router.route_relative_follow_up(phrase) is None, phrase
+
+
+def test_parses_narrow_person_correction_shape():
+    router = IntentRouter()
+    correction = router.route_person_correction("No, Eustaquio no; Antonio.")
+    assert correction is not None
+    assert correction.old_term == "Eustaquio"
+    assert correction.new_term == "Antonio"
+
+    food = router.route_person_correction("No, café no; té")
+    assert food is not None
+    assert food.old_term == "café"
+    assert food.new_term == "té"
+
+
+def test_person_correction_rejects_other_shapes_and_repeated_names():
+    router = IntentRouter()
+    for phrase in (
+        "No, Eustaquio no, Antonio",
+        "No, Eustaquio; Antonio",
+        "No, Eustaquio no; Eustaquio",
+        "Hola",
+    ):
+        assert router.route_person_correction(phrase) is None, phrase

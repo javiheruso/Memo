@@ -261,6 +261,15 @@ _RELATIVE_FOLLOW_UP = re.compile(
     r"^\s*[¿¡]?\s*(?:y\s+)?su\s+(?P<role>hija|hijo|madre|padre)\s*[?.!¿¡]*$",
     re.IGNORECASE,
 )
+# A narrow correction of a previous personal lookup: "No, Eustaquio no;
+# Antonio". The state gate in the service requires an immediately previous
+# unresolved person lookup and that the old name matches it. The router only
+# parses the two name-shaped slots.
+_PERSON_CORRECTION = re.compile(
+    rf"^\s*[¿¡]?\s*no\s*,\s*(?P<old>{_NAME_CANDIDATE})\s+no\s*;\s*"
+    rf"(?P<new>{_NAME_CANDIDATE})\s*[.!?]*$",
+    re.IGNORECASE,
+)
 # Natural Spanish labels used when a carried-topic follow-up has no matching
 # data. They are noun phrases so "No sé nada de <label> de <person> todavía"
 # reads naturally without exposing storage or system internals.
@@ -477,6 +486,14 @@ def _has_explicit_request_cue(text: str) -> bool:
         if _EVENT_MARKERS.search(normalized):
             return True
     return False
+
+
+@dataclass(frozen=True)
+class PersonCorrection:
+    """The two name slots of "No, <old> no; <new>"."""
+
+    old_term: str
+    new_term: str
 
 
 @dataclass(frozen=True)
@@ -736,6 +753,26 @@ class IntentRouter:
             role=role,
             active_is_parent=role in ("hija", "hijo"),
         )
+
+    def route_person_correction(self, text: str) -> PersonCorrection | None:
+        """Parse "No, <old> no; <new>" without resolving or trusting either name.
+
+        The service owns the state gate: the correction only applies directly
+        after an unresolved personal lookup whose term matches ``old_term``.
+        """
+        normalized = text.strip()
+        if not normalized:
+            return None
+        match = _PERSON_CORRECTION.match(normalized)
+        if match is None:
+            return None
+        old_term = _clean_name_candidate(match.group("old"))
+        new_term = _clean_name_candidate(match.group("new"))
+        if old_term is None or new_term is None:
+            return None
+        if _fold(old_term) == _fold(new_term):
+            return None
+        return PersonCorrection(old_term=old_term, new_term=new_term)
 
     def route_pronoun_follow_up(self, text: str) -> RouteResult | None:
         """Classify a pronoun-only request for the previous resolved person.
