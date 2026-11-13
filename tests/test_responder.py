@@ -364,6 +364,30 @@ async def test_hint_ladder_stops_at_first_working_tier():
 
 
 @pytest.mark.asyncio
+async def test_child_of_relation_renders_neutral_and_keeps_stored_direction():
+    relation = _verified_relation(
+        other="Carmen", relationship_type=RelationshipType.child_of
+    )
+    context = AnswerContext(
+        intent=Intent.person_query,
+        term="María",
+        resolution=ResolutionKind.resolved,
+        person=_person("María"),
+        verified_relations=[relation],
+    )
+
+    response = await responder.respond(context)
+
+    assert response.text == "María era descendiente de Carmen."
+    assert "hijo" not in response.text
+    assert "hija" not in response.text
+    assert ("relationship", relation.entity_id, "verified_fact") in {
+        (source.entity_type, source.entity_id, source.usage_type)
+        for source in response.sources
+    }
+
+
+@pytest.mark.asyncio
 async def test_general_chat_does_not_touch_personal_context():
     context = AnswerContext(intent=Intent.general_chat, term=None)
     response = await responder.respond(context)

@@ -968,7 +968,7 @@ async def test_person_fact_attributed_to_another_person_falls_back() -> None:
     async with _client_for(payload) as client:
         response = await _responder(client).respond(context)
 
-    assert response.text == "Elena Ruiz era hijo de Tomás Vidal."
+    assert response.text == "Elena Ruiz era descendiente de Tomás Vidal."
     assert "arquitect" not in response.text
     assert {source.entity_type for source in response.sources} == {
         "person",
@@ -1001,8 +1001,8 @@ async def test_reversed_relationship_claim_falls_back_to_stored_direction() -> N
     async with _client_for(payload) as client:
         response = await _responder(client).respond(context)
 
-    assert response.text == "Elena Ruiz era hijo de Tomás Vidal."
-    assert "Tomás Vidal era hijo" not in response.text
+    assert response.text == "Elena Ruiz era descendiente de Tomás Vidal."
+    assert "Tomás Vidal era descendiente" not in response.text
 
 
 @pytest.mark.asyncio

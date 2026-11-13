@@ -46,7 +46,9 @@ _RELATION_LABELS: dict[RelationshipType, str] = {
     RelationshipType.partner_of: "pareja de",
     RelationshipType.sibling_of: "hermano de",
     RelationshipType.parent_of: "progenitor de",
-    RelationshipType.child_of: "hijo de",
+    # The stored type is directed but carries no gender, so the deterministic
+    # render must not infer "hijo"/"hija" from the relation or the name.
+    RelationshipType.child_of: "descendiente de",
     RelationshipType.grandparent_of: "abuelo de",
     RelationshipType.grandchild_of: "nieto de",
     RelationshipType.friend_of: "amigo de",
